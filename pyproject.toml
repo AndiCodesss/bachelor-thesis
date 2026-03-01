@@ -1,0 +1,22 @@
+[project]
+name = "nq-alpha"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "lightgbm>=4.6.0",
+    "numpy>=2.0.0",
+    "polars>=1.38.1",
+    "portalocker>=3.2.0",
+    "pytest>=9.0.2",
+    "pyyaml>=6.0.3",
+    "ruff>=0.15.1",
+    "scikit-learn>=1.8.0",
+    "xgboost>=3.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (integration tests that hit real data)",
+]

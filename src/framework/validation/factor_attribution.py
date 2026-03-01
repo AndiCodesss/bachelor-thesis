@@ -1,0 +1,182 @@
+"""Factor attribution: decompose strategy returns into market factor exposures."""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import polars as pl
+
+from src.framework.data.constants import (
+    FACTOR_MIN_DAYS,
+    FACTOR_R2_THRESHOLD,
+    FACTOR_SIGNIFICANCE_THRESHOLD,
+)
+
+
+def _normal_cdf(x: float) -> float:
+    """Standard normal CDF via math.erfc."""
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
+def compute_factor_returns(bars: pl.DataFrame) -> pl.DataFrame:
+    """Compute daily factor returns from OHLCV bars.
+
+    Factors: market return, volatility change, momentum (prior-day return).
+    """
+    assert len(bars) > 0, "empty bars DataFrame"
+    for col in ("ts_event", "open", "high", "low", "close", "volume"):
+        assert col in bars.columns, f"missing column: {col}"
+
+    # Compute bar-level returns for volatility calculation
+    daily = (
+        bars.sort("ts_event")
+        .with_columns(pl.col("ts_event").dt.date().alias("date"))
+        .group_by("date")
+        .agg(
+            pl.col("close").first().alias("first_close"),
+            pl.col("close").last().alias("last_close"),
+            # Std of intraday bar returns for realized volatility
+            (pl.col("close").pct_change().std()).alias("realized_vol"),
+        )
+        .sort("date")
+    )
+
+    daily = daily.with_columns(
+        # Market return: daily close-to-close
+        ((pl.col("last_close") / pl.col("first_close")) - 1.0).alias("market_return"),
+    ).with_columns(
+        # Volatility change: today's realized vol minus yesterday's
+        (pl.col("realized_vol") - pl.col("realized_vol").shift(1)).alias("volatility_change"),
+        # Momentum: prior-day return
+        ((pl.col("last_close") / pl.col("first_close")) - 1.0).shift(1).alias("momentum"),
+    )
+
+    return daily.select("date", "market_return", "volatility_change", "momentum")
+
+
+def factor_attribution(
+    trades: pl.DataFrame,
+    bars: pl.DataFrame,
+    min_days: int = FACTOR_MIN_DAYS,
+) -> dict:
+    """Decompose strategy daily PnL into factor exposures via OLS.
+
+    Returns attribution dict with alpha, betas, t-stats, r-squared, and verdict.
+    """
+    if len(trades) == 0:
+        return {"available": False, "verdict": "INSUFFICIENT_DATA"}
+
+    # Compute strategy daily PnL from trades
+    # trades must have entry_time and a dollar PnL or enough info to compute one
+    assert "entry_time" in trades.columns, "trades missing entry_time"
+
+    # Compute net PnL per trade if not already present
+    if "pnl_dollars" in trades.columns:
+        pnl_col = "pnl_dollars"
+    else:
+        # Derive from entry/exit prices, direction, size (matches metrics.py pattern)
+        from src.framework.data.constants import TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
+
+        trades = trades.with_columns(
+            (
+                (pl.col("exit_price") - pl.col("entry_price"))
+                * pl.col("direction")
+                / TICK_SIZE
+                * TICK_VALUE
+                * pl.col("size")
+                - pl.col("size") * TOTAL_COST_RT
+            ).alias("_net_pnl")
+        )
+        pnl_col = "_net_pnl"
+
+    # Group by entry date to get daily strategy PnL
+    strategy_daily = (
+        trades.with_columns(pl.col("entry_time").dt.date().alias("date"))
+        .group_by("date")
+        .agg(pl.col(pnl_col).sum().alias("strategy_pnl"))
+        .sort("date")
+    )
+
+    # Compute factor returns from bars
+    factors = compute_factor_returns(bars)
+
+    # Join on date
+    joined = strategy_daily.join(factors, on="date", how="inner").drop_nulls()
+
+    n_days = len(joined)
+    if n_days < min_days:
+        return {"available": False, "verdict": "INSUFFICIENT_DATA", "n_days": n_days}
+
+    # Extract arrays for OLS
+    y = joined["strategy_pnl"].to_numpy().astype(np.float64)
+    x_mkt = joined["market_return"].to_numpy().astype(np.float64)
+    x_vol = joined["volatility_change"].to_numpy().astype(np.float64)
+    x_mom = joined["momentum"].to_numpy().astype(np.float64)
+
+    # Design matrix: [intercept, market, volatility, momentum]
+    X = np.column_stack([np.ones(n_days), x_mkt, x_vol, x_mom])
+
+    # OLS via least squares
+    coeffs, residuals_arr, rank, sv = np.linalg.lstsq(X, y, rcond=None)
+
+    alpha_daily = float(coeffs[0])
+    betas = coeffs[1:]
+
+    # Fitted values and residuals
+    y_hat = X @ coeffs
+    resid = y - y_hat
+
+    # R-squared
+    ss_res = float(np.sum(resid ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # Standard errors: se = sqrt(diag(sigma^2 * (X'X)^-1))
+    dof = max(n_days - X.shape[1], 1)
+    sigma2 = ss_res / dof
+    try:
+        cov = sigma2 * np.linalg.inv(X.T @ X)
+        se = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    except np.linalg.LinAlgError:
+        se = np.ones(X.shape[1])
+
+    # t-statistics and p-values
+    t_stats = np.where(se > 1e-12, coeffs / se, 0.0)
+    p_values = np.array([2.0 * (1.0 - _normal_cdf(abs(float(t)))) for t in t_stats])
+
+    # Residual Sharpe (annualized)
+    resid_std = float(np.std(resid, ddof=1)) if n_days > 1 else 0.0
+    resid_mean = float(np.mean(resid))
+    residual_sharpe = (resid_mean / resid_std * math.sqrt(252)) if resid_std > 1e-12 else 0.0
+
+    # Annualized alpha
+    alpha_annualized = alpha_daily * 252.0
+
+    # Verdict
+    alpha_t = float(t_stats[0])
+    any_factor_sig = any(abs(float(t_stats[i])) > FACTOR_SIGNIFICANCE_THRESHOLD for i in range(1, 4))
+
+    if r_squared < FACTOR_R2_THRESHOLD and abs(alpha_t) > FACTOR_SIGNIFICANCE_THRESHOLD:
+        verdict = "PURE_ALPHA"
+    elif r_squared >= FACTOR_R2_THRESHOLD and any_factor_sig:
+        verdict = "FACTOR_EXPOSED"
+    else:
+        verdict = "FACTOR_EXPOSED" if r_squared >= FACTOR_R2_THRESHOLD else "PURE_ALPHA"
+
+    factor_names = ["market", "volatility", "momentum"]
+
+    return {
+        "available": True,
+        "alpha_daily": alpha_daily,
+        "alpha_annualized": alpha_annualized,
+        "alpha_t_stat": float(t_stats[0]),
+        "alpha_pvalue": float(p_values[0]),
+        "factor_betas": {name: float(betas[i]) for i, name in enumerate(factor_names)},
+        "factor_t_stats": {name: float(t_stats[i + 1]) for i, name in enumerate(factor_names)},
+        "factor_pvalues": {name: float(p_values[i + 1]) for i, name in enumerate(factor_names)},
+        "r_squared": r_squared,
+        "residual_sharpe": residual_sharpe,
+        "n_days": n_days,
+        "verdict": verdict,
+    }

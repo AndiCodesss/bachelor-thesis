@@ -1,0 +1,37 @@
+# Results and models
+results/
+models/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+
+# Claude local files
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/agent-memory-local/
+
+# Data (too large for git)
+data/
+*.parquet
+
+# Research runtime state (ephemeral)
+research/.state/
+!research/.state/.gitkeep
+
+# Codex backup
+codex_auth_backup/

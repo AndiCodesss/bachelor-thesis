@@ -1,0 +1,22 @@
+mission_name: test-mission
+objective: "Smoke test autonomous research plumbing"
+started_at: "2026-02-18T00:00:00Z"
+
+bar_configs:
+  - vol_2000
+splits_allowed:
+  - validate
+feature_group: all  # "ohlcv" for Group A, "all" for Group B (OHLCV + MBP1)
+
+target_sharpe: 1.0
+min_trade_count: 10
+
+max_experiments: 5
+max_runtime_hours: 1
+kill_criteria:
+  FAIL: 3
+  ERROR: 2
+
+current_focus:
+  - "Pipeline smoke test"
+

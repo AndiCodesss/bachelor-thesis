@@ -1,0 +1,26 @@
+mission_name: alpha-discovery
+objective: "Find robust, event-driven NQ scalp candidates on validate split"
+started_at: "2026-02-18T00:00:00Z"
+
+bar_configs:
+  - tick_610
+  - volume_2000
+  - time_1m
+splits_allowed:
+  - validate
+feature_group: all  # "ohlcv" for Group A, "all" for Group B (OHLCV + MBP1)
+
+target_sharpe: 1.5
+min_trade_count: 30
+
+max_experiments: 100
+max_runtime_hours: 48
+kill_criteria:
+  FAIL: 10
+  ERROR: 5
+
+current_focus:
+  - "Orderflow divergence reversals"
+  - "EMA turn events with quality gates"
+  - "Volatility spike fades"
+

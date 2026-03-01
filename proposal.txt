@@ -1,0 +1,318 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{hyperref}
+\usepackage{setspace}
+\usepackage{csquotes}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage[round, authoryear]{natbib}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6em}
+\onehalfspacing
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    filecolor=magenta,
+    urlcolor=blue,
+    citecolor=blue,
+}
+
+\begin{document}
+
+% === TITLE ===
+\begin{center}
+    \Large\textbf{Proposal for the Bachelor's Thesis}\\[0.6cm]
+    \large\textbf{Do Microstructure Features Help LLMs Find Better Alpha?\\
+    An A/B Experiment Comparing OHLCV and MBP1 Data\\
+    in Autonomous Intraday Signal Discovery}\\[1.2cm]
+\end{center}
+
+\begin{tabular}{ll}
+    \textbf{Name:}                & Andreas Oberd{\"o}rfer \\
+    \textbf{Student ID:}          & h12217505 \\
+    \textbf{Study Program:}       & Bachelor in Information Systems (Wirtschaftsinformatik) \\
+    \textbf{University:}          & Vienna University of Economics and Business (WU Wien) \\
+    \textbf{Date:}                & \today \\
+\end{tabular}
+
+\vspace{1cm}
+
+\noindent
+\textit{This thesis investigates whether autonomous LLM agents discover better intraday trading signals when given microstructure features derived from Level-1 market data (MBP1) compared to standard OHLCV price bars. A controlled A/B experiment on NQ futures measures the difference in out-of-sample performance, discovery efficiency, and feature attribution.}
+
+\vspace{0.5cm}
+
+% ============================================================
+\section{Motivation and Problem Statement}
+% ============================================================
+
+\subsection*{How Electronic Markets Work}
+
+Every electronic exchange operates through the same basic mechanism: a \emph{limit order book}. To understand the data this thesis works with, it helps to start with the two fundamental order types.
+
+A \textbf{market order} says: ``I want to buy (or sell) now, at whatever the best available price is.'' It executes immediately but offers no control over the price. A \textbf{limit order} says: ``I want to buy (or sell), but only at this price or better.'' If no counterparty is available at that price, the order does not execute---instead, it \emph{rests} in the order book, waiting for someone to trade against it. A resting buy limit order is called a \emph{bid}; a resting sell limit order is called an \emph{ask} (or \emph{offer}). The collection of all resting bids and asks, arranged by price level and sorted by arrival time, forms the \textbf{limit order book} (LOB). The LOB is the central data structure of modern electronic markets \citep{gould2013limit, hasbrouck2007}.
+
+At any moment, the highest bid and the lowest ask define the \textbf{best bid and offer} (BBO), also called the \emph{top of book}. The difference between them is the \emph{bid--ask spread}. When a market order arrives, it ``takes'' liquidity from the top of the book: a market buy order matches against the lowest resting ask; a market sell matches against the highest resting bid. A trade occurs, and the order book updates. This continuous interplay between resting limit orders (liquidity supply) and incoming market orders (liquidity demand) is the process through which prices are formed in real time \citep{kyle1985continuous, ohara2015high}.
+
+\subsection*{Two Levels of Observable Data}
+
+This trading process generates data at different levels of granularity.
+
+\textbf{OHLCV bars.} The most common representation aggregates all activity within a fixed time window (e.g., one minute) into five numbers: the Open, High, Low, and Close prices, plus the total Volume traded. OHLCV bars are simple and widely available, but they discard almost all information about \emph{how} those prices came to be---which side was more aggressive, how the resting orders shifted, how deep the book was at any point.
+
+\textbf{Level-1 quote and trade data.} One level deeper, exchanges broadcast a continuous stream of updates to the best bid and best ask (price and size), together with every individual trade (price, size, timestamp, and which side initiated it). In the academic literature, this is called \emph{Level-1 market data} or BBO data \citep{hasbrouck2007}. The commercial data vendor Databento provides this feed under the schema name \textbf{MBP1} (Market-by-Price Level~1), normalised across exchanges and timestamped to nanosecond precision. MBP1 does not include the full depth of the order book (that would be Level-2 or Level-3), but it captures the most informative layer: the top of the book plus the complete trade tape with aggressor-side flags.
+
+\subsection*{Why MBP1 Contains Richer Signals}
+
+The market microstructure literature---the academic field that studies how trading mechanisms translate supply and demand into prices \citep{hasbrouck2007}---has shown that Level-1 data encodes predictive signals that OHLCV bars lose entirely.
+
+\citet{cont2014price} introduce \emph{Order Flow Imbalance} (OFI): the net change in resting depth at the best bid minus the net change at the best ask over a given interval. Intuitively, if bids are being added faster than asks, buying pressure is building. The authors show that OFI predicts short-term price changes with $R^2$ values above 50\,\% for most of the 50 NYSE stocks in their sample---far better than trade-volume-based measures. \citet{stoikov2018micro} proposes the \emph{Micro-Price}, which weights the best bid and ask by the size on the opposite side of the book. This produces a mid-price estimator that reacts to shifts in the supply--demand balance before any trade occurs. \citet{cont2023cross} extend OFI to a cross-asset setting, showing that quote imbalances in one stock predict price moves in related stocks. For textbook treatments of how such microstructure signals are used in algorithmic trading, see \citet{cartea2015algorithmic} and \citet{bouchaud2018trades}.
+
+The pattern across these studies is consistent: the best bid and ask---and the way they change over time---carry substantial information about where the price is headed next. An OHLCV bar cannot capture this because it only records the outcome, not the process.
+
+\subsection*{LLM Agents as Autonomous Alpha Researchers}
+
+In quantitative finance, \emph{alpha} refers to a trading signal that predicts future returns. \emph{Alpha discovery} is the process of searching for such signals---traditionally done by human quant researchers who write hypotheses, code them into testable strategies, run backtests, and iterate.
+
+Large Language Models (LLMs) can now automate much of this workflow. When placed in an agentic loop---write Python code, execute it, read the backtesting results, revise---an LLM can explore a large space of signal hypotheses without continuous human supervision. Several recent systems demonstrate this capability. \citet{wang2024quantagent} build QuantAgent, where an LLM writer generates alpha factors, a judge agent provides feedback, and real-market backtesting results refine the process over successive rounds. \citet{wang2023alphagpt} propose Alpha-GPT, a human-AI collaborative system that placed in the top~10 out of over 41\,000 teams in the 2024 WorldQuant International Quant Championship. \citet{tang2025alphaagent} introduce AlphaAgent, which adds structural constraints to prevent overfitting and alpha decay. \citet{ding2024llmtrading} provide a comprehensive survey of LLM-based financial agents, covering architectures from single-model traders \citep{zhang2024stockagent} to multi-agent frameworks \citep{xiao2024tradingagents}.
+
+\subsection*{The Gap}
+
+All of these systems operate on the same input data: OHLCV bars, technical indicators derived from them, or unstructured text such as news and earnings transcripts. None has tested what happens when the LLM agent is given \emph{microstructure features}---the richer signals derived from Level-1 quote and trade data described above.
+
+This is the gap the thesis addresses. The argument is straightforward:
+
+\begin{displayquote}
+\emph{MBP1 data contains faster and richer signals about supply--demand dynamics than OHLCV bars. If an LLM agent can exploit any informational edge in its input space, then giving it microstructure features should lead to measurably better alpha than restricting it to OHLCV alone.}
+\end{displayquote}
+
+% ============================================================
+\section{Research Question}
+% ============================================================
+
+The thesis follows the Design Science Research paradigm \citep{hevner2004design}: an IT artifact---the LLM-driven alpha-discovery platform---is built, and its utility is evaluated through a controlled experiment. The central research question is:
+
+\begin{displayquote}
+\textit{To what extent does access to MBP1-derived microstructure features---such as Order Flow Imbalance, Micro-Price, and Cumulative Volume Delta---improve the ability of an autonomous LLM agent to discover profitable and robust intraday trading signals, compared to a baseline restricted to OHLCV data?}
+\end{displayquote}
+
+Three sub-questions make this testable:
+
+\begin{enumerate}[label=\textbf{SQ\arabic*:}, leftmargin=2.5cm]
+    \item Does the microstructure-augmented agent produce strategies with higher out-of-sample Sharpe Ratios than the OHLCV-only agent?
+    \item Does access to microstructure features reduce the number of iterations the agent needs to find a strategy that passes a validation gauntlet?
+    \item Which microstructure features appear most frequently in surviving strategies, and what does this tell us about their relative informational value?
+\end{enumerate}
+
+SQ1 tests whether the edge exists. SQ2 tests whether richer data also speeds up discovery. SQ3 provides interpretability, linking the results back to the microstructure theory.
+
+% ============================================================
+\section{Methodology and Research Design}
+% ============================================================
+
+\subsection{The Platform}
+
+The experiment runs on an existing Python-based alpha-research platform built for intraday signal discovery on NQ futures (E-mini Nasdaq-100). The platform has two layers, separated by design:
+
+\textbf{The evaluation engine} is immutable. It loads data, builds features, runs bar-by-bar backtests with realistic execution rules (profit targets, stop-losses, time-based exits, daily loss caps), computes performance metrics, and applies a multi-stage validation gauntlet. Its 13 core source files are hash-locked via a JSON manifest---if any file is modified, the system refuses to run. The data loader enforces a \emph{split firewall}: during the research phase, the holdout test set is blocked entirely. These controls follow the anti-overfitting principles described by \citet{bailey2017probability} and the research-production separation advocated by \citet{lopez2018advances}.
+
+\textbf{The research layer} is where the LLM agent works. It writes Python functions that take a feature DataFrame as input and return a signal vector $s_t \in \{-1,\, 0,\, +1\}$ (short, flat, long). The agent submits each function to the evaluation engine, receives the resulting metrics, and iterates. A YAML mission file controls the scope: which data split the agent may access, how many iterations it may run, and under what conditions to stop. Strategies that pass the validation gauntlet become immutable candidate artifacts with deterministic IDs. Promotion to the holdout test set is a separate, gated process.
+
+\subsection{Data}
+
+The raw data comes from Databento's MBP1 feed for NQ futures: best bid/ask prices and sizes, plus individual trade messages with aggressor-side flags, all in Parquet format. From this stream, the following features are pre-computed for the treatment group:
+
+\begin{itemize}[nosep]
+    \item \textbf{Order Flow Imbalance (OFI):} net change in best-bid vs.\ best-ask depth per bar \citep{cont2014price}.
+    \item \textbf{Micro-Price:} size-weighted mid-price \citep{stoikov2018micro}, plus its divergence from the standard mid-price.
+    \item \textbf{Cumulative Volume Delta (CVD):} running net of aggressive buys minus aggressive sells, derived from the aggressor-side trade flags.
+    \item \textbf{Bid--Ask Queue Imbalance:} best-bid size as a fraction of total top-of-book size.
+    \item \textbf{Rolling derivatives:} rate-of-change and short-term momentum of OFI and CVD.
+\end{itemize}
+
+The dataset is split into three non-overlapping time periods: \emph{train}, \emph{validate}, and \emph{test}. The agent only sees train and validate during discovery; the test set is reserved for final evaluation.
+
+\subsection{A/B Experiment}
+
+The experiment compares two groups that differ only in what features the agent can see:
+
+\textbf{Group~A (OHLCV).} The agent gets 1-minute Open, High, Low, Close, Volume bars and a set of standard technical indicators (moving averages, RSI, ATR, Bollinger Bands, etc.). It runs $N$ autonomous iterations.
+
+\textbf{Group~B (OHLCV + MBP1).} The agent gets everything from Group~A \emph{plus} the microstructure features listed above. Same $N$ iterations, same evaluation engine, same execution-cost assumptions.
+
+The agent receives no instructions about which features to prefer. The only difference between groups is the input space.
+
+\subsection{Evaluation}
+
+Each sub-question maps to a metric:
+
+\begin{itemize}[nosep]
+    \item \textbf{Profitability (SQ1):} out-of-sample Sharpe Ratio and Profit Factor on the holdout test set.
+    \item \textbf{Efficiency (SQ2):} number of iterations until the first gauntlet-passing candidate.
+    \item \textbf{Feature attribution (SQ3):} frequency of microstructure features in the code of surviving strategies.
+\end{itemize}
+
+Robustness checks include subperiod stability, sensitivity to slippage assumptions, and gauntlet pass-rate comparison between groups.
+
+% ============================================================
+\section{Preliminary Outline (approx.\ 40 pages)}
+% ============================================================
+
+\begin{enumerate}[label=\textbf{\arabic*.}, leftmargin=1.5cm]
+    \item \textbf{Introduction} \\ What this thesis is about, why it matters, and how it is structured.
+    \item \textbf{Theoretical Foundations}
+        \begin{enumerate}[label=2.\arabic*]
+            \item How Electronic Markets Work: Orders, the Limit Order Book, and Price Formation
+            \item From OHLCV to MBP1: What Microstructure Features Capture and Why
+            \item LLM Agents as Autonomous Alpha Researchers
+            \item Design Science Research as a Methodological Framework
+        \end{enumerate}
+    \item \textbf{System Architecture and Methodology}
+        \begin{enumerate}[label=3.\arabic*]
+            \item Platform Design: Immutable Evaluation Engine vs.\ Mutable Research Layer
+            \item Data Pipeline: From Databento MBP1 to Feature Matrices
+            \item The Agentic Loop: Mission, Signal Contract, Gauntlet, Promotion
+            \item A/B Setup and Anti-Overfitting Controls
+        \end{enumerate}
+    \item \textbf{Empirical Results}
+        \begin{enumerate}[label=4.\arabic*]
+            \item Group~A Results (OHLCV Only)
+            \item Group~B Results (OHLCV + MBP1 Microstructure)
+            \item Comparative Analysis: Sharpe, Efficiency, Pass Rates
+            \item Feature Attribution: Which Microstructure Signals Survived?
+        \end{enumerate}
+    \item \textbf{Discussion and Limitations} \\ Latency assumptions vs.\ real execution; slippage modelling; single-instrument scope; generalisability.
+    \item \textbf{Conclusion and Outlook} \\ Summary of findings, implications for autonomous alpha discovery, and directions for future research.
+\end{enumerate}
+
+% ============================================================
+\section{Time Schedule}
+% ============================================================
+
+\begin{tabular}{@{}l p{12cm}@{}}
+    \toprule
+    \textbf{Period} & \textbf{Activity} \\
+    \midrule
+    Weeks 1--3 & Literature review: market microstructure, Level-1 signal construction, LLM agents in finance, Design Science Research. Write chapter~2. \\[0.3em]
+    Weeks 4--6 & Build the microstructure feature pipeline from Databento MBP1; integrate into the platform; implement A/B harness. \\[0.3em]
+    Weeks 7--8 & Run autonomous discovery experiments for both groups; collect logs, candidates, and metrics. \\[0.3em]
+    Weeks 9--10 & Holdout evaluation; statistical comparison; feature attribution; write chapters~4 and~5. \\[0.3em]
+    Weeks 11--12 & Revision, proofreading, formatting, and submission. \\
+    \bottomrule
+\end{tabular}
+
+% === REFERENCES ===
+\newpage
+
+\begin{thebibliography}{99}
+
+\bibitem[Bailey et~al., 2017]{bailey2017probability}
+Bailey, D.~H., Borwein, J.~M., L{\'o}pez~de~Prado, M., and Zhu, Q.~J. (2017).
+\newblock The probability of backtest overfitting.
+\newblock {\em Journal of Computational Finance}, 20(4):39--69.
+\newblock \url{https://doi.org/10.21314/JCF.2017.322}
+
+\bibitem[Bouchaud et~al., 2018]{bouchaud2018trades}
+Bouchaud, J.-P., Bonart, J., Donier, J., and Gould, M. (2018).
+\newblock {\em Trades, Quotes and Prices: Financial Markets Under the Microscope}.
+\newblock Cambridge University Press.
+\newblock \url{https://doi.org/10.1017/9781316659335}
+
+\bibitem[Cartea et~al., 2015]{cartea2015algorithmic}
+Cartea, Á., Jaimungal, S., and Penalva, J. (2015).
+\newblock {\em Algorithmic and High-Frequency Trading}.
+\newblock Cambridge University Press.
+\newblock \url{https://doi.org/10.1017/CBO9781316272565}
+
+\bibitem[Cont et~al., 2014]{cont2014price}
+Cont, R., Kukanov, A., and Stoikov, S. (2014).
+\newblock The price impact of order book events.
+\newblock {\em Journal of Financial Econometrics}, 12(1):47--88.
+\newblock \url{https://doi.org/10.1093/jjfinec/nbu007}
+
+\bibitem[Cont et~al., 2023]{cont2023cross}
+Cont, R., Cucuringu, M., and Zhang, C. (2023).
+\newblock Cross-impact of order flow imbalance in equity markets.
+\newblock {\em Quantitative Finance}, 23(10):1373--1393.
+\newblock \url{https://doi.org/10.1080/14697688.2023.2236159}
+
+\bibitem[Ding et~al., 2024]{ding2024llmtrading}
+Ding, H., Li, Y., Wang, J., and Chen, H. (2024).
+\newblock Large language model agent in financial trading: A survey.
+\newblock \url{https://arxiv.org/abs/2408.06361}
+
+\bibitem[Gould et~al., 2013]{gould2013limit}
+Gould, M.~D., Porter, M.~A., Williams, S., McDonald, M., Fenn, D.~J., and Howison, S.~D. (2013).
+\newblock Limit order books.
+\newblock {\em Quantitative Finance}, 13(11):1709--1742.
+\newblock \url{https://doi.org/10.1080/14697688.2013.803148}
+
+\bibitem[Hasbrouck, 2007]{hasbrouck2007}
+Hasbrouck, J. (2007).
+\newblock {\em Empirical Market Microstructure: The Institutions, Economics, and Econometrics of Securities Trading}.
+\newblock Oxford University Press.
+
+\bibitem[Hevner et~al., 2004]{hevner2004design}
+Hevner, A.~R., March, S.~T., Park, J., and Ram, S. (2004).
+\newblock Design science in information systems research.
+\newblock {\em MIS Quarterly}, 28(1):75--105.
+\newblock \url{https://doi.org/10.2307/25148625}
+
+\bibitem[Kyle, 1985]{kyle1985continuous}
+Kyle, A.~S. (1985).
+\newblock Continuous auctions and insider trading.
+\newblock {\em Econometrica}, 53(6):1315--1335.
+\newblock \url{https://doi.org/10.2307/1913210}
+
+\bibitem[L{\'o}pez~de~Prado, 2018]{lopez2018advances}
+L{\'o}pez~de~Prado, M. (2018).
+\newblock {\em Advances in Financial Machine Learning}.
+\newblock John Wiley \& Sons.
+
+\bibitem[O'Hara, 2015]{ohara2015high}
+O'Hara, M. (2015).
+\newblock High frequency market microstructure.
+\newblock {\em Journal of Financial Economics}, 116(2):257--270.
+\newblock \url{https://doi.org/10.1016/j.jfineco.2015.01.003}
+
+\bibitem[Stoikov, 2018]{stoikov2018micro}
+Stoikov, S. (2018).
+\newblock The micro-price: A high-frequency estimator of future prices.
+\newblock {\em Quantitative Finance}, 18(12):2059--2066.
+\newblock \url{https://doi.org/10.1080/14697688.2018.1489139}
+
+\bibitem[Tang et~al., 2025]{tang2025alphaagent}
+Tang, Z., Chen, Z., Yang, J., Mai, J., Zheng, Y., Wang, K., Chen, J., and Lin, L. (2025).
+\newblock {AlphaAgent}: {LLM}-driven alpha mining with regularised exploration to counteract alpha decay.
+\newblock {\em Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining}, pp.~2813--2822.
+\newblock \url{https://doi.org/10.1145/3690624.3709289}
+
+\bibitem[Wang et~al., 2023]{wang2023alphagpt}
+Wang, S., Yuan, H., Zhou, L., Ni, L.~M., Shum, H.-Y., and Guo, J. (2023).
+\newblock Alpha-{GPT}: Human-{AI} interactive alpha mining for quantitative investment.
+\newblock \url{https://arxiv.org/abs/2308.00016}
+
+\bibitem[Wang et~al., 2024]{wang2024quantagent}
+Wang, S., Yuan, H., Ni, L.~M., and Guo, J. (2024).
+\newblock {QuantAgent}: Seeking holy grail in trading by self-improving large language model.
+\newblock \url{https://arxiv.org/abs/2402.03755}
+
+\bibitem[Xiao et~al., 2024]{xiao2024tradingagents}
+Xiao, Y., Sun, E., Luo, D., and Wang, W. (2024).
+\newblock {TradingAgents}: Multi-agents {LLM} financial trading framework.
+\newblock \url{https://arxiv.org/abs/2412.20138}
+
+\bibitem[Zhang et~al., 2024]{zhang2024stockagent}
+Zhang, C., Liu, X., Zhang, Z., et~al. (2024).
+\newblock When {AI} meets finance ({StockAgent}): Large language model-based stock trading in simulated real-world environments.
+\newblock \url{https://arxiv.org/abs/2407.18957}
+
+\end{thebibliography}
+
+\end{document}

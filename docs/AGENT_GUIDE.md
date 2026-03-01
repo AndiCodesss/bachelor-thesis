@@ -1,0 +1,89 @@
+# Agent Guide
+
+## Objective
+
+Agents can freely research alpha while framework integrity and holdout discipline remain enforced.
+
+## Hard Boundaries
+
+1. Do not edit `src/framework/`.
+2. Do not access `test` split in research mode.
+3. Do not manually shift strategy signals.
+4. Do not bypass contract checks, logging, or validation.
+5. Do not write candidates from non-validator roles.
+
+## Creative Scope
+
+Agents are expected to be creative in:
+
+1. Strategy logic in `research/signals/`.
+2. Feature confluence and event definitions.
+3. Bar-config choice and parameter exploration.
+4. Model variants and quality gates in `research/`.
+
+## Workspace
+
+- Signals: `research/signals/`
+- Experimental features: `research/features_experimental/`
+- Runtime state: `research/.state/`
+- Candidates: `research/candidates/` (created at runtime)
+- Event log: `research/.state/experiments.jsonl` (created at runtime)
+
+## Signal Contract
+
+Each strategy file must expose:
+
+```python
+def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray
+```
+
+Rules:
+
+- output shape: `(len(df),)`
+- values: `-1, 0, 1`
+- no NaN
+- no lookahead
+
+## Research Loop
+
+Run:
+
+```bash
+uv run python scripts/research.py \
+  --mission configs/missions/alpha-discovery.yaml \
+  --auto-mode \
+  --worker-agent validator
+```
+
+What happens:
+
+1. set mode to `RESEARCH`
+2. verify framework lock
+3. run signal contract tests
+4. initialize queue/handoffs/budget state files
+5. bootstrap tasks from `research/signals/` when queue is empty (unless `--no-bootstrap`)
+6. claim pending tasks by priority
+7. execute task end-to-end: signal -> backtest -> metrics -> optional gauntlet -> artifacts
+8. complete task with verdict and details
+9. write run summary under `results/runs/<run_id>/summary.json`
+
+## Per-Task Protocol
+
+Each task should contain:
+
+1. `strategy_name`
+2. `split` (research-safe, usually `validate`)
+3. `bar_config` (e.g., `tick_610`, `volume_2000`, `time_1m`)
+4. `params`
+5. optional risk/backtest controls (`stop_loss`, `profit_target`, `exit_bars`, `max_daily_loss`)
+
+Task verdicts:
+
+1. `PASS`: validation criteria satisfied
+2. `FAIL`: ran successfully but did not meet criteria
+3. `ERROR`: runtime/contract/processing failure
+4. `NEEDS_WORK` / `ABANDON`: optional strategic labels when applicable
+
+## Candidate Promotion
+
+Candidates that pass the validation gauntlet are written as immutable JSON artifacts to `research/candidates/`. Promotion to the holdout test set verifies artifact hashes and lock provenance before granting access.

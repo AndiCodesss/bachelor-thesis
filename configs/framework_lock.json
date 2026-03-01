@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-18T21:52:28.971356+00:00",
+  "project_root": ".",
+  "file_count": 13,
+  "files": [
+    {
+      "path": "src/framework/api.py",
+      "sha256": "f3977f8da9bee228bbf75d7f677767f3f51834567036066413da69a0c5b0580e",
+      "size_bytes": 2213
+    },
+    {
+      "path": "src/framework/backtest/costs.py",
+      "sha256": "a15d7139591777074a3c1cf83020b47b45d903214f17a61cfc94811eb4b0f9e3",
+      "size_bytes": 7591
+    },
+    {
+      "path": "src/framework/backtest/engine.py",
+      "sha256": "565b7cc67a660c6ff69ac740a40a028b9ca47b4eeaa28c9149e3991e4f78c4f3",
+      "size_bytes": 14412
+    },
+    {
+      "path": "src/framework/backtest/metrics.py",
+      "sha256": "d66ef64163d75b4eb2ff2c3ee37c256a4b06ab9d36acaf187a30aec0595f9420",
+      "size_bytes": 6689
+    },
+    {
+      "path": "src/framework/backtest/validators.py",
+      "sha256": "2fb04bc7255ab00a3a57f802007f83057138d11d9ec2bf1098dfc9d709397c9e",
+      "size_bytes": 13291
+    },
+    {
+      "path": "src/framework/data/constants.py",
+      "sha256": "a8a44bd68767ebaf5aff40ec33aa28c1f3791590bc0c6af3e86575169067eaab",
+      "size_bytes": 4803
+    },
+    {
+      "path": "src/framework/data/loader.py",
+      "sha256": "3528d94552f992fd9fccdc45928d6299a164d6093990178186e7f93db553a89f",
+      "size_bytes": 5463
+    },
+    {
+      "path": "src/framework/data/splits.py",
+      "sha256": "72a08d681602e981228b9187dc49cccbc5577a6061ecbc57c22b8aeb2fb97d9b",
+      "size_bytes": 560
+    },
+    {
+      "path": "src/framework/features_canonical/builder.py",
+      "sha256": "e289ff9c558b70d1a85508b3c61c1477b1e8b3219ffe904ab3a6afad0e3f169c",
+      "size_bytes": 10805
+    },
+    {
+      "path": "src/framework/security/framework_lock.py",
+      "sha256": "b9e8678c9e70dd497f7517bcb239648a69ba4f3c7c6cabc113f8b72e78209c70",
+      "size_bytes": 4459
+    },
+    {
+      "path": "src/framework/validation/alpha_decay.py",
+      "sha256": "7a3f71d41cdfcd6a24e3486d5ff9395ddf1b2ba525fd965bec6345995644c4ae",
+      "size_bytes": 5232
+    },
+    {
+      "path": "src/framework/validation/factor_attribution.py",
+      "sha256": "0354bd4170b1a16fc45e7b50f01d325d09ea8094cca5d440af0d48b90eb09c7e",
+      "size_bytes": 6637
+    },
+    {
+      "path": "src/framework/validation/robustness.py",
+      "sha256": "c0a0f629e64942b306ed7b9910e9c2b36df915e5a6fa17b8bb411f9e82824e03",
+      "size_bytes": 10780
+    }
+  ]
+}
