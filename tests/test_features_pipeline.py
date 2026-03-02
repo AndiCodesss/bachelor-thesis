@@ -1,11 +1,9 @@
 """Tests for interaction, regime, time-of-day, and previous session features."""
 
-import pytest
 import polars as pl
 from datetime import datetime
 
 from src.framework.features_canonical.pipeline import compute_pipeline_features, REQUIRED_COLUMNS
-from src.framework.data.constants import REGIME_VOL_LOOKBACK, REGIME_AUTOCORR_WINDOW
 
 
 def _make_matrix(n_rows, **overrides):
@@ -28,7 +26,7 @@ def _make_matrix_with_time(n_bars_per_day=5, n_days=2, base_price=21000.0):
     Creates bars starting at 14:30 UTC (09:30 ET) each day.
     """
     rows = []
-    base_date = datetime(2024, 7, 15)
+    datetime(2024, 7, 15)
     for day in range(n_days):
         for bar in range(n_bars_per_day):
             # 14:30 UTC = 09:30 ET (EST+5, summer EDT+4 but July is EDT)

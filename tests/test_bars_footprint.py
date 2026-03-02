@@ -8,11 +8,7 @@ from src.framework.data.bars import (
     aggregate_time_bars,
     aggregate_volume_bars,
     _compute_footprint_for_group,
-    _output_columns,
-    IMBALANCE_RATIO_THRESHOLD,
-    STACKED_MIN_LEVELS,
 )
-from src.framework.data.constants import TICK_SIZE
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -194,7 +190,8 @@ def test_footprint_no_stacked_imbalances():
 
 def test_time_bars_have_footprint_columns():
     """Time bars output includes all footprint columns."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 10, 21000.0),
         _row(ts(1), "T", "B", 5, 21000.25),
@@ -215,7 +212,8 @@ def test_time_bars_have_footprint_columns():
 
 def test_time_bars_footprint_values():
     """Verify footprint values on a known trade sequence."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         # Bar: trades at 21000.0 (buy=10), 21000.25 (sell=5), 21000.50 (buy=8)
         _row(ts(0), "T", "A", 10, 21000.0),
@@ -246,7 +244,8 @@ def test_time_bars_footprint_values():
 
 def test_time_bars_footprint_unfinished():
     """Both sides traded at bar high/low -> unfinished business."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         # Trades at bar high (21001.0): buy and sell
         _row(ts(0), "T", "A", 10, 21001.0),
@@ -265,7 +264,8 @@ def test_time_bars_footprint_unfinished():
 
 def test_volume_bars_have_footprint_columns():
     """Volume bars output includes all footprint columns."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 10, 21000.0),
         _row(ts(1), "T", "B", 10, 21000.25),
@@ -286,7 +286,8 @@ def test_volume_bars_have_footprint_columns():
 
 def test_volume_bars_footprint_values():
     """Verify footprint values computed per volume bucket."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         # Bucket 0: cumvol 1-20
         _row(ts(0), "T", "A", 10, 21000.0),

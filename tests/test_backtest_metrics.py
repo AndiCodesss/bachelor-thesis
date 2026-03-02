@@ -224,8 +224,8 @@ def test_single_trade_sharpe():
     assert metrics["sharpe_ratio"] == 0.0  # Can't compute from single sample
 
 
-def test_sharpe_includes_zero_pnl_gap_days():
-    """Sharpe should include zero-return calendar days between active trade days."""
+def test_sharpe_uses_trading_days_only():
+    """Sharpe should use only trading days (no zero-fill for non-trade days)."""
     day1 = datetime(2025, 2, 1, 10, 0, 0)
     day3 = datetime(2025, 2, 3, 10, 0, 0)  # gap day: 2025-02-02
 
@@ -240,7 +240,8 @@ def test_sharpe_includes_zero_pnl_gap_days():
 
     metrics = compute_metrics(trades)
 
-    expected_daily = np.array([285.5, 0.0, 85.5], dtype=np.float64)
+    # Only 2 trading days, no zero-fill for the gap day
+    expected_daily = np.array([285.5, 85.5], dtype=np.float64)
     expected_sharpe = (expected_daily.mean() / expected_daily.std(ddof=1)) * np.sqrt(252)
     assert abs(metrics["sharpe_ratio"] - float(expected_sharpe)) < 1e-9
 

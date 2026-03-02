@@ -1,6 +1,5 @@
 """Tests for statistical feature engineering."""
 
-import pytest
 import numpy as np
 import polars as pl
 from datetime import datetime, timedelta
@@ -8,8 +7,6 @@ from src.framework.features_canonical.statistical import (
     compute_statistical_features,
     _fracdiff_weights,
     _apply_fracdiff,
-    FRACDIFF_D,
-    FRACDIFF_WINDOW,
     YZ_WINDOW,
 )
 
@@ -158,7 +155,7 @@ def test_yz_volatility_rs_component():
         highs=[100.0, 105.0],
         lows=[100.0, 98.0],
     )
-    result = compute_statistical_features(bars)
+    compute_statistical_features(bars)
 
     h = np.log(105 / 100)
     l_val = np.log(98 / 100)

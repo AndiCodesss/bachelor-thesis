@@ -41,7 +41,7 @@ def _build_synthetic_lf(n_minutes=12):
     rows = []
     base_price = 21000.0
     for m in range(n_minutes):
-        ts_base = datetime(2024, 7, 15, 13, 30 + m, 0)
+        datetime(2024, 7, 15, 13, 30 + m, 0)
         price = base_price + m * 2.0  # slow uptrend
 
         # 3 trades per minute (buy, sell, buy) — varied sizes

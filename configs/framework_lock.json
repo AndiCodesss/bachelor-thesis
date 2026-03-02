@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-01T19:27:36.327788+00:00",
+  "generated_at": "2026-03-02T16:23:59.553446+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 13,
   "files": [
@@ -11,8 +11,8 @@
     },
     {
       "path": "src/framework/backtest/costs.py",
-      "sha256": "a15d7139591777074a3c1cf83020b47b45d903214f17a61cfc94811eb4b0f9e3",
-      "size_bytes": 7591
+      "sha256": "ffc564f993e897f411e25dd1d7d0a9dda2a189d41532562f852afdaa6f006755",
+      "size_bytes": 7693
     },
     {
       "path": "src/framework/backtest/engine.py",
@@ -21,8 +21,8 @@
     },
     {
       "path": "src/framework/backtest/metrics.py",
-      "sha256": "d66ef64163d75b4eb2ff2c3ee37c256a4b06ab9d36acaf187a30aec0595f9420",
-      "size_bytes": 6689
+      "sha256": "45d8b05ea90ef57c6e7a03ee489a074c58fba9a005f37c80d6bcb02723e847d7",
+      "size_bytes": 6292
     },
     {
       "path": "src/framework/backtest/validators.py",
@@ -46,8 +46,8 @@
     },
     {
       "path": "src/framework/features_canonical/builder.py",
-      "sha256": "e289ff9c558b70d1a85508b3c61c1477b1e8b3219ffe904ab3a6afad0e3f169c",
-      "size_bytes": 11298
+      "sha256": "b1caac52326828a1062ad0ad41e0c0e519651549847285253251cb3dffcb2163",
+      "size_bytes": 14286
     },
     {
       "path": "src/framework/security/framework_lock.py",
@@ -56,18 +56,18 @@
     },
     {
       "path": "src/framework/validation/alpha_decay.py",
-      "sha256": "7a3f71d41cdfcd6a24e3486d5ff9395ddf1b2ba525fd965bec6345995644c4ae",
-      "size_bytes": 5232
+      "sha256": "423dc49462b51a1164582afc827578893795955ce467798cdf02d10aa98b52b4",
+      "size_bytes": 5310
     },
     {
       "path": "src/framework/validation/factor_attribution.py",
-      "sha256": "0354bd4170b1a16fc45e7b50f01d325d09ea8094cca5d440af0d48b90eb09c7e",
-      "size_bytes": 6637
+      "sha256": "ad14a5571dc52ac302186cdadefda80cdd497f7cb0e73085e772dd01cfca4749",
+      "size_bytes": 6653
     },
     {
       "path": "src/framework/validation/robustness.py",
-      "sha256": "c0a0f629e64942b306ed7b9910e9c2b36df915e5a6fa17b8bb411f9e82824e03",
-      "size_bytes": 10780
+      "sha256": "14e26816bf49fd020d28f333f4c5bf0689272c15d45e72d6e83c27e4569dba86",
+      "size_bytes": 10788
     }
   ]
 }

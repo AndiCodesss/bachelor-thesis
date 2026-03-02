@@ -1,6 +1,5 @@
 """Tests for momentum feature engineering."""
 
-import pytest
 import polars as pl
 from datetime import datetime
 from src.framework.features_canonical.momentum import compute_momentum_features

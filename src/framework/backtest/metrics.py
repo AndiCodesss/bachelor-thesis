@@ -2,7 +2,7 @@
 
 import polars as pl
 import numpy as np
-from datetime import timedelta
+
 from src.framework.data.constants import TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
 
 
@@ -109,25 +109,13 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
         ).group_by("_date").agg(pl.col("net_pnl").sum()).sort("_date")
 
         if len(daily_pnl_df) > 1:
-            dates = daily_pnl_df["_date"].to_list()
-            pnls = daily_pnl_df["net_pnl"].to_list()
-            daily_pnl_by_date = dict(zip(dates, pnls))
+            # Use only trading days (days with actual trades) for Sharpe
+            trading_day_pnls = daily_pnl_df["net_pnl"].to_numpy().astype(np.float64)
 
-            start_date = dates[0]
-            end_date = dates[-1]
-            n_days = (end_date - start_date).days + 1
-            calendar_pnls = np.array(
-                [
-                    float(daily_pnl_by_date.get(start_date + timedelta(days=i), 0.0))
-                    for i in range(n_days)
-                ],
-                dtype=np.float64,
-            )
-
-            if len(calendar_pnls) > 1:
-                daily_std = np.std(calendar_pnls, ddof=1)
+            if len(trading_day_pnls) > 1:
+                daily_std = np.std(trading_day_pnls, ddof=1)
                 if daily_std > 0:
-                    sharpe_ratio = (np.mean(calendar_pnls) / daily_std) * np.sqrt(252)
+                    sharpe_ratio = (np.mean(trading_day_pnls) / daily_std) * np.sqrt(252)
                 else:
                     sharpe_ratio = 0.0
             else:

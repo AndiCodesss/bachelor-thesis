@@ -180,7 +180,7 @@ def test_rsi_constant_price():
     """Constant price -> RSI edge case, should not crash."""
     n = 30
     bars = _make_bars(_ts_seq(n), [100.0] * n)
-    result = compute_ohlcv_indicators(bars)
+    compute_ohlcv_indicators(bars)
 
 
 def test_rsi_all_gains():
@@ -277,7 +277,7 @@ def test_bb_pctb_constant_price():
     """Constant price -> %B undefined (bandwidth=0), but should not crash."""
     n = 30
     bars = _make_bars(_ts_seq(n), [100.0] * n)
-    result = compute_ohlcv_indicators(bars)
+    compute_ohlcv_indicators(bars)
 
 
 def test_bb_bandwidth_positive():

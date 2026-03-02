@@ -48,10 +48,7 @@ def compute_microstructure_v2_features(bars: pl.DataFrame) -> pl.DataFrame:
     # Approximation: uses total cancel_count / trade_count (per-side split not available in bars)
     bars = bars.with_columns([
         (pl.col("cancel_count").cast(pl.Float64) / (pl.col("trade_count") + 1).cast(pl.Float64))
-        .alias("bid_cancel_ratio"),
-
-        (pl.col("cancel_count").cast(pl.Float64) / (pl.col("trade_count") + 1).cast(pl.Float64))
-        .alias("ask_cancel_ratio"),
+        .alias("cancel_ratio"),
     ])
 
     # Feature: weighted_book_imbalance (Cao et al. 2009)
@@ -81,8 +78,7 @@ def compute_microstructure_v2_features(bars: pl.DataFrame) -> pl.DataFrame:
         "ts_event",
         pl.col("trade_arrival_imbalance").cast(pl.Float64),
         pl.col("vpin").cast(pl.Float64),
-        pl.col("bid_cancel_ratio").cast(pl.Float64),
-        pl.col("ask_cancel_ratio").cast(pl.Float64),
+        pl.col("cancel_ratio").cast(pl.Float64),
         pl.col("weighted_book_imbalance").cast(pl.Float64),
         pl.col("micro_price_momentum").cast(pl.Float64),
     ])

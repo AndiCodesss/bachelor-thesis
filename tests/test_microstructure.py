@@ -1,6 +1,5 @@
 """Tests for microstructure feature engineering."""
 
-import pytest
 import polars as pl
 from datetime import datetime, timedelta
 from src.framework.features_canonical.microstructure import compute_microstructure_features

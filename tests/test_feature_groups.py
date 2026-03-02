@@ -5,7 +5,6 @@ import pytest
 
 from research.lib.feature_groups import (
     OHLCV_FEATURE_COLUMNS,
-    VALID_FEATURE_GROUPS,
     filter_feature_group,
 )
 from src.framework.features_canonical.builder import NON_FEATURE_COLUMNS

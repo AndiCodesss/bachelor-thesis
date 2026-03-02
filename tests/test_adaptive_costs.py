@@ -9,7 +9,7 @@ import pytest
 
 from src.framework.backtest.costs import CostModel, compute_adaptive_costs
 from src.framework.backtest.metrics import compute_metrics
-from src.framework.data.constants import COMMISSION_RT, TICK_VALUE, TOTAL_COST_RT
+from src.framework.data.constants import COMMISSION_RT, TOTAL_COST_RT
 
 
 # ---------------------------------------------------------------------------

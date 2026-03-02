@@ -2,9 +2,8 @@
 
 import pytest
 import polars as pl
-from pathlib import Path
 from src.framework.data.loader import get_parquet_files, load_split, filter_rth, validate_data
-from src.framework.data.constants import SPLITS, TRAIN_FOLDERS, VALIDATE_FOLDERS, TEST_FOLDERS
+from src.framework.data.constants import TRAIN_FOLDERS, VALIDATE_FOLDERS, TEST_FOLDERS
 
 
 def test_get_parquet_files_train():

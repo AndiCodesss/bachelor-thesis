@@ -2,7 +2,6 @@
 
 import numpy as np
 import polars as pl
-import pytest
 from datetime import datetime
 from src.framework.features_canonical.volume_profile import compute_volume_profile_features, _compute_profile
 

@@ -1,12 +1,11 @@
 """Tests for ETH session extension infrastructure."""
 
 import polars as pl
-import pytest
-from datetime import datetime, time as dt_time
+from datetime import datetime
 
 from src.framework.data.constants import (
     ETH_START_TIME, ETH_END_TIME, LONDON_START_TIME, LONDON_END_TIME,
-    RTH_START_TIME, RTH_END_TIME, WHALE_LOT_THRESHOLD_LONDON, SWING_VP_LOOKBACK,
+    WHALE_LOT_THRESHOLD_LONDON, SWING_VP_LOOKBACK,
 )
 from src.framework.data.loader import filter_rth, filter_eth
 from src.framework.features_canonical.builder import _cache_key

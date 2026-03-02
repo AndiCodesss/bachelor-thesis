@@ -1,4 +1,6 @@
 """Feature pipeline — combines all feature modules into a unified matrix."""
+import re
+from datetime import date as _date_cls
 from pathlib import Path
 import polars as pl
 from src.framework.data.bars import aggregate_time_bars, aggregate_volume_bars, aggregate_tick_bars
@@ -21,6 +23,14 @@ from src.framework.data.constants import RESULTS_DIR
 from src.framework.data.loader import filter_rth, filter_eth
 
 CACHE_DIR = RESULTS_DIR / "cache"
+
+# Number of prior calendar-day files to prepend for rolling-window warmup.
+# Weekends/holidays produce 0 bars, so we use 4 files to guarantee >= 200 bars
+# of actual trading data (3 trading days * ~78 bars = ~234 bars), covering
+# the longest rolling window (SMA-200).
+WARMUP_CONTEXT_DAYS = 4
+
+_DATE_RE = re.compile(r"nq_(\d{4})-(\d{2})-(\d{2})\.parquet$")
 
 # Define which columns are labels (not features)
 LABEL_COLUMNS = [
@@ -200,8 +210,14 @@ def build_feature_matrix(
         pl.all_horizontal(pl.col(c).is_not_null() for c in LABEL_COLUMNS)
     )
 
-    # Drop warmup rows where rolling features have not yet filled
-    result = result.filter(pl.col("return_1bar").is_not_null())
+    # Drop warmup rows where rolling features have not yet filled.
+    # sma_ratio_8 requires 8 bars of context — with cross-day warmup (3 prior days
+    # providing ~234 bars), this filter never drops target-day bars.  Without
+    # warmup context (first file in dataset), it drops the first 7 bars.
+    if "sma_ratio_8" in result.columns:
+        result = result.filter(pl.col("sma_ratio_8").is_not_null())
+    else:
+        result = result.filter(pl.col("return_1bar").is_not_null())
 
     return result
 
@@ -224,13 +240,19 @@ def load_cached_matrix(
     include_bar_columns: bool = False,
     required_columns: list[str] | None = None,
     session_filter: str = "rth",
+    warmup_days: int = WARMUP_CONTEXT_DAYS,
 ) -> pl.DataFrame:
     """Load aggregated feature matrix from cache, or build and cache it.
 
     Args:
         session_filter: "rth" for Regular Trading Hours, "eth" for Extended (London+RTH).
+        warmup_days: Number of prior trading days to prepend for rolling-window
+            warmup.  Set to 0 to disable cross-day context (original behaviour).
     """
-    cache_key = _cache_key(bar_size, bar_type, bar_threshold, include_bar_columns, session_filter)
+    cache_key = _cache_key(
+        bar_size, bar_type, bar_threshold, include_bar_columns, session_filter,
+        warmup_days=warmup_days,
+    )
     cache_path = CACHE_DIR / cache_key / parquet_path.name
 
     if cache_path.exists():
@@ -241,19 +263,32 @@ def load_cached_matrix(
         if not missing:
             return cached
 
-    # Build from raw ticks
-    lf = pl.scan_parquet(str(parquet_path))
-    if session_filter == "eth":
-        lf = filter_eth(lf)
+    # Discover prior-day context files for rolling-window warmup
+    context_files = _find_context_files(parquet_path, warmup_days)
+    session_fn = filter_eth if session_filter == "eth" else filter_rth
+
+    # Build combined LazyFrame: context days + target day
+    target_lf = session_fn(pl.scan_parquet(str(parquet_path)))
+    if context_files:
+        context_lfs = [session_fn(pl.scan_parquet(str(f))) for f in context_files]
+        combined_lf = pl.concat([*context_lfs, target_lf])
     else:
-        lf = filter_rth(lf)
+        combined_lf = target_lf
+
     df = build_feature_matrix(
-        lf,
+        combined_lf,
         bar_size=bar_size,
         bar_type=bar_type,
         bar_threshold=bar_threshold,
         include_bar_columns=include_bar_columns,
     )
+
+    # Filter to target date only (strip warmup context rows)
+    target_date = _extract_date_from_filename(parquet_path.name)
+    if target_date is not None and context_files and len(df) > 0:
+        df = df.filter(
+            pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date() == target_date
+        )
 
     if required_columns is not None and len(df) > 0:
         missing = [c for c in required_columns if c not in df.columns]
@@ -270,12 +305,46 @@ def load_cached_matrix(
     return df
 
 
+def _extract_date_from_filename(name: str) -> _date_cls | None:
+    """Extract trading date from parquet filename like nq_2023-03-01.parquet."""
+    m = _DATE_RE.search(name)
+    if m is None:
+        return None
+    return _date_cls(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _find_context_files(target_path: Path, n_days: int) -> list[Path]:
+    """Find the *n_days* preceding daily parquet files for cross-day warmup.
+
+    Searches the parent-of-parent directory (data root) for all parquet files
+    sorted by name (== chronological order), then returns the *n_days* files
+    immediately preceding *target_path*.
+    """
+    if n_days <= 0:
+        return []
+    data_root = target_path.parent.parent  # e.g., NQ_raw/
+    if not data_root.is_dir():
+        return []
+    all_files = sorted(data_root.rglob("nq_*.parquet"))
+    target_resolved = target_path.resolve()
+    target_idx: int | None = None
+    for i, f in enumerate(all_files):
+        if f.resolve() == target_resolved:
+            target_idx = i
+            break
+    if target_idx is None or target_idx == 0:
+        return []
+    start = max(0, target_idx - n_days)
+    return all_files[start:target_idx]
+
+
 def _cache_key(
     bar_size: str,
     bar_type: str,
     bar_threshold: int | None,
     include_bar_columns: bool = False,
     session_filter: str = "rth",
+    warmup_days: int = 0,
 ) -> str:
     """Generate cache directory name for the bar configuration."""
     if bar_type == "time":
@@ -289,6 +358,8 @@ def _cache_key(
     key = f"{base}_bars" if include_bar_columns else base
     if session_filter == "eth":
         key = f"eth_{key}"
+    if warmup_days > 0:
+        key = f"{key}_w{warmup_days}"
     return key
 
 

@@ -1,7 +1,7 @@
 [project]
 name = "nq-alpha"
 version = "0.1.0"
-description = "Add your description here"
+description = "LLM-driven alpha discovery platform with A/B experiment comparing OHLCV and MBP1 microstructure features on NQ futures"
 requires-python = ">=3.12"
 dependencies = [
     "lightgbm>=4.6.0",

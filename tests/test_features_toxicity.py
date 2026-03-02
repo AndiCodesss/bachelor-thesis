@@ -1,12 +1,9 @@
 """Tests for toxicity feature computation (VPIN from pre-aggregated bars)."""
 
-import pytest
 import polars as pl
 from datetime import datetime, timedelta
 from src.framework.features_canonical.toxicity import (
     compute_toxicity_features,
-    VPIN_WINDOW,
-    VPIN_RISK_OFF_THRESHOLD,
 )
 
 

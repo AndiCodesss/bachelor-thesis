@@ -2,16 +2,12 @@
 import polars as pl
 
 from src.framework.data.constants import (
-    RTH_START_TIME,
-    RTH_END_TIME,
     REGIME_VOL_LOOKBACK,
     REGIME_AUTOCORR_WINDOW,
     REGIME_AUTOCORR_MIN_SAMPLES,
     RTH_TOTAL_MINUTES,
     RTH_OPEN_HOUR,
     RTH_OPEN_MINUTE,
-    POWER_HOUR_END_HOUR,
-    POWER_HOUR_END_MINUTE,
     ACCUM_RANGE_WINDOW,
     RANGE_COMPRESSION_WINDOW,
     RANGE_COMPRESSION_Z_WINDOW,
@@ -557,31 +553,5 @@ def _add_squeeze_features(df: pl.DataFrame) -> pl.DataFrame:
         (pl.col("squeeze_bull") - pl.col("squeeze_bear"))
         .alias("squeeze_score"),
     )
-
-    return df
-
-
-def recompute_cross_session_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Recompute features that need multi-day context after concatenating cached data.
-
-    Per-file caching means prev_day_* features are always null in cache.
-    Call this after pl.concat() of multiple cached days.
-    Recomputes: prev_day VP, failed_auction (depends on prev_day VP).
-    """
-    # Drop stale prev_day and failed_auction columns so we can recompute
-    drop_cols = [
-        c for c in df.columns
-        if c.startswith("prev_day_") or c.startswith("dist_prev_")
-        or c.startswith("failed_auction")
-    ]
-    df = df.drop(drop_cols)
-
-    # Recompute prev_day VP
-    if all(c in df.columns for c in ["poc_price", "va_high", "va_low", "close", "range_ma5"]):
-        df = _add_prev_session_vp_features(df)
-
-    # Recompute failed auction with fresh prev_day values
-    if all(c in df.columns for c in ["prev_day_vah", "prev_day_val", "high", "low", "close"]):
-        df = _add_failed_auction_features(df)
 
     return df

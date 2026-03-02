@@ -144,10 +144,10 @@ def compute_adaptive_costs(
         .alias("_volume_z")
     )
 
-    # Session progress: fraction of RTH elapsed
+    # Session progress: fraction of RTH elapsed (convert UTC → Eastern first)
     bars_sorted = bars_sorted.with_columns(
-        pl.col("ts_event").dt.hour().alias("_hour"),
-        pl.col("ts_event").dt.minute().alias("_minute"),
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.hour().alias("_hour"),
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.minute().alias("_minute"),
     ).with_columns(
         # Minutes since 09:30 ET, clamped to [0, 390]
         ((pl.col("_hour") * 60 + pl.col("_minute") - 570).clip(0, 390) / 390.0)

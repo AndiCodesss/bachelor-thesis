@@ -75,14 +75,15 @@ def compute_rolling_sharpe(
     while start + window_days <= total_days:
         win_start = first_date + timedelta(days=start)
 
-        # Collect daily PnLs for the window (including zero-trade days)
+        # Collect only trading-day PnLs for the window (skip non-trade days)
+        win_end = win_start + timedelta(days=window_days)
         window_pnls = np.array(
-            [
-                float(pnl_by_date.get(win_start + timedelta(days=d), 0.0))
-                for d in range(window_days)
-            ],
+            [v for d, v in pnl_by_date.items() if win_start <= d < win_end],
             dtype=np.float64,
         )
+        if len(window_pnls) < 2:
+            start += step_days
+            continue
 
         std = np.std(window_pnls, ddof=1)
         if std > 0:

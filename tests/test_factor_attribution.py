@@ -6,7 +6,6 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import polars as pl
-import pytest
 
 from src.framework.validation.factor_attribution import (
     compute_factor_returns,
@@ -71,9 +70,10 @@ class TestComputeFactorReturns:
         assert "market_return" in result.columns
         assert "volatility_change" in result.columns
         assert "momentum" in result.columns
-        # 30 days total, first day has null momentum/vol_change from shift = 29 non-null
+        # 30 days total; day 1 has null market_return (no prev close),
+        # day 2 has null momentum (prev market_return was null) = 28 non-null
         non_null = result.drop_nulls()
-        assert len(non_null) == 29
+        assert len(non_null) == 28
 
     def test_momentum_is_lagged_return(self):
         bars = _make_bars(5, seed=99)
@@ -132,7 +132,7 @@ class TestFactorAttribution:
         assert result["verdict"] == "FACTOR_EXPOSED"
 
     def test_mixed_alpha_and_beta(self):
-        """Daily PnL = 100 + 300 * market_return + noise."""
+        """Daily PnL = 100 + 5000 * market_return + noise."""
         rng = np.random.default_rng(42)
         n_days = 60
         bars = _make_bars(n_days, seed=30)
@@ -140,7 +140,7 @@ class TestFactorAttribution:
 
         daily_pnls = {}
         for row in factors.iter_rows(named=True):
-            daily_pnls[row["date"]] = 100.0 + 300.0 * row["market_return"] + rng.normal(0, 10)
+            daily_pnls[row["date"]] = 100.0 + 5000.0 * row["market_return"] + rng.normal(0, 10)
 
         trades = _make_trades(daily_pnls)
         result = factor_attribution(trades, bars)
@@ -148,7 +148,7 @@ class TestFactorAttribution:
         assert result["available"] is True
         # Both alpha and market beta should be present
         assert abs(result["alpha_daily"]) > 50.0
-        assert abs(result["factor_betas"]["market"]) > 100.0
+        assert abs(result["factor_betas"]["market"]) > 1000.0
 
     def test_insufficient_data(self):
         """Less than min_days should return INSUFFICIENT_DATA."""

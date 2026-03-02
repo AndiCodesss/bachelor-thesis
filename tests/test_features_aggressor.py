@@ -1,6 +1,5 @@
 """Tests for aggressor feature computation."""
 
-import pytest
 import polars as pl
 from datetime import datetime
 
@@ -129,17 +128,6 @@ def test_trade_intensity_and_relative():
     assert abs(result["relative_intensity"][0] - 1.0) < 1e-6
 
 
-def test_aggressor_urgency():
-    """aggressor_urgency = buy_volume / (total_volume + 1)."""
-    rows = [_make_bar(datetime(2024, 7, 15, 13, 30, 0), buy_vol=40, sell_vol=10, trade_count=2)]
-    df = _make_bars_df(rows)
-    result = compute_aggressor_features(df)
-
-    expected = 40.0 / 51.0
-    actual = result["aggressor_urgency"][0]
-    assert abs(actual - expected) < 1e-6
-
-
 def test_large_lot_fraction():
     """large_lot_fraction = large_vol / (total_vol + 1)."""
     # large_buy=15, large_sell=12, large_total=27, total=35
@@ -208,7 +196,6 @@ def test_output_columns():
         "buy_sell_ratio",
         "trade_intensity",
         "relative_intensity",
-        "aggressor_urgency",
         "large_lot_fraction",
         "large_lot_imbalance",
     ]
@@ -250,7 +237,6 @@ def test_all_sells_bar():
 
     assert result["buy_sell_ratio"][0] < 0.02  # 0/51
     assert result["volume_delta"][0] == -50
-    assert result["aggressor_urgency"][0] < 0.02
 
 
 def test_all_buys_bar():
@@ -261,7 +247,6 @@ def test_all_buys_bar():
 
     assert result["buy_sell_ratio"][0] > 0.95  # 50/51
     assert result["volume_delta"][0] == 50
-    assert result["aggressor_urgency"][0] > 0.95
 
 
 # ---- CVD dynamics tests ----

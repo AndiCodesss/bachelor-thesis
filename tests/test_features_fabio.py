@@ -2,7 +2,6 @@
 
 import numpy as np
 import polars as pl
-import pytest
 from datetime import datetime
 
 from src.framework.features_canonical.pipeline import (

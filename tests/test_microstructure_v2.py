@@ -56,8 +56,7 @@ def test_microstructure_v2_output_shape(sample_bars):
         "ts_event",
         "trade_arrival_imbalance",
         "vpin",
-        "bid_cancel_ratio",
-        "ask_cancel_ratio",
+        "cancel_ratio",
         "weighted_book_imbalance",
         "micro_price_momentum"
     ]
@@ -107,13 +106,11 @@ def test_vpin_values(sample_bars):
     assert (non_null <= 1).all()
 
 
-def test_cancel_ratios(sample_bars):
-    """Test cancel ratios are non-negative."""
+def test_cancel_ratio(sample_bars):
+    """Test cancel ratio is non-negative."""
     result = compute_microstructure_v2_features(sample_bars)
-    non_null_bid = result["bid_cancel_ratio"].drop_nulls()
-    non_null_ask = result["ask_cancel_ratio"].drop_nulls()
-    assert (non_null_bid >= 0).all()
-    assert (non_null_ask >= 0).all()
+    non_null = result["cancel_ratio"].drop_nulls()
+    assert (non_null >= 0).all()
 
 
 def test_weighted_book_imbalance_known_value():

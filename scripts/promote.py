@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 import importlib.util
 import inspect
 from pathlib import Path
@@ -29,7 +29,7 @@ from src.framework.backtest.engine import TRADE_SCHEMA, run_backtest
 from src.framework.backtest.metrics import compute_metrics
 from src.framework.data.constants import RESULTS_DIR, TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
 from src.framework.data.loader import ExecutionMode, get_parquet_files, set_execution_mode
-from src.framework.features_canonical.builder import load_cached_matrix
+from src.framework.features_canonical.builder import LABEL_COLUMNS, load_cached_matrix
 from src.framework.security.framework_lock import verify_manifest
 
 
@@ -255,17 +255,10 @@ def _daily_returns_from_trades(trades: pl.DataFrame, *, cost_multiplier: float =
     if len(daily) == 0:
         return []
 
-    dates = daily["_date"].to_list()
     pnls = daily["_net_pnl"].to_list()
-    by_date = {d: float(v) for d, v in zip(dates, pnls)}
 
-    start = dates[0]
-    end = dates[-1]
-    assert isinstance(start, date)
-    assert isinstance(end, date)
-
-    n_days = (end - start).days + 1
-    return [float(by_date.get(start + timedelta(days=i), 0.0)) for i in range(n_days)]
+    # Return only trading-day PnLs (skip weekends/holidays with no trades)
+    return [float(v) for v in pnls]
 
 
 def _daily_trade_counts_from_trades(trades: pl.DataFrame) -> list[int]:
@@ -282,17 +275,10 @@ def _daily_trade_counts_from_trades(trades: pl.DataFrame) -> list[int]:
     if len(daily) == 0:
         return []
 
-    dates = daily["_date"].to_list()
     counts = daily["_n"].to_list()
-    by_date = {d: int(v) for d, v in zip(dates, counts)}
 
-    start = dates[0]
-    end = dates[-1]
-    assert isinstance(start, date)
-    assert isinstance(end, date)
-
-    n_days = (end - start).days + 1
-    return [int(by_date.get(start + timedelta(days=i), 0)) for i in range(n_days)]
+    # Return only trading-day counts (skip weekends/holidays with no trades)
+    return [int(v) for v in counts]
 
 
 def _concat_frames(frames: list[pl.DataFrame]) -> pl.DataFrame:
@@ -386,10 +372,13 @@ def _generate_signal_array(
     params: dict[str, Any],
     model_state: Any | None,
 ) -> np.ndarray:
+    # Strip label columns so signal code cannot access forward returns
+    _label_cols_present = [c for c in LABEL_COLUMNS if c in bars.columns]
+    safe_bars = bars.drop(_label_cols_present) if _label_cols_present else bars
     if runtime.generate_accepts_state:
-        raw = runtime.generate_fn(bars, params, model_state)
+        raw = runtime.generate_fn(safe_bars, params, model_state)
     else:
-        raw = runtime.generate_fn(bars, params)
+        raw = runtime.generate_fn(safe_bars, params)
 
     arr = np.asarray(raw, dtype=np.float64).reshape(-1)
     if len(arr) != len(bars):
@@ -566,6 +555,7 @@ def _evaluate_candidate_walk_forward(
         "min_positive_fold_ratio": float(args.min_positive_fold_ratio),
         "min_aggregate_sharpe": float(args.min_aggregate_sharpe),
         "min_deflated_sharpe": float(args.min_deflated_sharpe),
+        "min_dsr_probability": float(args.min_dsr_probability),
         "min_lockbox_sharpe": float(args.min_lockbox_sharpe),
         "min_lockbox_net_pnl": float(args.min_lockbox_net_pnl),
         "min_lockbox_trade_count": int(args.min_lockbox_trade_count),
@@ -667,6 +657,7 @@ def main() -> None:
     parser.add_argument("--min-positive-fold-ratio", type=float, default=0.60)
     parser.add_argument("--min-aggregate-sharpe", type=float, default=0.50)
     parser.add_argument("--min-deflated-sharpe", type=float, default=0.0)
+    parser.add_argument("--min-dsr-probability", type=float, default=0.95)
     parser.add_argument("--min-lockbox-sharpe", type=float, default=0.0)
     parser.add_argument("--min-lockbox-net-pnl", type=float, default=0.0)
     parser.add_argument("--min-lockbox-trade-count", type=int, default=20)

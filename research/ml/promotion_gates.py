@@ -301,6 +301,7 @@ def evaluate_promotion_gates(
     min_positive_ratio = _float(thresholds.get("min_positive_fold_ratio", 0.60))
     min_aggregate_sharpe = _float(thresholds.get("min_aggregate_sharpe", 0.50))
     min_deflated_sharpe = _float(thresholds.get("min_deflated_sharpe", 0.0))
+    min_dsr_probability = _float(thresholds.get("min_dsr_probability", 0.95))
 
     checks = {
         "min_fold_count": {
@@ -322,6 +323,11 @@ def evaluate_promotion_gates(
             "passed": wfa_result.deflated_sharpe > min_deflated_sharpe,
             "value": float(wfa_result.deflated_sharpe),
             "min_required": float(min_deflated_sharpe),
+        },
+        "min_dsr_probability": {
+            "passed": wfa_result.dsr_probability >= min_dsr_probability,
+            "value": float(wfa_result.dsr_probability),
+            "min_required": float(min_dsr_probability),
         },
     }
 

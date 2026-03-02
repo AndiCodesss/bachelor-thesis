@@ -6,7 +6,7 @@ from src.framework.features_canonical.scalping import compute_scalping_features
 
 def _make_bars(n=20):
     """Create synthetic bars for testing scalping features."""
-    base_ts = datetime(2024, 7, 15, 13, 30, 0)
+    datetime(2024, 7, 15, 13, 30, 0)
     bars = pl.DataFrame({
         "ts_event": [datetime(2024, 7, 15, 13 + (30 + i) // 60, (30 + i) % 60, 0) for i in range(n)],
         "open": [15000.0 + i * 0.5 for i in range(n)],

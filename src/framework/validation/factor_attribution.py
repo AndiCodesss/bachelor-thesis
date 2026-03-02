@@ -43,13 +43,13 @@ def compute_factor_returns(bars: pl.DataFrame) -> pl.DataFrame:
     )
 
     daily = daily.with_columns(
-        # Market return: daily close-to-close
-        ((pl.col("last_close") / pl.col("first_close")) - 1.0).alias("market_return"),
+        # Market return: true close-to-close (includes overnight gap)
+        ((pl.col("last_close") / pl.col("last_close").shift(1)) - 1.0).alias("market_return"),
     ).with_columns(
         # Volatility change: today's realized vol minus yesterday's
         (pl.col("realized_vol") - pl.col("realized_vol").shift(1)).alias("volatility_change"),
-        # Momentum: prior-day return
-        ((pl.col("last_close") / pl.col("first_close")) - 1.0).shift(1).alias("momentum"),
+        # Momentum: prior-day close-to-close return
+        pl.col("market_return").shift(1).alias("momentum"),
     )
 
     return daily.select("date", "market_return", "volatility_change", "momentum")

@@ -7,7 +7,6 @@ from src.framework.data.bars import (
     aggregate_time_bars,
     aggregate_volume_bars,
     aggregate_tick_bars,
-    LARGE_LOT_THRESHOLD,
     WHALE_LOT_THRESHOLD,
     _output_columns,
 )
@@ -66,7 +65,8 @@ def _make_simple_session():
     Bar 1 (10:00-10:04): 3 trades + 1 book add
     Bar 2 (10:05-10:09): 2 trades + 1 cancel
     """
-    ts = lambda m, s=0: datetime(2024, 7, 15, 10, m, s)
+    def ts(m, s=0):
+        return datetime(2024, 7, 15, 10, m, s)
     rows = [
         # --- Bar 1 ---
         _row(ts(0, 0), "A", "N", 0, 0.0, bid_px_00=21000.0, ask_px_00=21000.50),       # book add
@@ -242,7 +242,8 @@ def test_time_bars_sorted():
 
 def test_volume_bars_basic():
     """Volume bars should close when cumulative volume reaches threshold."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         # 5 trades, each size=10 => total=50, with threshold=20: buckets at 20, 40, 50
         _row(ts(0), "T", "A", 10, 21000.0),   # cumvol=10,  bucket 0
@@ -292,7 +293,8 @@ def test_volume_bars_schema_matches_time_bars():
 
 def test_volume_bars_total_volume():
     """Sum of all bar volumes should equal total trade volume."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     sizes = [7, 3, 12, 8, 5, 15, 2, 10, 6, 4]
     total = sum(sizes)
 
@@ -309,7 +311,8 @@ def test_volume_bars_total_volume():
 
 def test_volume_bars_buy_sell_volume():
     """Buy + sell volume per bar should equal bar volume."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 10, 21000.0),
         _row(ts(1), "T", "B", 5,  21001.0),
@@ -328,7 +331,8 @@ def test_volume_bars_buy_sell_volume():
 
 def test_volume_bars_vap_histogram():
     """Volume bars should carry per-bar VAP arrays with matching volume sums."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 10, 21000.0),   # bucket 0
         _row(ts(1), "T", "B", 10, 21001.0),   # bucket 0
@@ -378,7 +382,8 @@ def test_volume_bars_single_trade():
 
 def test_volume_bars_large_lots():
     """Large lot counts should work correctly in volume bars."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 15, 21000.0),   # large buy
         _row(ts(1), "T", "B", 3,  21001.0),   # small sell
@@ -398,7 +403,8 @@ def test_volume_bars_large_lots():
 
 def test_volume_bars_whale_lots():
     """Whale counts should only include trades >= 30 contracts."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", WHALE_LOT_THRESHOLD, 21000.0),       # whale buy
         _row(ts(1), "T", "B", WHALE_LOT_THRESHOLD + 5, 21001.0),   # whale sell
@@ -419,7 +425,8 @@ def test_volume_bars_whale_lots():
 
 def test_tick_bars_basic():
     """Tick bars should close after fixed trade count, independent of trade size."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 10, 21000.0),   # tick 1 -> bucket 0
         _row(ts(1), "T", "B", 10, 21001.0),   # tick 2 -> bucket 0
@@ -444,7 +451,8 @@ def test_tick_bars_basic():
 
 def test_tick_bars_whale_trade_counts_as_one_tick():
     """A large block trade contributes one tick, not a full bar by itself."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 1000, 21000.0),   # whale trade = 1 tick
         _row(ts(1), "T", "B", 5, 21000.25),     # tick 2 closes bar 0
@@ -479,7 +487,8 @@ def test_tick_bars_schema_matches_time_bars():
 
 def test_tick_bars_vap_histogram():
     """Tick bars should carry per-bar VAP arrays with matching volume sums."""
-    ts = lambda s: datetime(2024, 7, 15, 10, 0, s)
+    def ts(s):
+        return datetime(2024, 7, 15, 10, 0, s)
     rows = [
         _row(ts(0), "T", "A", 10, 21000.0),   # bucket 0
         _row(ts(1), "T", "B", 10, 21001.0),   # bucket 0

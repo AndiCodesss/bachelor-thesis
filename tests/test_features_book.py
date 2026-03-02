@@ -1,6 +1,5 @@
 """Tests for order book feature computation."""
 
-import pytest
 import polars as pl
 from datetime import datetime
 from src.framework.features_canonical.book import compute_book_features

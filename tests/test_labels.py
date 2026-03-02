@@ -1,6 +1,5 @@
 """Tests for forward return label computation."""
 
-import pytest
 import polars as pl
 from datetime import datetime, timedelta
 from src.framework.features_canonical.labels import compute_labels

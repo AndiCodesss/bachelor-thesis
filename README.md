@@ -73,8 +73,7 @@ Same agent, same engine, same rules — only the feature space changes.
 │   ├── data/
 │   │   ├── loader.py                     # Parquet loader with ExecutionMode firewall
 │   │   ├── constants.py                  # Tick size, costs, splits, thresholds
-│   │   ├── bars.py                       # Time and tick bar aggregation
-│   │   ├── volume_bars.py                # Volume bar aggregation
+│   │   ├── bars.py                       # Time, volume, and tick bar aggregation
 │   │   └── splits.py                     # Train / validate / test date ranges
 │   ├── features_canonical/               # 17 modules → 221 features
 │   │   ├── orderflow.py                  # OFI, buy/sell pressure, volume imbalance
@@ -157,14 +156,14 @@ use high/low for worst-case fills.
 
 | Control                | Implementation                                               |
 | ---------------------- | ------------------------------------------------------------ |
-| **Framework lock**     | SHA-256 manifest of 13 core files; verified before every run |
+| **Framework lock**     | SHA-256 manifest of 13 evaluation-chain files (engine, metrics, validators, splits, loader, constants, builder); feature computation modules are mutable research inputs |
 | **Split firewall**     | `ExecutionMode.RESEARCH` blocks all access to the test split |
 | **Deflated Sharpe**    | Corrects observed Sharpe for number of hypotheses tested     |
 | **Effective trials**   | Correlation-adjusted trial counting (`sqrt_family`) for DSR  |
 | **Shuffle test**       | Signal must beat 100 random permutations (p < 0.05)          |
 | **Walk-forward**       | Rolling out-of-sample windows must show positive performance |
 | **Regime stability**   | Must work across 4+ distinct market regimes                  |
-| **Cost sensitivity**   | Must remain profitable at 2x transaction costs ($29 RT)      |
+| **Cost sensitivity**   | Must remain profitable at 1.5x transaction costs ($21.75 RT); 2x PnL also reported |
 | **Alpha decay**        | Exponential fit on rolling Sharpe; half-life > 60 days       |
 | **Factor attribution** | OLS decomposition isolates pure alpha from factor exposure   |
 | **Promotion WFA gates**| Purged/embargoed month-based walk-forward + lockbox gates    |

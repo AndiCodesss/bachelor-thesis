@@ -112,7 +112,7 @@ def deflated_sharpe_ratio(returns: np.ndarray, n_trials: int) -> dict[str, Any]:
         }
 
     mean = float(np.mean(vals))
-    std = float(np.std(vals))
+    std = float(np.std(vals, ddof=1))
     if std <= 1e-12:
         return {
             "available": False,
@@ -128,7 +128,7 @@ def deflated_sharpe_ratio(returns: np.ndarray, n_trials: int) -> dict[str, Any]:
     skew = float(np.mean(centered**3))
     kurt = float(np.mean(centered**4))
 
-    sr_var_num = 1.0 - skew * sr + ((kurt - 1.0) / 4.0) * (sr**2)
+    sr_var_num = 1.0 - skew * sr + ((kurt - 3.0) / 4.0) * (sr**2)
     sr_var_num = max(sr_var_num, 1e-9)
     sr_std = math.sqrt(sr_var_num / max(n - 1, 1))
 

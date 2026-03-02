@@ -1,7 +1,7 @@
 """Tests for opening range feature computation."""
 
 import polars as pl
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from src.framework.features_canonical.opening_range import compute_opening_range_features
 

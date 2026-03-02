@@ -48,6 +48,7 @@ from src.framework.api import (
 )
 from src.framework.backtest.engine import TRADE_SCHEMA
 from src.framework.data.constants import RESULTS_DIR
+from src.framework.features_canonical.builder import LABEL_COLUMNS
 from src.framework.security.framework_lock import verify_manifest
 
 
@@ -458,7 +459,10 @@ def _execute_claimed_task(
             continue
 
         df = filter_feature_group(df, feature_group)
-        raw_signal = np.asarray(strategy_fn(df, params))
+        # Strip label columns so strategy code cannot access forward returns
+        _label_cols_present = [c for c in LABEL_COLUMNS if c in df.columns]
+        strategy_df = df.drop(_label_cols_present) if _label_cols_present else df
+        raw_signal = np.asarray(strategy_fn(strategy_df, params))
         signal_errors = _validate_signal_array(raw_signal, len(df))
         if signal_errors:
             raise ValueError(f"{task_id}: signal contract failed: {signal_errors}")
@@ -479,7 +483,7 @@ def _execute_claimed_task(
 
     gauntlet: dict[str, Any] | None = None
     if run_gauntlet and len(signals_df) > 0 and signal_count > 0:
-        gauntlet = run_validation_gauntlet(signals_df, signal_col="signal")
+        gauntlet = run_validation_gauntlet(signals_df, signal_col="signal", **bt_kwargs)
 
     verdict = "FAIL"
     if run_gauntlet:

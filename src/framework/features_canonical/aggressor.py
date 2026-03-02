@@ -30,7 +30,6 @@ def compute_aggressor_features(bars: pl.DataFrame) -> pl.DataFrame:
             "buy_sell_ratio": pl.Float64,
             "trade_intensity": pl.Float64,
             "relative_intensity": pl.Float64,
-            "aggressor_urgency": pl.Float64,
             "large_lot_fraction": pl.Float64,
             "large_lot_imbalance": pl.Float64,
         })
@@ -161,12 +160,6 @@ def compute_aggressor_features(bars: pl.DataFrame) -> pl.DataFrame:
         (pl.col("trade_intensity")
          / pl.col("trade_intensity").rolling_mean(window_size=24, min_samples=1))
         .alias("relative_intensity"),
-    )
-
-    # Aggressor urgency: buyer conviction relative to total flow
-    bars = bars.with_columns(
-        (pl.col("buy_volume").cast(pl.Float64) / (pl.col("total_volume").cast(pl.Float64) + 1))
-        .alias("aggressor_urgency"),
     )
 
     # Large lot fraction: institutional participation rate
