@@ -15,41 +15,33 @@ lead to measurably better signals than restricting it to standard OHLCV bars?
 
 ```mermaid
 flowchart LR
-    %% Define styles for light mode / dark mode safety
-    style Workspace fill:#fbfbfb,stroke:#333,stroke-dasharray: 5 5,stroke-width:2px,color:#000
-    style Framework fill:#f4f6f7,stroke:#2b5c8f,stroke-width:2px,color:#000
-    style Agent fill:#d4e6f1,stroke:#1f618d,stroke-width:2px,color:#000
-    style SignalFunction fill:#d5f5e3,stroke:#1e8449,stroke-width:2px,color:#000
-    style DataLayer fill:#fcf3cf,stroke:#b7950b,stroke-width:2px,color:#000
-    style BacktestEngine fill:#fadbd8,stroke:#922b21,stroke-width:2px,color:#000
-    style ValidationGauntlet fill:#e8daef,stroke:#5b2c6f,stroke-width:2px,color:#000
-    style Results fill:#f9e79f,stroke:#d4ac0d,stroke-width:2px,color:#000
-
-    subgraph Workspace ["MUTABLE Workspace"]
-        direction TB
-        Agent["LLM Agent<br>Iteratively writes<br>hypotheses"]
-        SignalFunction("Signal Function<br>Returns {-1, 0, +1}<br>array per bar<br>for feature matrix")
-        Agent -- "Writes/Updates" --> SignalFunction
+    subgraph Workspace["MUTABLE Research Workspace"]
+        Agent["LLM Agent"]
+        SignalFn["Signal Function<br/>generate_signal(df, params)"]
+        Agent -->|iterate hypotheses| SignalFn
     end
 
-    subgraph Framework ["IMMUTABLE Engine (SHA-256 locked)"]
-        direction TB
-        DataLayer[("Data Layer<br>1. Loads MBP1 Data<br>2. Builds Bars<br>3. Computes Feats<br>4. Blocks Test Split")]
-
-        BacktestEngine["Backtest Engine<br>1. Bar-by-bar<br>2. Entry: Next Open<br>3. PT/SL: High/Low<br>4. Costs: $14.50 RT"]
-
-        ValidationGauntlet["Validation Gauntlet<br>1. Shuffle Test<br>2. Walk-forward<br>3. Regime Stability<br>4. Param Sensitivity<br>5. Cost Sensitivity<br>6. Time Decay<br>7. Sample Size"]
-
-        Results["Metrics Output<br>Sharpe, PF,<br>MDD, Def. Sharpe"]
-
-        DataLayer -- "Feeds DF<br>(Features)" --> BacktestEngine
-        BacktestEngine -- "Equity Curve<br>& Trade Log" --> ValidationGauntlet
-        ValidationGauntlet -- "7-Test Verdict<br>& Output" --> Results
+    subgraph Framework["IMMUTABLE Framework (SHA-256 locked)"]
+        Lock["Framework Lock Verification"]
+        Loader["Data Loader + ExecutionMode Firewall<br/>RESEARCH: test blocked<br/>PROMOTION: test allowed"]
+        Features["Feature Builder / Cache"]
+        Backtest["Backtest Engine<br/>next-open entries + realistic costs"]
+        Gauntlet["Research Gauntlet (7 tests)"]
     end
 
-    SignalFunction -.-> |"Reads DF"| DataLayer
-    SignalFunction --> |"Submits Signal"| BacktestEngine
-    Results --> |"Verdict /<br>Feedback Loop"| Agent
+    subgraph Promotion["Promotion Pipeline"]
+        Candidate["Candidate Artifact<br/>(hash-verified)"]
+        PromoteCLI["scripts/promote.py"]
+        WFA["Promotion Gates<br/>WFA + embargo/purge + lockbox"]
+        DSR["Deflated Sharpe Gate<br/>(effective trials)"]
+        Verdict["Promotion Verdict<br/>PASS / FAIL"]
+    end
+
+    SignalFn -->|research mode| Loader
+    Loader --> Features --> Backtest --> Gauntlet --> Candidate
+    Candidate --> PromoteCLI --> WFA --> DSR --> Verdict
+    Lock --> PromoteCLI
+    Gauntlet -->|feedback loop| Agent
 ```
 
 ## A/B Experiment Design
