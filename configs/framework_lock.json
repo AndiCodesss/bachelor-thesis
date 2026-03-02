@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-18T21:52:28.971356+00:00",
-  "project_root": ".",
+  "generated_at": "2026-03-01T19:27:36.327788+00:00",
+  "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 13,
   "files": [
     {
@@ -27,17 +27,17 @@
     {
       "path": "src/framework/backtest/validators.py",
       "sha256": "2fb04bc7255ab00a3a57f802007f83057138d11d9ec2bf1098dfc9d709397c9e",
-      "size_bytes": 13291
+      "size_bytes": 14452
     },
     {
       "path": "src/framework/data/constants.py",
-      "sha256": "a8a44bd68767ebaf5aff40ec33aa28c1f3791590bc0c6af3e86575169067eaab",
-      "size_bytes": 4803
+      "sha256": "f798ac9000dd1429f22a49c9f30e87fe99bc39bbf559431dd6d03d8b57beeff4",
+      "size_bytes": 5046
     },
     {
       "path": "src/framework/data/loader.py",
       "sha256": "3528d94552f992fd9fccdc45928d6299a164d6093990178186e7f93db553a89f",
-      "size_bytes": 5463
+      "size_bytes": 6033
     },
     {
       "path": "src/framework/data/splits.py",
@@ -47,7 +47,7 @@
     {
       "path": "src/framework/features_canonical/builder.py",
       "sha256": "e289ff9c558b70d1a85508b3c61c1477b1e8b3219ffe904ab3a6afad0e3f169c",
-      "size_bytes": 10805
+      "size_bytes": 11298
     },
     {
       "path": "src/framework/security/framework_lock.py",
