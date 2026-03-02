@@ -363,12 +363,3 @@ def _cache_key(
     return key
 
 
-def clear_cache(bar_size: str = None):
-    """Remove cached feature matrices. If bar_size specified, only that size."""
-    import shutil
-    if bar_size:
-        target = CACHE_DIR / bar_size
-        if target.exists():
-            shutil.rmtree(target)
-    elif CACHE_DIR.exists():
-        shutil.rmtree(CACHE_DIR)

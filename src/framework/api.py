@@ -41,11 +41,6 @@ def get_split_files(split: str):
     return get_parquet_files(split)
 
 
-def build_features(*args, **kwargs):
-    """Compatibility alias for canonical feature building."""
-    return build_feature_matrix(*args, **kwargs)
-
-
 __all__ = [
     "CostModel",
     "compute_adaptive_costs",
@@ -60,7 +55,6 @@ __all__ = [
     "adversarial_validation_report",
     "load_cached_matrix",
     "build_feature_matrix",
-    "build_features",
     "get_split_files",
     "set_execution_mode",
     "get_execution_mode",
