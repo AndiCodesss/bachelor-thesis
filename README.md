@@ -29,18 +29,22 @@ flowchart LR
         Gauntlet["Research Gauntlet (7 tests)"]
     end
 
+    Candidate["Candidate Artifact<br/>(hash-verified)"]
+
     subgraph Promotion["Promotion Pipeline"]
-        Candidate["Candidate Artifact<br/>(hash-verified)"]
         PromoteCLI["scripts/promote.py"]
         WFA["Promotion Gates<br/>WFA + embargo/purge + lockbox"]
         DSR["Deflated Sharpe Gate<br/>(effective trials)"]
         Verdict["Promotion Verdict<br/>PASS / FAIL"]
     end
 
+    Lock -->|verify before research| Loader
+    Lock -->|verify before promotion| PromoteCLI
     SignalFn -->|research mode| Loader
     Loader --> Features --> Backtest --> Gauntlet --> Candidate
-    Candidate --> PromoteCLI --> WFA --> DSR --> Verdict
-    Lock --> PromoteCLI
+    Candidate --> PromoteCLI
+    PromoteCLI -->|reuses framework| Loader
+    PromoteCLI --> WFA --> DSR --> Verdict
     Gauntlet -->|feedback loop| Agent
 ```
 
