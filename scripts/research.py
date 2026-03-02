@@ -471,7 +471,12 @@ def _execute_claimed_task(
         df_signal = df.with_columns(pl.Series("signal", signal_i8).cast(pl.Int8))
         bars_processed += len(df_signal)
         signal_count += int((df_signal["signal"] != 0).sum())
-        all_signals.append(df_signal.select(["ts_event", "close", "signal"]))
+        # Keep OHLC columns needed by engine (open for entry_on_next_open, high/low for PT/SL)
+        _sig_cols = ["ts_event", "close", "signal"]
+        for _c in ("open", "high", "low"):
+            if _c in df_signal.columns:
+                _sig_cols.append(_c)
+        all_signals.append(df_signal.select(_sig_cols))
 
         trades = run_backtest(df_signal, signal_col="signal", **bt_kwargs)
         if len(trades) > 0:
