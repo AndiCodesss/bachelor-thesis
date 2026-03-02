@@ -57,7 +57,7 @@
 2. **Walk-forward** — rolling window out-of-sample
 3. **Regime stability** — performance across market regimes
 4. **Parameter sensitivity** — degradation under perturbation
-5. **Cost sensitivity** — survival under 2x transaction costs
+5. **Cost sensitivity** — survival under 1.5x transaction costs
 6. **Alpha decay** — signal half-life estimation
 7. **Trade count** — minimum sample size threshold
 

@@ -67,7 +67,7 @@ Same agent, same engine, same rules — only the feature space changes.
 │   ├── api.py                            # Stable public API surface
 │   ├── backtest/
 │   │   ├── engine.py                     # Bar-by-bar backtest with PT/SL/time-stop
-│   │   ├── metrics.py                    # 16 financial metrics (Sharpe, Sortino, PF, MDD, …)
+│   │   ├── metrics.py                    # 16 financial metrics (Sharpe, PF, MDD, win rate, …)
 │   │   ├── validators.py                 # 7-test validation gauntlet
 │   │   └── costs.py                      # Adaptive transaction cost model
 │   ├── data/
@@ -75,7 +75,7 @@ Same agent, same engine, same rules — only the feature space changes.
 │   │   ├── constants.py                  # Tick size, costs, splits, thresholds
 │   │   ├── bars.py                       # Time, volume, and tick bar aggregation
 │   │   └── splits.py                     # Train / validate / test date ranges
-│   ├── features_canonical/               # 17 modules → 221 features
+│   ├── features_canonical/               # 16 feature modules + builder
 │   │   ├── orderflow.py                  # OFI, buy/sell pressure, volume imbalance
 │   │   ├── book.py                       # Depth imbalance, bid-ask spread, book skew
 │   │   ├── microstructure.py             # Tape speed, whip bars, recoil, VPIN
@@ -87,7 +87,7 @@ Same agent, same engine, same rules — only the feature space changes.
 │   │   ├── volume_profile.py             # POC distance, VA position, HVN/LVN
 │   │   ├── footprint.py                  # Delta intensity, stacked imbalances
 │   │   ├── opening_range.py              # OR high/low, range width, breakout signals
-│   │   ├── scalping.py                   # Trap/break setups, absorption, tape speed
+│   │   ├── scalping.py                   # Trap/break setups (standalone, not in canonical pipeline)
 │   │   ├── pipeline.py                   # Regime detection, time features, interactions
 │   │   ├── multi_timeframe.py            # 5 min aggregates of top-20 1 min features
 │   │   ├── ohlcv_indicators.py            # SMA, EMA, RSI, ATR, Bollinger, MACD, Stochastic, ADX, OBV
@@ -112,6 +112,7 @@ Same agent, same engine, same rules — only the feature space changes.
 │       ├── experiments.py                # Experiment logging
 │       ├── budget.py                     # Mission budget persistence
 │       ├── trial_counter.py              # Raw + effective trial count for deflated Sharpe
+│       ├── feature_groups.py            # A/B group feature filtering (OHLCV vs OHLCV+MBP1)
 │       └── promotion.py                  # Candidate artifact verification
 │
 ├── configs/
@@ -140,7 +141,7 @@ Every signal the LLM agent produces must conform to a strict interface:
 def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray:
     """
     Args:
-        df: Feature matrix with 221 columns (OHLCV + canonical features)
+        df: Feature matrix (OHLCV + canonical features, ~170 columns)
         params: Strategy parameters
 
     Returns:
@@ -162,9 +163,9 @@ use high/low for worst-case fills.
 | **Effective trials**   | Correlation-adjusted trial counting (`sqrt_family`) for DSR  |
 | **Shuffle test**       | Signal must beat 100 random permutations (p < 0.05)          |
 | **Walk-forward**       | Rolling out-of-sample windows must show positive performance |
-| **Regime stability**   | Must work across 4+ distinct market regimes                  |
+| **Regime stability**   | Must be profitable in both high-vol and low-vol regimes      |
 | **Cost sensitivity**   | Must remain profitable at 1.5x transaction costs ($21.75 RT); 2x PnL also reported |
-| **Alpha decay**        | Exponential fit on rolling Sharpe; half-life > 60 days       |
+| **Alpha decay**        | Exponential fit on rolling Sharpe; half-life > 120 days      |
 | **Factor attribution** | OLS decomposition isolates pure alpha from factor exposure   |
 | **Promotion WFA gates**| Purged/embargoed month-based walk-forward + lockbox gates    |
 

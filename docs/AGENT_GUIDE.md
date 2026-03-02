@@ -27,7 +27,7 @@ Agents are expected to be creative in:
 - Experimental features: `research/features_experimental/`
 - Runtime state: `research/.state/`
 - Candidates: `research/candidates/` (created at runtime)
-- Event log: `research/.state/experiments.jsonl` (created at runtime)
+- Event log: `results/logs/research_experiments.jsonl` (created at runtime)
 
 ## Signal Contract
 
