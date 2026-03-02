@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -100,12 +102,100 @@ def count_trials(
     return count
 
 
+def _strategy_family(row: dict[str, Any]) -> str | None:
+    """Best-effort strategy family label for trial correlation grouping."""
+    name = row.get("strategy_name") or row.get("strategy")
+    if name:
+        return str(name).strip() or None
+    sid = row.get("strategy_id")
+    if sid:
+        return str(sid).strip() or None
+    return None
+
+
+def estimate_effective_trials(
+    experiments_path: Path | str = _DEFAULT_EXPERIMENTS_PATH,
+) -> dict[str, Any]:
+    """Estimate correlation-adjusted effective trial count.
+
+    Method:
+    - raw_trials: all valid JSON object rows
+    - unique_strategies: unique strategy_id or (strategy_name, params) keys
+    - effective_trials: sum(sqrt(n_family)) across strategy families
+
+    The sqrt-family aggregation is a conservative correlation adjustment:
+    large parameter sweeps in one family contribute sublinearly.
+    """
+    path = Path(experiments_path)
+    if not path.exists():
+        return {
+            "raw_trials": 0,
+            "unique_strategies": 0,
+            "family_counts": {},
+            "family_count": 0,
+            "effective_trials": 1,
+            "method": "sqrt_family",
+        }
+
+    raw_trials = 0
+    families: Counter[str] = Counter()
+    unique: set[str] = set()
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            row_raw = line.strip()
+            if not row_raw:
+                continue
+            try:
+                row = json.loads(row_raw)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+
+            raw_trials += 1
+
+            strategy_id = row.get("strategy_id")
+            if strategy_id:
+                unique.add(str(strategy_id))
+            else:
+                strategy_name = row.get("strategy_name") or row.get("strategy")
+                if strategy_name:
+                    params = row.get("params", {})
+                    key = (
+                        f"{strategy_name}:"
+                        f"{json.dumps(params, sort_keys=True, separators=(',', ':'), default=str)}"
+                    )
+                    unique.add(key)
+
+            fam = _strategy_family(row)
+            if fam:
+                families[fam] += 1
+
+    if raw_trials <= 0:
+        eff = 1
+    elif families:
+        eff = int(round(sum(math.sqrt(float(n)) for n in families.values())))
+        eff = max(1, min(eff, raw_trials))
+    else:
+        eff = 1
+
+    return {
+        "raw_trials": int(raw_trials),
+        "unique_strategies": int(len(unique)),
+        "family_counts": dict(families),
+        "family_count": int(len(families)),
+        "effective_trials": int(eff),
+        "method": "sqrt_family",
+    }
+
+
 def sync_trial_count(
     experiments_path: Path | str = _DEFAULT_EXPERIMENTS_PATH,
     state_path: Path | str = _DEFAULT_STATE_PATH,
     lock_path: Path | str = _DEFAULT_LOCK_PATH,
 ) -> int:
-    """Sync state to max(current, unique strategy_ids in JSONL). Monotonic."""
+    """Sync state to max(current, JSONL row count). Monotonic."""
     sp = Path(state_path)
     lp = Path(lock_path)
     sp.parent.mkdir(parents=True, exist_ok=True)
@@ -129,5 +219,6 @@ __all__ = [
     "get_trial_count",
     "increment_trial",
     "count_trials",
+    "estimate_effective_trials",
     "sync_trial_count",
 ]

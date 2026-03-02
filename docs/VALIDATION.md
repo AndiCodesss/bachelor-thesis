@@ -46,6 +46,8 @@
 - Tracks cumulative hypotheses tested for Deflated Sharpe correction
 - Atomic persistence with portalocker sidecar locks
 - Syncs with `results/logs/research_experiments.jsonl` (monotonic, never decreases)
+- `estimate_effective_trials(...)` computes correlation-adjusted effective trials
+  via a conservative sqrt-family aggregation to reduce sweep overcounting
 
 ## Validation Gauntlet (7 tests)
 
@@ -58,6 +60,20 @@
 5. **Cost sensitivity** — survival under 2x transaction costs
 6. **Alpha decay** — signal half-life estimation
 7. **Trade count** — minimum sample size threshold
+
+## Promotion Gates
+
+`research/ml/promotion_gates.py` runs month-based walk-forward evaluation with:
+
+- rolling 12-month train / 2-month test folds (2-month step, non-overlapping tests)
+- optional embargo months and day-level purge at fold boundaries
+- fold-level Sharpe tracking and positive-fold ratio checks
+- aggregate Sharpe on combined out-of-sample daily returns
+- Deflated Sharpe adjustment using tracked trial counts
+- optional final lockbox gate on untouched trailing months
+
+`scripts/promote.py` performs artifact verification and evaluates these gates for
+candidate promotion decisions.
 
 ## Integrity Verification
 

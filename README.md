@@ -112,13 +112,15 @@ Same agent, same engine, same rules — only the feature space changes.
 ├── research/                             # Mutable workspace (LLM agent operates here)
 │   ├── signals/
 │   │   └── example_ema_turn.py           # Reference signal implementation
+│   ├── ml/
+│   │   └── promotion_gates.py            # Purged/embargoed WFA promotion gates
 │   └── lib/
 │       ├── atomic_io.py                  # Thread-safe atomic JSON writes
 │       ├── candidates.py                 # Write-once candidate artifacts
 │       ├── coordination.py               # File locks, task state, heartbeat
 │       ├── experiments.py                # Experiment logging
 │       ├── budget.py                     # Mission budget persistence
-│       ├── trial_counter.py              # Trial count for deflated Sharpe
+│       ├── trial_counter.py              # Raw + effective trial count for deflated Sharpe
 │       └── promotion.py                  # Candidate artifact verification
 │
 ├── configs/
@@ -129,12 +131,13 @@ Same agent, same engine, same rules — only the feature space changes.
 │
 ├── scripts/
 │   ├── research.py                       # Autonomous research loop entrypoint
+│   ├── promote.py                        # Candidate promotion gate runner
 │   └── framework/
 │       ├── build_lock.py                 # Build framework integrity manifest
 │       ├── verify_lock.py                # Verify integrity before runs
 │       └── set_readonly.py               # Set framework files read-only
 │
-├── tests/                                # 39 test files covering all modules
+├── tests/                                # Full test suite (unit + integration)
 └── docs/                                 # Architecture, validation, agent guide
 ```
 
@@ -165,12 +168,14 @@ use high/low for worst-case fills.
 | **Framework lock**     | SHA-256 manifest of 13 core files; verified before every run |
 | **Split firewall**     | `ExecutionMode.RESEARCH` blocks all access to the test split |
 | **Deflated Sharpe**    | Corrects observed Sharpe for number of hypotheses tested     |
+| **Effective trials**   | Correlation-adjusted trial counting (`sqrt_family`) for DSR  |
 | **Shuffle test**       | Signal must beat 100 random permutations (p < 0.05)          |
 | **Walk-forward**       | Rolling out-of-sample windows must show positive performance |
 | **Regime stability**   | Must work across 4+ distinct market regimes                  |
 | **Cost sensitivity**   | Must remain profitable at 2x transaction costs ($29 RT)      |
 | **Alpha decay**        | Exponential fit on rolling Sharpe; half-life > 60 days       |
 | **Factor attribution** | OLS decomposition isolates pure alpha from factor exposure   |
+| **Promotion WFA gates**| Purged/embargoed month-based walk-forward + lockbox gates    |
 
 ## Data
 
@@ -190,10 +195,39 @@ Data is not included. Set `NQ_DATA_PATH` to your raw data directory.
 ## Setup
 
 ```bash
+# Linux/macOS
+export NQ_DATA_PATH="/path/to/NQ_raw"
+
+# Windows PowerShell
+# $env:NQ_DATA_PATH="C:\Users\Andreas Oberdörfer\Downloads\generator\data\NQ_raw"
+
 uv sync                                                                         # install dependencies
 uv run pytest -q                                                                # run tests
 uv run python scripts/framework/verify_lock.py --manifest configs/framework_lock.json --mode error   # verify integrity
 uv run python scripts/research.py --mission configs/missions/alpha-discovery.yaml --max-experiments 100  # research loop
+uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.json --verify-only        # promotion verification
+```
+
+## Promotion Workflow
+
+`scripts/promote.py` is the final anti-overfitting gate before holdout conclusions:
+
+1. Verify framework lock + candidate artifact hashes.
+2. Run walk-forward validation over month-based folds.
+3. Apply optional embargo and purge between train/test boundaries.
+4. Compute aggregate Sharpe + Deflated Sharpe (effective trials aware).
+5. Optionally evaluate a final lockbox period.
+
+Example:
+
+```bash
+uv run python scripts/promote.py \
+  --candidate research/candidates/<strategy_id>.json \
+  --train-months 12 \
+  --test-months 2 \
+  --step-months 2 \
+  --embargo-months 1 \
+  --purge-days 5
 ```
 
 ## Documentation

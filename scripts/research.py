@@ -531,6 +531,8 @@ def _execute_claimed_task(
             "strategy_id": strategy_id,
             "strategy_name": strategy_name,
             "version": str(getattr(strategy_module, "STRATEGY_METADATA", {}).get("version", "1.0")),
+            "bar_config": bar_config,
+            "backtest": bt_kwargs,
             "parameters": params,
             "validation_metrics": metrics,
             "gauntlet_results": gauntlet or {},

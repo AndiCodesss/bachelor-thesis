@@ -7,6 +7,7 @@ import numpy as np
 
 from research.lib.trial_counter import (
     count_trials,
+    estimate_effective_trials,
     get_trial_count,
     increment_trial,
     sync_trial_count,
@@ -148,3 +149,27 @@ def test_increment_rejects_zero_count(tmp_path: Path) -> None:
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
+
+
+def test_estimate_effective_trials_sublinear_by_family(tmp_path: Path) -> None:
+    """Effective trials should be below raw for concentrated family sweeps."""
+    experiments = tmp_path / "experiments.jsonl"
+    rows = []
+    rows.extend({"strategy_name": "alpha", "params": {"k": i}} for i in range(16))
+    rows.extend({"strategy_name": "beta", "params": {"k": i}} for i in range(4))
+    with open(experiments, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+    out = estimate_effective_trials(experiments)
+    assert out["raw_trials"] == 20
+    assert out["family_count"] == 2
+    # sqrt(16) + sqrt(4) = 6
+    assert out["effective_trials"] == 6
+    assert out["effective_trials"] < out["raw_trials"]
+
+
+def test_estimate_effective_trials_missing_file(tmp_path: Path) -> None:
+    out = estimate_effective_trials(tmp_path / "missing.jsonl")
+    assert out["raw_trials"] == 0
+    assert out["effective_trials"] == 1
