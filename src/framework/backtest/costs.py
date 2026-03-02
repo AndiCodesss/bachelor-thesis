@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import polars as pl
 
 from src.framework.data.constants import (
+    ADAPTIVE_COST_SESSION_MULTIPLIER,
     ADAPTIVE_COST_SPREAD_MULTIPLIER,
     ADAPTIVE_COST_VOL_LOOKBACK,
     ADAPTIVE_COST_VOL_MULTIPLIER,
@@ -26,6 +27,7 @@ class CostModel:
     vol_multiplier: float = ADAPTIVE_COST_VOL_MULTIPLIER
     spread_multiplier: float = ADAPTIVE_COST_SPREAD_MULTIPLIER
     volume_discount: float = ADAPTIVE_COST_VOLUME_DISCOUNT
+    session_multiplier: float = ADAPTIVE_COST_SESSION_MULTIPLIER
 
     def estimate_cost_rt(
         self,
@@ -45,11 +47,14 @@ class CostModel:
         Returns:
             Estimated round-trip cost in dollars per contract.
         """
+        # Liquidity U-shape: wider spreads near session open/close
+        session_penalty = 4.0 * (session_progress - 0.5) ** 2  # 0 at mid, 1 at edges
         slippage_per_side = (
             self.base_slippage_per_side
             + self.vol_multiplier * max(0.0, volatility_z) * TICK_VALUE
             + self.spread_multiplier * max(0.0, spread_ticks - 1.0) * TICK_VALUE
             - self.volume_discount * max(0.0, volume_z) * TICK_VALUE
+            + self.session_multiplier * session_penalty * TICK_VALUE
         )
         # Floor at half base slippage — can't get cheaper than that
         slippage_per_side = max(self.base_slippage_per_side * 0.5, slippage_per_side)
@@ -76,7 +81,7 @@ def compute_adaptive_costs(
 
     Args:
         trades: DataFrame with TRADE_SCHEMA columns (entry_time, exit_time, etc.)
-        bars: DataFrame with ts_event, close, volume, and optionally ask/bid columns.
+        bars: DataFrame with ts_event, close, volume, and optionally ask_price/bid_price columns.
         cost_model: CostModel instance; defaults to CostModel.flat().
 
     Returns:
@@ -91,10 +96,10 @@ def compute_adaptive_costs(
     # Prepare bars with required derived columns
     bars_sorted = bars.sort("ts_event")
 
-    # Spread in ticks: if ask/bid available, compute; otherwise assume 1 tick
-    if "ask" in bars_sorted.columns and "bid" in bars_sorted.columns:
+    # Spread in ticks: if ask_price/bid_price available, compute; otherwise assume 1 tick
+    if "ask_price" in bars_sorted.columns and "bid_price" in bars_sorted.columns:
         bars_sorted = bars_sorted.with_columns(
-            ((pl.col("ask") - pl.col("bid")) / 0.25).alias("_spread_ticks")
+            ((pl.col("ask_price") - pl.col("bid_price")) / 0.25).alias("_spread_ticks")
         )
     else:
         bars_sorted = bars_sorted.with_columns(

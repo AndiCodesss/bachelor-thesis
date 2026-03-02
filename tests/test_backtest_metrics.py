@@ -67,7 +67,7 @@ def test_known_answer_five_trades():
     # Drawdowns:    0 -> 0 -> 0 -> 314.50 -> 529.00 -> 43.50
     # Max drawdown = $529.00
     expected_max_drawdown = 529.00
-    expected_max_drawdown_pct = (529.00 / 371.00) * 100  # ~142.59%
+    expected_max_drawdown_pct = (529.00 / (100_000.0 + 371.00)) * 100  # ~0.527%
 
     # Holding times: 30, 45, 20, 15, 60 minutes
     expected_avg_holding_time = (30 + 45 + 20 + 15 + 60) / 5  # = 34 minutes
@@ -200,9 +200,10 @@ def test_all_losers():
     assert metrics["profit_factor"] == 0.0
     assert metrics["net_pnl"] < 0
     assert metrics["max_win"] == 0.0  # No wins
-    # If equity never gets above zero, drawdown % uses trough-magnitude fallback.
+    # With initial_capital=100k, drawdown % is relative to peak account value
     assert metrics["max_drawdown"] > 0
-    assert metrics["max_drawdown_pct"] == pytest.approx(100.0)
+    # 3 * $214.50 = $643.50 loss, peak = $100k, pct = 0.6435%
+    assert metrics["max_drawdown_pct"] == pytest.approx(0.6435, abs=0.01)
 
 
 def test_single_trade_sharpe():
@@ -224,10 +225,10 @@ def test_single_trade_sharpe():
     assert metrics["sharpe_ratio"] == 0.0  # Can't compute from single sample
 
 
-def test_sharpe_uses_trading_days_only():
-    """Sharpe should use only trading days (no zero-fill for non-trade days)."""
-    day1 = datetime(2025, 2, 1, 10, 0, 0)
-    day3 = datetime(2025, 2, 3, 10, 0, 0)  # gap day: 2025-02-02
+def test_sharpe_zero_fills_gap_days():
+    """Sharpe should zero-fill non-trading weekdays between first and last trade."""
+    day1 = datetime(2025, 2, 3, 10, 0, 0)   # Monday
+    day3 = datetime(2025, 2, 5, 10, 0, 0)   # Wednesday (gap: Tuesday Feb 4)
 
     trades = pl.DataFrame({
         "entry_time": [day1, day3],
@@ -240,10 +241,48 @@ def test_sharpe_uses_trading_days_only():
 
     metrics = compute_metrics(trades)
 
-    # Only 2 trading days, no zero-fill for the gap day
-    expected_daily = np.array([285.5, 85.5], dtype=np.float64)
+    # 3 days (Mon, Tue=0, Wed) after zero-fill
+    expected_daily = np.array([285.5, 0.0, 85.5], dtype=np.float64)
     expected_sharpe = (expected_daily.mean() / expected_daily.std(ddof=1)) * np.sqrt(252)
     assert abs(metrics["sharpe_ratio"] - float(expected_sharpe)) < 1e-9
+
+
+def test_sharpe_sparse_trading_diluted():
+    """Sparse trading over many weekdays should produce lower Sharpe than dense trading."""
+    # Trade only on Mon and Fri of a 2-week span (4 trading days out of 10)
+    trades = pl.DataFrame({
+        "entry_time": [
+            datetime(2025, 2, 3, 10, 0, 0),   # Mon week 1
+            datetime(2025, 2, 7, 10, 0, 0),   # Fri week 1
+            datetime(2025, 2, 10, 10, 0, 0),  # Mon week 2
+            datetime(2025, 2, 14, 10, 0, 0),  # Fri week 2
+        ],
+        "exit_time": [
+            datetime(2025, 2, 3, 10, 30, 0),
+            datetime(2025, 2, 7, 10, 30, 0),
+            datetime(2025, 2, 10, 10, 30, 0),
+            datetime(2025, 2, 14, 10, 30, 0),
+        ],
+        "entry_price": [18000.0, 18000.0, 18000.0, 18000.0],
+        "exit_price": [18010.0, 18010.0, 18010.0, 18010.0],
+        "direction": [1, 1, 1, 1],
+        "size": [1, 1, 1, 1],
+    })
+
+    metrics = compute_metrics(trades)
+
+    # Net PnL per trade: 10pts = $200 gross - $14.50 = $185.50
+    # 10 weekdays total (Feb 3-14), 4 with trades, 6 zero-filled
+    # Daily PnLs: [185.5, 0, 0, 0, 185.5, 0, 0, 0, 0, 185.5, 0, 0, 0, 185.5]
+    # wait - Feb 3 (Mon) to Feb 14 (Fri) = 10 weekdays
+    pnl_per_trade = 185.5
+    daily = np.zeros(10)
+    daily[0] = pnl_per_trade   # Mon Feb 3
+    daily[4] = pnl_per_trade   # Fri Feb 7
+    daily[5] = pnl_per_trade   # Mon Feb 10
+    daily[9] = pnl_per_trade   # Fri Feb 14
+    expected_sharpe = (daily.mean() / daily.std(ddof=1)) * np.sqrt(252)
+    assert abs(metrics["sharpe_ratio"] - expected_sharpe) < 1e-6
 
 
 def test_drawdown_specific_sequence():
@@ -292,9 +331,9 @@ def test_drawdown_specific_sequence():
     assert metrics["trade_count"] == 5
     assert metrics["max_drawdown"] > 240  # Should be close to 249
     assert metrics["max_drawdown"] < 260
-    # Max DD% = 249 / 201 * 100 ~= 123.9%
-    assert metrics["max_drawdown_pct"] > 115
-    assert metrics["max_drawdown_pct"] < 135
+    # Max DD% = 249 / (100000 + 201) * 100 ~= 0.249%
+    assert metrics["max_drawdown_pct"] > 0.20
+    assert metrics["max_drawdown_pct"] < 0.30
 
 
 def test_identical_trades_sharpe():

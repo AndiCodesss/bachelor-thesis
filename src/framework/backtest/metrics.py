@@ -6,7 +6,7 @@ import numpy as np
 from src.framework.data.constants import TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
 
 
-def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_override_col: str | None = None) -> dict:
+def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_override_col: str | None = None, initial_capital: float = 100_000.0) -> dict:
     """Compute financial performance metrics from trades.
 
     Args:
@@ -109,7 +109,18 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
         ).group_by("_date").agg(pl.col("net_pnl").sum()).sort("_date")
 
         if len(daily_pnl_df) > 1:
-            # Use only trading days (days with actual trades) for Sharpe
+            # Zero-fill non-trading weekdays so Sharpe is not inflated
+            min_date = daily_pnl_df["_date"].min()
+            max_date = daily_pnl_df["_date"].max()
+            all_bdays = pl.DataFrame({
+                "_date": pl.date_range(min_date, max_date, "1d", eager=True)
+            }).filter(pl.col("_date").dt.weekday() <= 5)
+            # Include actual trading dates (handles weekend trades in tests)
+            all_dates = pl.concat([
+                all_bdays.select("_date"),
+                daily_pnl_df.select("_date"),
+            ]).unique().sort("_date")
+            daily_pnl_df = all_dates.join(daily_pnl_df, on="_date", how="left").fill_null(0)
             trading_day_pnls = daily_pnl_df["net_pnl"].to_numpy().astype(np.float64)
 
             if len(trading_day_pnls) > 1:
@@ -126,25 +137,16 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
     else:
         sharpe_ratio = 0.0
 
-    # Drawdown calculation
+    # Drawdown calculation (relative to initial capital)
     equity_curve = np.cumsum(trade_pnls)
     equity_with_start = np.concatenate([[0.0], equity_curve])
-    running_max = np.maximum.accumulate(equity_with_start)
-    drawdowns = running_max - equity_with_start
+    running_max = np.maximum.accumulate(initial_capital + equity_with_start)
+    drawdowns = running_max - (initial_capital + equity_with_start)
     max_drawdown = np.max(drawdowns)
 
-    # Max drawdown percentage
+    # Max drawdown percentage (relative to peak account value)
     peak_equity = np.max(running_max)
-    if peak_equity > 0:
-        max_drawdown_pct = (max_drawdown / peak_equity) * 100.0
-    elif max_drawdown > 0:
-        # If equity never rises above 0, peak-based DD% is undefined.
-        # Fall back to trough magnitude so always-losing curves don't report 0%.
-        trough_equity = np.min(equity_with_start)
-        denom = abs(trough_equity)
-        max_drawdown_pct = (max_drawdown / denom) * 100.0 if denom > 0 else 0.0
-    else:
-        max_drawdown_pct = 0.0
+    max_drawdown_pct = (max_drawdown / peak_equity) * 100.0 if peak_equity > 0 else 0.0
 
     # Holding time stats
     avg_holding_time_min = df["holding_time_min"].mean()

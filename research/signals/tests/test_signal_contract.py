@@ -13,6 +13,8 @@ import importlib
 import inspect
 from pathlib import Path
 
+from datetime import datetime, timedelta, timezone
+
 import numpy as np
 import polars as pl
 import pytest
@@ -43,11 +45,11 @@ def _make_dummy_bars(n_bars: int = 50) -> pl.DataFrame:
     """Create a minimal bar DataFrame for contract testing."""
     rng = np.random.default_rng(42)
     close = 15000.0 + np.cumsum(rng.standard_normal(n_bars) * 5.0)
+    start = datetime(2024, 1, 2, 9, 30, 0, tzinfo=timezone.utc)
     return pl.DataFrame({
         "ts_event": pl.datetime_range(
-            pl.lit("2024-01-02T09:30:00").cast(pl.Datetime("ns", "UTC")),
-            pl.lit("2024-01-02T09:30:00").cast(pl.Datetime("ns", "UTC"))
-            + pl.duration(minutes=5 * (n_bars - 1)),
+            start,
+            start + timedelta(minutes=5 * (n_bars - 1)),
             interval="5m",
             eager=True,
         ).head(n_bars),

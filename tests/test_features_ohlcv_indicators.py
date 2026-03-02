@@ -32,7 +32,7 @@ def _make_bars(timestamps, closes, opens=None, highs=None, lows=None, volumes=No
         "ts_event": timestamps,
         "open": [float(o) for o in opens],
         "high": [float(h) for h in highs],
-        "low": [float(l) for l in lows],
+        "low": [float(lo) for lo in lows],
         "close": [float(c) for c in closes],
         "volume": volumes,
     }).with_columns(

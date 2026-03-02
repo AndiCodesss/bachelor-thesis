@@ -162,8 +162,8 @@ class TestVolumeProfileFeatures:
 
         # VA high should be >= VA low at every bar
         va_low_values = result["va_low"].to_list()
-        for h, l in zip(va_high_values, va_low_values):
-            assert h >= l
+        for hi, lo in zip(va_high_values, va_low_values):
+            assert hi >= lo
 
     def test_rolling_poc_uses_window(self):
         bars = self._make_multi_bar_data(n_bars=30)

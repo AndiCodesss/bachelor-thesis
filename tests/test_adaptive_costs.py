@@ -50,6 +50,18 @@ def test_high_volume_decreases_cost():
     assert cost_liquid < cost_thin
 
 
+def test_session_edges_increase_cost():
+    """Trades at session open/close should cost more than mid-session."""
+    model = CostModel.flat()
+    cost_mid = model.estimate_cost_rt(1.0, 0.0, 0.0, 0.5)     # mid-session
+    cost_open = model.estimate_cost_rt(1.0, 0.0, 0.0, 0.0)    # session open
+    cost_close = model.estimate_cost_rt(1.0, 0.0, 0.0, 1.0)   # session close
+    assert cost_open > cost_mid
+    assert cost_close > cost_mid
+    # Open and close should be symmetric
+    assert cost_open == pytest.approx(cost_close, abs=0.01)
+
+
 def test_floor_enforcement():
     """Even with extreme negative inputs, cost never drops below commission_rt."""
     model = CostModel.flat()
@@ -92,15 +104,15 @@ def test_known_answer_volume_discount_hits_floor():
 
 
 def _make_bars(n: int = 50, base_time: datetime | None = None) -> pl.DataFrame:
-    """Create synthetic bars with ts_event, close, volume, ask, bid."""
+    """Create synthetic bars with ts_event, close, volume, ask_price, bid_price."""
     if base_time is None:
         base_time = datetime(2025, 3, 1, 10, 0, 0)
     return pl.DataFrame({
         "ts_event": [base_time + timedelta(minutes=5 * i) for i in range(n)],
         "close": [18000.0 + i * 0.5 for i in range(n)],
         "volume": [100.0 + (i % 10) * 10 for i in range(n)],
-        "ask": [18000.25 + i * 0.5 for i in range(n)],
-        "bid": [18000.00 + i * 0.5 for i in range(n)],
+        "ask_price": [18000.25 + i * 0.5 for i in range(n)],
+        "bid_price": [18000.00 + i * 0.5 for i in range(n)],
     })
 
 
@@ -143,8 +155,8 @@ def test_compute_adaptive_costs_empty_trades():
 
 
 def test_compute_adaptive_costs_no_ask_bid():
-    """Bars without ask/bid columns default spread to 1 tick."""
-    bars = _make_bars(50).drop(["ask", "bid"])
+    """Bars without ask_price/bid_price columns default spread to 1 tick."""
+    bars = _make_bars(50).drop(["ask_price", "bid_price"])
     trades = _make_trades(3)
     result = compute_adaptive_costs(trades, bars)
     assert "adaptive_cost_rt" in result.columns

@@ -113,6 +113,31 @@ def test_shuffle_test_random_signal():
     assert "shuffle_std" in result
 
 
+def test_shuffle_preserves_block_structure():
+    """Block-bootstrap shuffle should preserve signal length and value distribution."""
+    rng = np.random.default_rng(SEED)
+
+    # Create a signal with known block structure
+    signal = np.array([1, 1, 1, 0, 0, -1, -1, -1, -1, 0, 1, 1], dtype=np.int8)
+    # Blocks: [1,1,1], [0,0], [-1,-1,-1,-1], [0], [1,1]
+
+    change_points = np.flatnonzero(np.diff(signal) != 0) + 1
+    blocks = np.split(signal, change_points)
+
+    # Permute blocks
+    block_order = rng.permutation(len(blocks))
+    shuffled = np.concatenate([blocks[j] for j in block_order])
+
+    # Length is preserved
+    assert len(shuffled) == len(signal)
+    # Value distribution is preserved
+    assert sorted(signal.tolist()) == sorted(shuffled.tolist())
+    # Observed block count <= original (same-value blocks may merge when adjacent)
+    shuffled_change_points = np.flatnonzero(np.diff(shuffled) != 0) + 1
+    shuffled_blocks = np.split(shuffled, shuffled_change_points)
+    assert len(shuffled_blocks) <= len(blocks)
+
+
 def test_walk_forward_test_perfect_signal():
     """Perfect signal should PASS walk-forward test."""
     df = create_synthetic_data(n_bars=1000, n_days=5, perfect_signal=True)

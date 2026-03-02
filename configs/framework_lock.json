@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-02T16:23:59.553446+00:00",
+  "generated_at": "2026-03-02T17:56:01.358529+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 13,
   "files": [
@@ -11,8 +11,8 @@
     },
     {
       "path": "src/framework/backtest/costs.py",
-      "sha256": "ffc564f993e897f411e25dd1d7d0a9dda2a189d41532562f852afdaa6f006755",
-      "size_bytes": 7693
+      "sha256": "e31df15117cb37e3b16f30eab24aa9e7be01712ce0588f5eba2a231767e645c6",
+      "size_bytes": 8071
     },
     {
       "path": "src/framework/backtest/engine.py",
@@ -21,18 +21,18 @@
     },
     {
       "path": "src/framework/backtest/metrics.py",
-      "sha256": "45d8b05ea90ef57c6e7a03ee489a074c58fba9a005f37c80d6bcb02723e847d7",
-      "size_bytes": 6292
+      "sha256": "6697516962c215e9488de5556a04185a36ae61ab01de6b6dc4addcea95d66899",
+      "size_bytes": 6651
     },
     {
       "path": "src/framework/backtest/validators.py",
-      "sha256": "2fb04bc7255ab00a3a57f802007f83057138d11d9ec2bf1098dfc9d709397c9e",
-      "size_bytes": 14452
+      "sha256": "521d242924e36691f483d687c91e5f0d4b911f4f4a13e3307c2c6e0e83bc4287",
+      "size_bytes": 14733
     },
     {
       "path": "src/framework/data/constants.py",
-      "sha256": "f798ac9000dd1429f22a49c9f30e87fe99bc39bbf559431dd6d03d8b57beeff4",
-      "size_bytes": 5046
+      "sha256": "f2bd9f93cd699c569051b3481862aa029f66e3937279d68da3cc3d8175170db3",
+      "size_bytes": 5145
     },
     {
       "path": "src/framework/data/loader.py",

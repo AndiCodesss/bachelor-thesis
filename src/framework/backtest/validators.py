@@ -24,14 +24,19 @@ def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int
     real_metrics = compute_metrics(real_trades)
     real_sharpe = real_metrics["sharpe_ratio"]
 
-    # Run backtest on shuffled signals
+    # Run backtest on shuffled signals (block permutation)
     shuffle_sharpes = []
     rng = np.random.default_rng(SEED)
 
+    # Identify contiguous blocks (runs of identical values)
+    signal_arr = df[signal_col].to_numpy()
+    change_points = np.flatnonzero(np.diff(signal_arr) != 0) + 1
+    blocks = np.split(signal_arr, change_points)
+
     for i in range(n_iterations):
-        # Shuffle signal values while preserving distribution
-        shuffled_signal = df[signal_col].to_numpy().copy()
-        rng.shuffle(shuffled_signal)
+        # Permute block order (preserves block sizes and transition count)
+        block_order = rng.permutation(len(blocks))
+        shuffled_signal = np.concatenate([blocks[j] for j in block_order])
 
         df_shuffled = df.with_columns([
             pl.Series("_shuffled_signal", shuffled_signal)

@@ -28,9 +28,9 @@ def _make_bars(n_days: int, seed: int = 42) -> pl.DataFrame:
             o = price + rng.normal(0, 5)
             c = price + rng.normal(0, 5)
             h = max(o, c) + abs(rng.normal(0, 2))
-            l = min(o, c) - abs(rng.normal(0, 2))
+            lo = min(o, c) - abs(rng.normal(0, 2))
             v = int(abs(rng.normal(1000, 200)))
-            rows.append({"ts_event": ts, "open": o, "high": h, "low": l, "close": c, "volume": v})
+            rows.append({"ts_event": ts, "open": o, "high": h, "low": lo, "close": c, "volume": v})
             price = c
     return pl.DataFrame(rows)
 
