@@ -2,7 +2,7 @@
 
 ## Architecture
 
-- Immutable evaluation framework: `src/framework/` (13 files, SHA-256 locked)
+- Immutable evaluation framework: `src/framework/` (28 files, SHA-256 locked)
 - Mutable research workspace: `research/`
 - Lock manifest: `configs/framework_lock.json`
 
@@ -18,9 +18,9 @@
 
 ## Splits (enforced at runtime)
 
-- TRAIN: Mar 2023 -- Aug 2024 (6 regime folders)
-- VALIDATE: Feb 2025 -- Jun 2025 (5 month folders)
-- TEST: Jul 2025 -- Jan 2026 (blocked in research mode)
+- TRAIN: Oct 2022 -- Aug 2024 (23 month folders)
+- VALIDATE: Sep 2024 -- Mar 2025 (7 month folders)
+- TEST: Apr 2025 -- Feb 2026 (blocked in research mode)
 
 ## Transaction Costs
 

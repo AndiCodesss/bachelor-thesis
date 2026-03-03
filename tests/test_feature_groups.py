@@ -170,7 +170,7 @@ def test_ohlcv_columns_subset_of_real_features():
     from src.framework.features_canonical.builder import get_feature_columns
 
     files = get_split_files("train")
-    df = load_cached_matrix(files[0], bar_size="5m")
+    df = load_cached_matrix(files[1], bar_size="5m")  # files[0] may be Sunday (no bars)
     real_features = set(get_feature_columns(df))
 
     missing = OHLCV_FEATURE_COLUMNS - real_features
@@ -183,7 +183,7 @@ def test_filter_ohlcv_real_data_column_count():
     from src.framework.features_canonical.builder import get_feature_columns
 
     files = get_split_files("train")
-    df = load_cached_matrix(files[0], bar_size="5m")
+    df = load_cached_matrix(files[1], bar_size="5m")  # files[0] may be Sunday (no bars)
     filtered = filter_feature_group(df, "ohlcv")
 
     feat_cols = get_feature_columns(filtered)

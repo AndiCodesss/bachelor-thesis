@@ -8,7 +8,7 @@ from src.framework.data.constants import (
     WHALE_LOT_THRESHOLD_LONDON, SWING_VP_LOOKBACK,
 )
 from src.framework.data.loader import filter_rth, filter_eth
-from src.framework.features_canonical.builder import _cache_key
+from src.framework.features_canonical.builder import _feature_cache_dir, CACHE_DIR
 
 
 class TestETHConstants:
@@ -85,22 +85,19 @@ class TestFilterETH:
         assert len(result) == 0
 
 
-class TestCacheKey:
-    def test_rth_default_unchanged(self):
-        """Default session_filter='rth' should not change existing cache keys."""
-        assert _cache_key("5m", "time", None) == "5m"
-        assert _cache_key("5m", "time", None, include_bar_columns=True) == "5m_bars"
-        assert _cache_key("1m", "time", None) == "1m"
-        assert _cache_key("5m", "volume", 2000) == "vol_2000"
-        assert _cache_key("5m", "volume", 2000, include_bar_columns=True) == "vol_2000_bars"
-        assert _cache_key("5m", "tick", 610) == "tick_610"
+class TestCacheDir:
+    def test_rth_directory_names(self):
+        """RTH session produces clean directory names."""
+        assert _feature_cache_dir("5m", "time", None, "rth") == CACHE_DIR / "5m"
+        assert _feature_cache_dir("1m", "time", None, "rth") == CACHE_DIR / "1m"
+        assert _feature_cache_dir("5m", "volume", 2000, "rth") == CACHE_DIR / "vol_2000"
+        assert _feature_cache_dir("5m", "tick", 610, "rth") == CACHE_DIR / "tick_610"
 
     def test_eth_prefix(self):
         """session_filter='eth' should add eth_ prefix."""
-        assert _cache_key("5m", "time", None, session_filter="eth") == "eth_5m"
-        assert _cache_key("5m", "volume", 2000, session_filter="eth") == "eth_vol_2000"
-        assert _cache_key("5m", "volume", 2000, include_bar_columns=True, session_filter="eth") == "eth_vol_2000_bars"
-        assert _cache_key("5m", "tick", 610, session_filter="eth") == "eth_tick_610"
+        assert _feature_cache_dir("5m", "time", None, "eth") == CACHE_DIR / "eth_5m"
+        assert _feature_cache_dir("5m", "volume", 2000, "eth") == CACHE_DIR / "eth_vol_2000"
+        assert _feature_cache_dir("5m", "tick", 610, "eth") == CACHE_DIR / "eth_tick_610"
 
 
 class TestEasternDateInFeatures:

@@ -59,12 +59,18 @@ def compute_strategy_id(
     strategy_name: str,
     params: dict[str, Any],
     strategy_function: SignalFn,
+    bar_config: str = "",
+    session_filter: str = "",
 ) -> str:
-    """Stable strategy id from strategy name + sorted params + source hash."""
+    """Stable strategy id from name + params + source + bar config + session."""
     params_blob = json.dumps(params, sort_keys=True, separators=(",", ":"))
     params_hash = hashlib.sha256(params_blob.encode("utf-8")).hexdigest()[:8]
     source = inspect.getsource(strategy_function)
     code_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
+    env_key = f"{bar_config}|{session_filter}".strip("|")
+    if env_key:
+        env_hash = hashlib.sha256(env_key.encode("utf-8")).hexdigest()[:6]
+        return f"{strategy_name}_{params_hash}_{code_hash}_{env_hash}"
     return f"{strategy_name}_{params_hash}_{code_hash}"
 
 

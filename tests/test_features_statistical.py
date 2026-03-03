@@ -310,7 +310,7 @@ def test_real_data_smoke():
     from src.framework.data.bars import aggregate_time_bars
 
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf = filter_rth(lf)
     bars = aggregate_time_bars(lf, "5m")
     result = compute_statistical_features(bars)
@@ -329,7 +329,7 @@ def test_real_data_sorted():
     from src.framework.data.bars import aggregate_time_bars
 
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf = filter_rth(lf)
     bars = aggregate_time_bars(lf, "5m")
     result = compute_statistical_features(bars)

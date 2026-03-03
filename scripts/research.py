@@ -417,13 +417,19 @@ def _execute_claimed_task(
     if split == "test":
         raise PermissionError(f"{task_id}: test split is forbidden in research mode")
 
+    # Session filter from mission config (default: eth for extended hours)
+    session_filter = str(mission.get("session_filter", "eth")).lower()
+
     parsed_bar = _parse_bar_config(bar_config)
     strategy_module = load_signal_module(strategy_name)
     strategy_fn = getattr(strategy_module, "generate_signal", None)
     if not callable(strategy_fn):
         raise ValueError(f"{task_id}: strategy '{strategy_name}' has no generate_signal(df, params)")
 
-    strategy_id = compute_strategy_id(strategy_name, params, strategy_fn)
+    strategy_id = compute_strategy_id(
+        strategy_name, params, strategy_fn,
+        bar_config=bar_config, session_filter=session_filter,
+    )
     bt_kwargs = _task_backtest_params(task, mission)
     max_files = task.get("max_files", mission.get("max_files_per_task"))
     max_files = int(max_files) if max_files is not None else None
@@ -454,7 +460,7 @@ def _execute_claimed_task(
             bar_type=parsed_bar["bar_type"],
             bar_threshold=parsed_bar["bar_threshold"],
             include_bar_columns=True,
-            session_filter="eth",
+            session_filter=session_filter,
         )
         if len(df) == 0:
             continue
@@ -542,6 +548,7 @@ def _execute_claimed_task(
             "strategy_name": strategy_name,
             "version": str(getattr(strategy_module, "STRATEGY_METADATA", {}).get("version", "1.0")),
             "bar_config": bar_config,
+            "session_filter": session_filter,
             "backtest": bt_kwargs,
             "parameters": params,
             "validation_metrics": metrics,

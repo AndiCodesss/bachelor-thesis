@@ -106,3 +106,51 @@ def test_bootstrap_tasks_and_claim_priority(tmp_path: Path, monkeypatch: pytest.
     assert claimed["priority"] == 10
     assert claimed["state"] == "in_progress"
     assert claimed["assigned_to"] == "validator"
+
+
+def test_execute_claimed_task_passes_session_filter_to_strategy_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Regression: session_filter must be defined before compute_strategy_id call."""
+    mod = _load_runner_module()
+
+    captured: dict[str, str] = {}
+
+    def _fake_compute_strategy_id(_name, _params, _fn, bar_config="", session_filter=""):
+        captured["bar_config"] = bar_config
+        captured["session_filter"] = session_filter
+        raise RuntimeError("stop_after_strategy_id")
+
+    def _dummy_signal(_df, _params):
+        return np.array([0], dtype=np.int8)
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=_dummy_signal,
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+
+    monkeypatch.setattr(mod, "compute_strategy_id", _fake_compute_strategy_id)
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+
+    with pytest.raises(RuntimeError, match="stop_after_strategy_id"):
+        mod._execute_claimed_task(
+            task={
+                "task_id": "t1",
+                "strategy_name": "dummy",
+                "split": "validate",
+                "bar_config": "tick_610",
+                "params": {},
+            },
+            mission={"session_filter": "rth"},
+            run_id="run_x",
+            run_dir=tmp_path,
+            framework_lock_hash="abc123",
+            git_commit=None,
+            experiments_path=tmp_path / "experiments.jsonl",
+            experiments_lock=tmp_path / "experiments.lock",
+        )
+
+    assert captured["bar_config"] == "tick_610"
+    assert captured["session_filter"] == "rth"

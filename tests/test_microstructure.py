@@ -46,7 +46,7 @@ def _make_bars(rows):
 def test_compute_microstructure_features_shape():
     """Verify compute_microstructure_features produces expected output columns."""
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf = filter_rth(lf).head(100000)
     bars = aggregate_time_bars(lf, bar_size="5m")
 
@@ -163,7 +163,7 @@ def test_microstructure_multiple_bars():
 def test_microstructure_non_empty():
     """Assert non-empty DataFrame after feature computation on real data."""
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf = filter_rth(lf)
     bars = aggregate_time_bars(lf, bar_size="5m")
 

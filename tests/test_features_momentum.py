@@ -42,7 +42,7 @@ def test_compute_momentum_features_basic():
     from src.framework.data.loader import get_parquet_files, filter_rth
 
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf_rth = filter_rth(lf)
     bars = aggregate_time_bars(lf_rth, bar_size="5m")
 
@@ -140,7 +140,7 @@ def test_no_nulls_in_features():
     from src.framework.data.loader import get_parquet_files, filter_rth
 
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf_rth = filter_rth(lf)
     bars = aggregate_time_bars(lf_rth, bar_size="5m")
 
@@ -254,7 +254,7 @@ def test_wick_ratio_columns_in_shape_test():
     from src.framework.data.loader import get_parquet_files, filter_rth
 
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf_rth = filter_rth(lf)
     bars = aggregate_time_bars(lf_rth, bar_size="5m")
 

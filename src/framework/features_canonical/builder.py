@@ -508,8 +508,10 @@ def build_full_cache(
         Dict with total, completed, errors counts.
     """
     from src.framework.api import ExecutionMode, get_split_files, set_execution_mode
+    from src.framework.data.loader import get_execution_mode
 
-    set_execution_mode(ExecutionMode.RESEARCH)
+    if get_execution_mode() is None:
+        set_execution_mode(ExecutionMode.RESEARCH)
     files = get_split_files(split)
 
     if file_limit is not None:

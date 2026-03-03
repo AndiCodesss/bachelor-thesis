@@ -106,7 +106,7 @@ def test_real_data_not_empty():
     from src.framework.data.bars import aggregate_time_bars
 
     files = get_parquet_files("train")
-    lf = pl.scan_parquet(str(files[0]))
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
     lf_rth = filter_rth(lf)
     bars = aggregate_time_bars(lf_rth, "5m")
 

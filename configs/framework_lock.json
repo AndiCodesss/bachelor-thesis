@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-03T11:11:24.057048+00:00",
+  "generated_at": "2026-03-03T12:38:28.001310+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
-  "file_count": 13,
+  "file_count": 28,
   "files": [
     {
       "path": "src/framework/api.py",
@@ -30,9 +30,14 @@
       "size_bytes": 14733
     },
     {
+      "path": "src/framework/data/bars.py",
+      "sha256": "affe35fe989b1b56159acaa4b4384f2e3946aeeee677a4e148cd78c1581a8126",
+      "size_bytes": 24703
+    },
+    {
       "path": "src/framework/data/constants.py",
-      "sha256": "89fa585212be121c338f41ab3da97c093e0169d38081a5ac98c073f2dcdf2573",
-      "size_bytes": 4692
+      "sha256": "8600a4ea6079263828f8bbdc945422fd5946cdce155aef9f04cd18b6f595b1b6",
+      "size_bytes": 5157
     },
     {
       "path": "src/framework/data/loader.py",
@@ -45,14 +50,84 @@
       "size_bytes": 366
     },
     {
+      "path": "src/framework/features_canonical/aggressor.py",
+      "sha256": "41e7900abb3f48e4d373efe5a33f1777646eeedab5c9913bfe8e4851d5cd1003",
+      "size_bytes": 7046
+    },
+    {
+      "path": "src/framework/features_canonical/book.py",
+      "sha256": "79063fc9021c05138b929d4213d6325aea0731e66d53042aa762bc658c729048",
+      "size_bytes": 2278
+    },
+    {
       "path": "src/framework/features_canonical/builder.py",
-      "sha256": "83cf95695952a5cf7eaad7b0ee3048bb235fa38458957d299073bc047e3b816a",
-      "size_bytes": 21294
+      "sha256": "2d47b8af43c647eabf5f71c7d91d03a863f8d234e4349eee734105de6278f7f5",
+      "size_bytes": 21396
+    },
+    {
+      "path": "src/framework/features_canonical/footprint.py",
+      "sha256": "98147bf26c9ec7978d816cebf126656604dbb042ac8b965dc438b020e4c907f4",
+      "size_bytes": 9457
+    },
+    {
+      "path": "src/framework/features_canonical/labels.py",
+      "sha256": "3a4c83588e6144a9748e6aefd78f468b0ca451584f15c924e33df6f62213660b",
+      "size_bytes": 3394
+    },
+    {
+      "path": "src/framework/features_canonical/microstructure.py",
+      "sha256": "7500b66cdea72e995004906554daf41b8046e8eacc74494db6f493925628a296",
+      "size_bytes": 4905
+    },
+    {
+      "path": "src/framework/features_canonical/microstructure_v2.py",
+      "sha256": "4be6d8ee2806e3e65da8ae8c9ab02584ed5e30a90e4957e04097cacbff731e6e",
+      "size_bytes": 3317
+    },
+    {
+      "path": "src/framework/features_canonical/momentum.py",
+      "sha256": "b1f3365a5e6cb40b37294e216b8fae19196686a61328cac99e08399e24e5179f",
+      "size_bytes": 4029
+    },
+    {
+      "path": "src/framework/features_canonical/ohlcv_indicators.py",
+      "sha256": "65cc51fa86d0091131e0223ac98961e42ca2e4cae45eaf9e3b1db80f332c995f",
+      "size_bytes": 8921
+    },
+    {
+      "path": "src/framework/features_canonical/opening_range.py",
+      "sha256": "7868865faa25c4b234811509de7fa499d32b0cfd9c897733e74bad20419501e7",
+      "size_bytes": 3647
+    },
+    {
+      "path": "src/framework/features_canonical/orderflow.py",
+      "sha256": "fa0efd60ae960fdf7887091e8a49e856cfe3b8b1b08cd1298ce1a381279ee309",
+      "size_bytes": 4077
+    },
+    {
+      "path": "src/framework/features_canonical/pipeline.py",
+      "sha256": "f2bb8adc25c36b4d42f2c1e450a5975b015dd0e7d4fb3664b63311d8a187b6c4",
+      "size_bytes": 22252
+    },
+    {
+      "path": "src/framework/features_canonical/statistical.py",
+      "sha256": "c1be0039811f41cb6800db6ddc7b29611a27a61fd4f0b792230b5d031a607daf",
+      "size_bytes": 5813
+    },
+    {
+      "path": "src/framework/features_canonical/toxicity.py",
+      "sha256": "6f788a3b91adb8bdaa37e4c0450b7253a6c252a6b148c591db7a693637fa5a42",
+      "size_bytes": 2290
+    },
+    {
+      "path": "src/framework/features_canonical/volume_profile.py",
+      "sha256": "3373fb18bdee5db99587be47b601fddfe42be79a3598a68bd8b78191b4130d49",
+      "size_bytes": 18643
     },
     {
       "path": "src/framework/security/framework_lock.py",
-      "sha256": "b9e8678c9e70dd497f7517bcb239648a69ba4f3c7c6cabc113f8b72e78209c70",
-      "size_bytes": 4459
+      "sha256": "fb4f19799048bf0227c294eca5e7e93b1ef2cf68368b71e08993cf7d52071e08",
+      "size_bytes": 5255
     },
     {
       "path": "src/framework/validation/alpha_decay.py",

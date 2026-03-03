@@ -24,7 +24,7 @@ Entrypoints set mode exactly once per process.
 
 ## Framework Lock
 
-- Manifest: `configs/framework_lock.json` (13 locked files)
+- Manifest: `configs/framework_lock.json` (28 locked files)
 - Build: `scripts/framework/build_lock.py`
 - Verify: `scripts/framework/verify_lock.py`
 

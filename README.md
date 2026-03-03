@@ -67,7 +67,7 @@ Same agent, same engine, same rules — only the feature space changes.
 
 ```
 .
-├── src/framework/                        # Immutable evaluation layer (13 hash-locked files)
+├── src/framework/                        # Immutable evaluation layer (28 hash-locked files)
 │   ├── api.py                            # Stable public API surface
 │   ├── backtest/
 │   │   ├── engine.py                     # Bar-by-bar backtest with PT/SL/time-stop
@@ -161,7 +161,7 @@ use high/low for worst-case fills.
 
 | Control                | Implementation                                               |
 | ---------------------- | ------------------------------------------------------------ |
-| **Framework lock**     | SHA-256 manifest of 13 evaluation-chain files (engine, metrics, validators, splits, loader, constants, builder); feature computation modules are mutable research inputs |
+| **Framework lock**     | SHA-256 manifest of 28 evaluation-chain files (engine, metrics, validators, splits, loader, constants, builder, all canonical feature modules) |
 | **Split firewall**     | `ExecutionMode.RESEARCH` blocks all access to the test split |
 | **Deflated Sharpe**    | Corrects observed Sharpe for number of hypotheses tested     |
 | **Effective trials**   | Correlation-adjusted trial counting (`sqrt_family`) for DSR  |
@@ -182,9 +182,9 @@ format.
 
 | Split    | Period              | Purpose                             |
 | -------- | ------------------- | ----------------------------------- |
-| Train    | Mar 2023 – Aug 2024 | Feature engineering, model training |
-| Validate | Feb 2025 – Jun 2025 | Signal evaluation, gauntlet testing |
-| Test     | Jul 2025 – Jan 2026 | Holdout (blocked in research mode)  |
+| Train    | Oct 2022 – Aug 2024 | Feature engineering, model training |
+| Validate | Sep 2024 – Mar 2025 | Signal evaluation, gauntlet testing |
+| Test     | Apr 2025 – Feb 2026 | Holdout (blocked in research mode)  |
 
 Data is not included. Set `NQ_DATA_PATH` to your raw data directory.
 
