@@ -123,10 +123,13 @@ Same agent, same engine, same rules — only the feature space changes.
 │   ├── framework_lock.json               # SHA-256 manifest of locked files
 │   ├── missions/
 │   │   └── alpha-discovery.yaml          # Research mission specification
+│   ├── agents/
+│   │   └── llm_orchestrator.yaml         # LLM generator runtime settings
 │   └── modern_meta.yaml                  # Strategy config (bar types, risk params)
 │
 ├── scripts/
 │   ├── research.py                       # Autonomous research loop entrypoint
+│   ├── llm_orchestrator.py               # API-driven multi-role generator (feedback->thinker->coder)
 │   ├── promote.py                        # Candidate promotion gate runner
 │   ├── cache_runner.py                   # Bulk feature-cache rebuild helper
 │   └── framework/
@@ -193,7 +196,9 @@ Data is not included. Set `NQ_DATA_PATH` to your raw data directory.
 
 ```bash
 # Linux/macOS
-export NQ_DATA_PATH="/path/to/NQ_raw"
+cp .env.example .env
+# edit `.env` with your values, then:
+set -a && source .env && set +a
 
 # Windows PowerShell
 # $env:NQ_DATA_PATH="C:\Users\Andreas Oberdörfer\Downloads\generator\data\NQ_raw"
@@ -202,6 +207,7 @@ uv sync                                                                         
 uv run pytest -q                                                                # run tests
 uv run python scripts/framework/verify_lock.py --manifest configs/framework_lock.json --mode error   # verify integrity
 uv run python scripts/cache_runner.py --split all --session-filter eth --bar-filter tick_610 --clean # rebuild cache
+uv run python scripts/llm_orchestrator.py --mission configs/missions/alpha-discovery.yaml --resume    # generate signals + enqueue tasks
 uv run python scripts/research.py --mission configs/missions/alpha-discovery.yaml --max-experiments 100 --auto-mode  # research loop
 uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.json --verify-only        # promotion verification
 ```

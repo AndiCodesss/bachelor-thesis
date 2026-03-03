@@ -9,6 +9,7 @@ from research.lib.coordination import (
     claim_task,
     complete_task,
     compute_event_id,
+    enqueue_task,
     watchdog_check_timeouts,
 )
 
@@ -157,3 +158,71 @@ def test_append_handoff(tmp_path: Path):
     assert row["handoff_type"] == "validation_request"
     payload = _read(handoffs)
     assert len(payload["pending"]) == 1
+
+
+def test_enqueue_task_assigns_defaults_and_priority(tmp_path: Path):
+    queue = tmp_path / "queue.json"
+    lock = tmp_path / "queue.lock"
+    queue.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "existing_1",
+                        "state": "pending",
+                        "priority": 3,
+                    },
+                    {
+                        "task_id": "existing_2",
+                        "state": "completed",
+                        "priority": 9,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    inserted, row = enqueue_task(
+        queue_path=queue,
+        lock_path=lock,
+        task={
+            "task_id": "new_1",
+            "strategy_name": "s1",
+            "split": "validate",
+            "bar_config": "tick_610",
+            "params": {},
+        },
+    )
+    assert inserted is True
+    assert row["task_id"] == "new_1"
+    assert row["state"] == "pending"
+    assert row["priority"] == 10
+    assert row["assigned_to"] is None
+    assert row["created_at"]
+
+
+def test_enqueue_task_is_idempotent_for_same_task_id(tmp_path: Path):
+    queue = tmp_path / "queue.json"
+    lock = tmp_path / "queue.lock"
+    queue.write_text(json.dumps({"schema_version": "1.0", "tasks": []}), encoding="utf-8")
+
+    first_inserted, first_row = enqueue_task(
+        queue_path=queue,
+        lock_path=lock,
+        task={"task_id": "dup_1", "strategy_name": "s1"},
+    )
+    second_inserted, second_row = enqueue_task(
+        queue_path=queue,
+        lock_path=lock,
+        task={"task_id": "dup_1", "strategy_name": "s2"},
+    )
+
+    assert first_inserted is True
+    assert second_inserted is False
+    assert second_row["task_id"] == "dup_1"
+    assert second_row["strategy_name"] == "s1"
+
+    payload = _read(queue)
+    assert len(payload["tasks"]) == 1

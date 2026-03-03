@@ -67,6 +67,36 @@ What happens:
 8. complete task with verdict and details
 9. write run summary under `results/runs/<run_id>/summary.json`
 
+## Full Autonomy (Generator + Validator)
+
+Run both processes:
+
+```bash
+set -a && source .env && set +a
+
+# Process 1: LLM generator (writes research/signals + enqueues tasks)
+uv run python scripts/llm_orchestrator.py \
+  --mission configs/missions/alpha-discovery.yaml \
+  --resume
+
+# Process 2: validator worker (claims tasks and evaluates)
+uv run python scripts/research.py \
+  --mission configs/missions/alpha-discovery.yaml \
+  --auto-mode \
+  --worker-agent validator \
+  --resume
+```
+
+`scripts/llm_orchestrator.py` uses a staged LLM chain:
+1. `feedback_analyst` (summarizes recent validator outcomes),
+2. `quant_thinker` (proposes one structured hypothesis),
+3. `coder` (implements only that hypothesis as signal code).
+
+It uses lock-safe queue updates and writes audit logs to
+`results/logs/llm_orchestrator.jsonl`.
+Role models and temperatures are configured in
+`configs/agents/llm_orchestrator.yaml`.
+
 ## Per-Task Protocol
 
 Each task should contain:

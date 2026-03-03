@@ -77,6 +77,64 @@ def update_json_file(
         return updated
 
 
+def enqueue_task(
+    *,
+    queue_path: Path,
+    lock_path: Path,
+    task: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Atomically append one pending task if task_id is not already present."""
+    if not isinstance(task, dict):
+        raise TypeError("task must be a dict")
+    task_id = str(task.get("task_id", "")).strip()
+    if not task_id:
+        raise ValueError("task_id is required")
+
+    out: dict[str, Any] = {"inserted": False, "task": None}
+
+    def _update(queue: dict[str, Any]) -> dict[str, Any]:
+        tasks = queue.setdefault("tasks", [])
+
+        for existing in tasks:
+            if str(existing.get("task_id", "")) == task_id:
+                out["inserted"] = False
+                out["task"] = dict(existing)
+                return queue
+
+        now = _utc_now().isoformat()
+        max_priority = 0
+        for existing in tasks:
+            try:
+                max_priority = max(max_priority, int(existing.get("priority", 0)))
+            except (TypeError, ValueError):
+                continue
+
+        row = dict(task)
+        row.setdefault("state", "pending")
+        row.setdefault("assigned_to", None)
+        row.setdefault("created_at", now)
+        row.setdefault("retries", 0)
+        row.setdefault("max_retries", 2)
+        row.setdefault("timeout_minutes", 30)
+        row.setdefault("heartbeat_interval_seconds", 300)
+        row.setdefault("priority", max_priority + 1)
+
+        tasks.append(row)
+        out["inserted"] = True
+        out["task"] = dict(row)
+        return queue
+
+    update_json_file(
+        json_path=queue_path,
+        lock_path=lock_path,
+        default_payload={"schema_version": "1.0", "tasks": []},
+        update_fn=_update,
+    )
+    assert isinstance(out["inserted"], bool)
+    assert isinstance(out["task"], dict)
+    return bool(out["inserted"]), dict(out["task"])
+
+
 def claim_task(
     *,
     queue_path: Path,

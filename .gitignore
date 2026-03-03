@@ -19,6 +19,7 @@ Thumbs.db
 # Secrets
 .env
 .env.*
+!.env.example
 
 # Claude local files
 CLAUDE.local.md

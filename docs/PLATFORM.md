@@ -30,6 +30,16 @@ Entrypoints set mode exactly once per process.
 
 Research and promotion entrypoints verify lock before running.
 
+## Autonomous Roles
+
+- `scripts/llm_orchestrator.py`: API-driven generator role. Produces/updates
+  `research/signals/*.py` and enqueues validation tasks.
+  Internal roles: `feedback_analyst -> quant_thinker -> coder`.
+- `scripts/research.py --worker-agent validator`: execution role. Claims tasks,
+  runs backtest + gauntlet, writes verdicts/candidates.
+
+This separation keeps generation and evaluation responsibilities isolated.
+
 ## Runtime Coordination
 
 `research/lib/coordination.py`:
