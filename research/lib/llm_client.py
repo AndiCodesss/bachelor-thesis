@@ -138,6 +138,13 @@ class ClaudeCodeCLIClient:
             str(system_prompt),
         ]
         cmd.extend(self._extra_args)
+        # Keep orchestrator requests lean and deterministic: disable tool/runtime discovery overhead.
+        if "--strict-mcp-config" not in cmd:
+            cmd.append("--strict-mcp-config")
+        if "--disable-slash-commands" not in cmd:
+            cmd.append("--disable-slash-commands")
+        if "--tools" not in cmd:
+            cmd.extend(["--tools", ""])
         # Claude CLI does not expose strict max-token control for local subscription usage.
         if max_output_tokens > 0:
             cmd.extend(

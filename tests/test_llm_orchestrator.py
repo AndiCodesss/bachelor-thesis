@@ -170,6 +170,60 @@ def test_normalize_coder_payload_accepts_alternate_code_key():
     assert "generate_signal" in out["code"]
 
 
+def test_normalize_coder_payload_falls_back_to_thinker_params_template():
+    mod = _load_module()
+    thinker = {
+        "strategy_name_hint": "hint_name",
+        "bar_configs": ["tick_610"],
+        "params_template": {"lookback": 21, "threshold": 0.3},
+    }
+    payload = {
+        "strategy_name": "with_empty_params",
+        "bar_configs": ["tick_610"],
+        "params": {},
+        "code": "import numpy as np\nimport polars as pl\n"
+        "def generate_signal(df, params):\n    return np.zeros(len(df), dtype=np.int8)\n",
+    }
+    out = mod._normalize_coder_payload(
+        payload,
+        mission_bar_configs=["tick_610"],
+        thinker_brief=thinker,
+    )
+    assert out["params"] == {"lookback": 21, "threshold": 0.3}
+
+
+def test_coder_handoff_prompt_contains_structured_thinker_payload():
+    mod = _load_module()
+    thinker = {
+        "hypothesis_id": "h_01",
+        "strategy_name_hint": "alpha_hint",
+        "bar_configs": ["tick_610"],
+        "params_template": {"lookback": 10},
+        "thesis": "x",
+        "entry_logic": "y",
+        "exit_logic": "z",
+        "risk_controls": ["r"],
+        "anti_lookahead_checks": ["a"],
+        "validation_focus": ["v"],
+    }
+    mission = {
+        "bar_configs": ["tick_610", "volume_2000"],
+        "session_filter": "eth",
+        "feature_group": "all",
+    }
+    handoff = mod._build_coder_handoff(
+        thinker_brief=thinker,
+        mission=mission,
+        thinker_payload_hash="abc123",
+    )
+    assert handoff["source_role"] == "quant_thinker"
+    assert handoff["payload_hash"] == "abc123"
+    prompt = mod._build_coder_user_prompt(thinker_handoff=handoff)
+    assert "THINKER_HANDOFF_JSON_BEGIN" in prompt
+    assert '"hypothesis_id": "h_01"' in prompt
+    assert "THINKER_HANDOFF_JSON_END" in prompt
+
+
 def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):
     mod = _load_module()
     with pytest.raises(ValueError):

@@ -546,6 +546,10 @@ def _normalize_coder_payload(
     params = payload.get("params", {})
     if not isinstance(params, dict):
         raise ValueError("payload.params must be an object")
+    if not params:
+        thinker_params = thinker_brief.get("params_template")
+        if isinstance(thinker_params, dict):
+            params = dict(thinker_params)
 
     raw_cfgs = payload.get("bar_configs", payload.get("bar_config", []))
     if isinstance(raw_cfgs, str):
@@ -776,18 +780,85 @@ def _build_coder_system_prompt() -> str:
     )
 
 
-def _build_coder_user_prompt(
+def _build_coder_handoff(
     *,
     thinker_brief: dict[str, Any],
     mission: dict[str, Any],
+    thinker_payload_hash: str,
+) -> dict[str, Any]:
+    if not isinstance(thinker_brief, dict):
+        raise ValueError("thinker_brief must be a dict")
+    hypothesis_id = str(thinker_brief.get("hypothesis_id", "")).strip()
+    strategy_name_hint = str(thinker_brief.get("strategy_name_hint", "")).strip()
+    if not hypothesis_id:
+        raise ValueError("thinker_brief.hypothesis_id is required")
+    if not strategy_name_hint:
+        raise ValueError("thinker_brief.strategy_name_hint is required")
+
+    allowed = mission.get("bar_configs", ["tick_610"])
+    allowed_cfgs = [str(v).strip() for v in allowed] if isinstance(allowed, list) else ["tick_610"]
+
+    def _clip_text(value: Any, limit: int) -> str:
+        raw = str(value or "").strip()
+        if len(raw) <= limit:
+            return raw
+        if limit <= 3:
+            return raw[:limit]
+        return raw[: limit - 3].rstrip() + "..."
+
+    def _clip_list(value: Any, *, max_items: int, max_len: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        out: list[str] = []
+        for item in value:
+            text = _clip_text(item, max_len)
+            if not text:
+                continue
+            out.append(text)
+            if len(out) >= max_items:
+                break
+        return out
+
+    return {
+        "handoff_version": "1.0",
+        "source_role": "quant_thinker",
+        "payload_hash": str(thinker_payload_hash),
+        "mission_constraints": {
+            "allowed_bar_configs": allowed_cfgs,
+            "preferred_session_filter": str(mission.get("session_filter", "eth")),
+            "feature_group": str(mission.get("feature_group", "all")),
+        },
+        "hypothesis": {
+            "hypothesis_id": hypothesis_id,
+            "strategy_name_hint": strategy_name_hint,
+            "bar_configs": list(thinker_brief.get("bar_configs", [])),
+            "params_template": dict(thinker_brief.get("params_template", {}))
+            if isinstance(thinker_brief.get("params_template"), dict)
+            else {},
+            "thesis": _clip_text(thinker_brief.get("thesis", ""), 520),
+            "entry_logic": _clip_text(thinker_brief.get("entry_logic", ""), 780),
+            "exit_logic": _clip_text(thinker_brief.get("exit_logic", ""), 520),
+            "risk_controls": _clip_list(thinker_brief.get("risk_controls", []), max_items=6, max_len=180),
+            "anti_lookahead_checks": _clip_list(
+                thinker_brief.get("anti_lookahead_checks", []),
+                max_items=6,
+                max_len=180,
+            ),
+            "validation_focus": _clip_list(thinker_brief.get("validation_focus", []), max_items=6, max_len=180),
+        },
+    }
+
+
+def _build_coder_user_prompt(
+    *,
+    thinker_handoff: dict[str, Any],
 ) -> str:
     return (
-        "Implement this exact hypothesis brief as a signal module.\n\n"
-        f"Hypothesis brief:\n{json.dumps(thinker_brief, indent=2, default=str)}\n\n"
-        f"Mission constraints:\n"
-        f"- allowed bar_configs: {mission.get('bar_configs', ['tick_610'])}\n"
-        f"- preferred session_filter: {mission.get('session_filter', 'eth')}\n"
-        f"- feature_group: {mission.get('feature_group', 'all')}\n"
+        "Implement exactly the handoff below as a signal module.\n"
+        "Use only this handoff JSON as source of truth.\n\n"
+        "THINKER_HANDOFF_JSON_BEGIN\n"
+        f"{json.dumps(thinker_handoff, indent=2, sort_keys=True, default=str)}\n"
+        "THINKER_HANDOFF_JSON_END\n"
     )
 
 
@@ -1160,10 +1231,14 @@ def main() -> int:
             thinker_hash = _sha256_text(
                 json.dumps(thinker_brief, sort_keys=True, separators=(",", ":")),
             )[:16]
-
-            coder_user_prompt = _build_coder_user_prompt(
+            thinker_handoff = _build_coder_handoff(
                 thinker_brief=thinker_brief,
                 mission=mission,
+                thinker_payload_hash=thinker_hash,
+            )
+
+            coder_user_prompt = _build_coder_user_prompt(
+                thinker_handoff=thinker_handoff,
             )
             coder_generation = _call_stage_json(
                 stage_name="coder",

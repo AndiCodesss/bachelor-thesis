@@ -2,7 +2,7 @@ provider: claude_cli
 
 claude_cli:
   binary: claude
-  timeout_seconds: 180
+  timeout_seconds: 480
   retries: 2
   retry_backoff_seconds: 1.5
 
