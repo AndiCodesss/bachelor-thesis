@@ -96,6 +96,8 @@ It uses lock-safe queue updates and writes audit logs to
 `results/logs/llm_orchestrator.jsonl`.
 Role models and temperatures are configured in
 `configs/agents/llm_orchestrator.yaml`.
+Stage retries, JSON-repair attempts, and backoff windows are also configured in
+that same file under `runtime`.
 
 ## Per-Task Protocol
 

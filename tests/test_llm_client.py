@@ -53,3 +53,26 @@ def test_generate_json_parses_chat_completion(monkeypatch: pytest.MonkeyPatch):
     assert out.response_id == "chatcmpl_123"
     assert out.payload["strategy_name"] == "alpha_s1"
     assert out.usage["total_tokens"] == 30
+
+
+def test_generate_raw_returns_text_without_json_parse(monkeypatch: pytest.MonkeyPatch):
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self) -> bytes:
+            payload = {
+                "id": "chatcmpl_raw_1",
+                "usage": {"total_tokens": 12},
+                "choices": [{"message": {"content": "plain text response"}}],
+            }
+            return json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr(llm_client, "urlopen", lambda *_args, **_kwargs: _FakeResp())
+    client = llm_client.OpenAIChatJSONClient(model="gpt-5-mini", api_key="test-key")
+    out = client.generate_raw(system_prompt="sys", user_prompt="usr", force_json_object=False)
+    assert out.response_id == "chatcmpl_raw_1"
+    assert out.raw_text == "plain text response"

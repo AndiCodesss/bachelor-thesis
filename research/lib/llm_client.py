@@ -24,6 +24,14 @@ class LLMGeneration:
     usage: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LLMRawGeneration:
+    raw_text: str
+    model: str
+    response_id: str | None
+    usage: dict[str, Any]
+
+
 def _strip_code_fences(text: str) -> str:
     raw = str(text).strip()
     if raw.startswith("```"):
@@ -146,6 +154,31 @@ class OpenAIChatJSONClient:
         temperature: float = 0.2,
         max_output_tokens: int = 2500,
     ) -> LLMGeneration:
+        raw = self.generate_raw(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            force_json_object=True,
+        )
+        json_payload = _extract_json_object(raw.raw_text)
+        return LLMGeneration(
+            payload=json_payload,
+            raw_text=raw.raw_text,
+            model=raw.model,
+            response_id=raw.response_id,
+            usage=raw.usage,
+        )
+
+    def generate_raw(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        max_output_tokens: int = 2500,
+        force_json_object: bool = True,
+    ) -> LLMRawGeneration:
         payload = {
             "model": self._model,
             "messages": [
@@ -154,8 +187,9 @@ class OpenAIChatJSONClient:
             ],
             "temperature": float(temperature),
             "max_tokens": int(max_output_tokens),
-            "response_format": {"type": "json_object"},
         }
+        if force_json_object:
+            payload["response_format"] = {"type": "json_object"}
         data = self._post_json("/chat/completions", payload)
 
         choices = data.get("choices")
@@ -167,12 +201,10 @@ class OpenAIChatJSONClient:
         if not raw_text:
             raise LLMClientError("LLM response contained no message content")
 
-        json_payload = _extract_json_object(raw_text)
         usage = data.get("usage")
         usage_obj = usage if isinstance(usage, dict) else {}
         response_id = data.get("id")
-        return LLMGeneration(
-            payload=json_payload,
+        return LLMRawGeneration(
             raw_text=raw_text,
             model=self._model,
             response_id=str(response_id) if response_id is not None else None,
@@ -180,8 +212,15 @@ class OpenAIChatJSONClient:
         )
 
 
+def extract_json_object(text: str) -> dict[str, Any]:
+    """Parse the first JSON object from model text output."""
+    return _extract_json_object(text)
+
+
 __all__ = [
     "LLMClientError",
     "LLMGeneration",
+    "LLMRawGeneration",
     "OpenAIChatJSONClient",
+    "extract_json_object",
 ]

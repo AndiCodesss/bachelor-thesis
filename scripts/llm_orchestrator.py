@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import polars as pl
@@ -24,7 +24,7 @@ from research.lib.atomic_io import atomic_json_write
 from research.lib.coordination import append_handoff, enqueue_task
 from research.lib.experiments import log_experiment
 from research.lib.feature_groups import filter_feature_group
-from research.lib.llm_client import LLMClientError, OpenAIChatJSONClient
+from research.lib.llm_client import LLMClientError, OpenAIChatJSONClient, extract_json_object
 from research.signals import check_signal_causality, load_signal_module
 from src.framework.api import (
     ExecutionMode,
@@ -45,6 +45,209 @@ def _slug(value: str) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class StageJSONResult:
+    def __init__(
+        self,
+        *,
+        payload: dict[str, Any],
+        model: str,
+        response_id: str | None,
+        usage: dict[str, Any],
+        raw_text: str,
+        attempts: int,
+        repaired: bool,
+    ) -> None:
+        self.payload = payload
+        self.model = model
+        self.response_id = response_id
+        self.usage = usage
+        self.raw_text = raw_text
+        self.attempts = attempts
+        self.repaired = repaired
+
+
+def _extract_retry_after_seconds(error_text: str) -> float | None:
+    raw = str(error_text)
+    match = re.search(r"retry in\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|s|sec|secs|second|seconds)", raw, re.IGNORECASE)
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "ms":
+        return max(0.1, value / 1000.0)
+    return max(0.1, value)
+
+
+def _repair_json_payload(
+    *,
+    stage_name: str,
+    schema_hint: str,
+    raw_text: str,
+    client: OpenAIChatJSONClient,
+    max_output_tokens: int,
+) -> StageJSONResult:
+    system_prompt = (
+        "You are a strict JSON repair engine. "
+        "Return ONLY one valid JSON object and no markdown, no prose."
+    )
+    user_prompt = (
+        f"Stage: {stage_name}\n"
+        f"Required schema summary:\n{schema_hint}\n\n"
+        "Fix this output into valid JSON matching the schema:\n"
+        f"{raw_text}"
+    )
+    repaired = client.generate_raw(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=0.0,
+        max_output_tokens=max(300, min(int(max_output_tokens), 1800)),
+        force_json_object=True,
+    )
+    payload = extract_json_object(repaired.raw_text)
+    return StageJSONResult(
+        payload=payload,
+        model=repaired.model,
+        response_id=repaired.response_id,
+        usage=repaired.usage,
+        raw_text=repaired.raw_text,
+        attempts=1,
+        repaired=True,
+    )
+
+
+def _call_stage_json(
+    *,
+    stage_name: str,
+    schema_hint: str,
+    client: OpenAIChatJSONClient,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_output_tokens: int,
+    max_attempts: int,
+    json_repair_attempts: int,
+    stage_backoff_seconds: float,
+    quota_backoff_seconds: float,
+    max_backoff_seconds: float,
+) -> StageJSONResult:
+    attempts = max(1, int(max_attempts))
+    last_exc: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            raw = client.generate_raw(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=float(temperature),
+                max_output_tokens=int(max_output_tokens),
+                force_json_object=True,
+            )
+            try:
+                payload = extract_json_object(raw.raw_text)
+                return StageJSONResult(
+                    payload=payload,
+                    model=raw.model,
+                    response_id=raw.response_id,
+                    usage=raw.usage,
+                    raw_text=raw.raw_text,
+                    attempts=attempt,
+                    repaired=False,
+                )
+            except LLMClientError as parse_exc:
+                last_exc = parse_exc
+                repairs = max(0, int(json_repair_attempts))
+                for _ in range(repairs):
+                    try:
+                        repaired = _repair_json_payload(
+                            stage_name=stage_name,
+                            schema_hint=schema_hint,
+                            raw_text=raw.raw_text,
+                            client=client,
+                            max_output_tokens=max_output_tokens,
+                        )
+                        return StageJSONResult(
+                            payload=repaired.payload,
+                            model=repaired.model,
+                            response_id=repaired.response_id,
+                            usage=repaired.usage,
+                            raw_text=repaired.raw_text,
+                            attempts=attempt,
+                            repaired=True,
+                        )
+                    except Exception as repair_exc:  # pragma: no cover - best-effort repair
+                        last_exc = repair_exc
+        except Exception as exc:
+            last_exc = exc
+
+        if attempt >= attempts:
+            break
+
+        delay = float(stage_backoff_seconds) * float(attempt)
+        if last_exc is not None:
+            err = str(last_exc)
+            if "HTTP 429" in err or "RESOURCE_EXHAUSTED" in err:
+                retry_after = _extract_retry_after_seconds(err)
+                delay = max(float(quota_backoff_seconds), (retry_after or 0.0) + 1.0)
+            elif "HTTP 503" in err or "UNAVAILABLE" in err:
+                delay = max(delay, float(stage_backoff_seconds) * 2.0)
+        time.sleep(min(float(max_backoff_seconds), max(0.1, delay)))
+
+    if last_exc is None:
+        raise RuntimeError(f"{stage_name}: failed without explicit error")
+    if isinstance(last_exc, Exception):
+        raise last_exc
+    raise RuntimeError(f"{stage_name}: {last_exc}")
+
+
+def _normalize_with_semantic_retry(
+    *,
+    stage_name: str,
+    stage_result: StageJSONResult,
+    normalize_fn: Callable[[dict[str, Any]], Any],
+    client: OpenAIChatJSONClient,
+    system_prompt: str,
+    base_user_prompt: str,
+    temperature: float,
+    max_output_tokens: int,
+    max_semantic_retries: int,
+    max_attempts: int,
+    json_repair_attempts: int,
+    stage_backoff_seconds: float,
+    quota_backoff_seconds: float,
+    max_backoff_seconds: float,
+    schema_hint: str,
+) -> tuple[Any, StageJSONResult]:
+    current = stage_result
+    retries = max(0, int(max_semantic_retries))
+    for semantic_try in range(retries + 1):
+        try:
+            return normalize_fn(current.payload), current
+        except ValueError as exc:
+            if semantic_try >= retries:
+                raise
+            repair_prompt = (
+                f"{base_user_prompt}\n\n"
+                f"Validation error: {exc}\n"
+                f"Previous JSON:\n{json.dumps(current.payload, indent=2, default=str)}\n\n"
+                "Return corrected JSON only."
+            )
+            current = _call_stage_json(
+                stage_name=stage_name,
+                schema_hint=schema_hint,
+                client=client,
+                system_prompt=system_prompt,
+                user_prompt=repair_prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                max_attempts=max_attempts,
+                json_repair_attempts=json_repair_attempts,
+                stage_backoff_seconds=stage_backoff_seconds,
+                quota_backoff_seconds=quota_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
+            )
+    raise RuntimeError(f"{stage_name}: normalization retry failed unexpectedly")
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -328,7 +531,7 @@ def _normalize_coder_payload(
     if not isinstance(payload, dict):
         raise ValueError("coder payload must be a JSON object")
 
-    strategy_name = _slug(str(payload.get("strategy_name", "")).strip())
+    strategy_name = _slug(str(payload.get("strategy_name", payload.get("name", ""))).strip())
     if not strategy_name:
         strategy_name = _slug(str(thinker_brief.get("strategy_name_hint", "")))
     if not strategy_name:
@@ -338,7 +541,9 @@ def _normalize_coder_payload(
     if not isinstance(params, dict):
         raise ValueError("payload.params must be an object")
 
-    raw_cfgs = payload.get("bar_configs", [])
+    raw_cfgs = payload.get("bar_configs", payload.get("bar_config", []))
+    if isinstance(raw_cfgs, str):
+        raw_cfgs = [raw_cfgs]
     requested = [str(v).strip() for v in raw_cfgs] if isinstance(raw_cfgs, list) else []
     allowed = {str(v).strip() for v in mission_bar_configs}
     chosen = [cfg for cfg in requested if cfg in allowed]
@@ -350,6 +555,12 @@ def _normalize_coder_payload(
         chosen = [mission_bar_configs[0]]
 
     raw_code = payload.get("code")
+    if raw_code is None or not str(raw_code).strip():
+        for alt in ("python_code", "module_code", "signal_code", "source", "script"):
+            alt_val = payload.get(alt)
+            if isinstance(alt_val, str) and alt_val.strip():
+                raw_code = alt_val
+                break
     if raw_code is None:
         raise ValueError("payload.code is required")
     code = _strip_code_fences(str(raw_code))
@@ -732,6 +943,12 @@ def main() -> int:
             else (float(agent_cfg["max_runtime_hours"]) if agent_cfg.get("max_runtime_hours") is not None else None)
         )
     )
+    stage_max_attempts = int(runtime_cfg.get("stage_max_attempts", 3))
+    json_repair_attempts = int(runtime_cfg.get("json_repair_attempts", 1))
+    semantic_retry_attempts = int(runtime_cfg.get("semantic_retry_attempts", 1))
+    stage_backoff_seconds = float(runtime_cfg.get("stage_backoff_seconds", 3.0))
+    quota_backoff_seconds = float(runtime_cfg.get("quota_backoff_seconds", 20.0))
+    max_backoff_seconds = float(runtime_cfg.get("max_backoff_seconds", 90.0))
 
     feedback_role = _resolve_role_cfg(
         agent_cfg=agent_cfg,
@@ -826,48 +1043,129 @@ def main() -> int:
         print(f"[iteration {iteration_no}/{max_iterations}] running feedback->thinker->coder pipeline")
 
         try:
-            feedback_generation = feedback_client.generate_json(
+            feedback_user_prompt = _build_feedback_user_prompt(feedback_items=feedback_items)
+            feedback_generation = _call_stage_json(
+                stage_name="feedback_analyst",
+                schema_hint="keys: strengths, weaknesses, error_patterns, guardrails, next_focus; each list[str]",
+                client=feedback_client,
                 system_prompt=_build_feedback_system_prompt(),
-                user_prompt=_build_feedback_user_prompt(feedback_items=feedback_items),
+                user_prompt=feedback_user_prompt,
                 temperature=float(feedback_role["temperature"]),
                 max_output_tokens=int(feedback_role["max_output_tokens"]),
+                max_attempts=stage_max_attempts,
+                json_repair_attempts=json_repair_attempts,
+                stage_backoff_seconds=stage_backoff_seconds,
+                quota_backoff_seconds=quota_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
             )
-            feedback_digest = _normalize_feedback_digest(feedback_generation.payload)
+            feedback_digest, feedback_generation = _normalize_with_semantic_retry(
+                stage_name="feedback_analyst",
+                stage_result=feedback_generation,
+                normalize_fn=_normalize_feedback_digest,
+                client=feedback_client,
+                system_prompt=_build_feedback_system_prompt(),
+                base_user_prompt=feedback_user_prompt,
+                temperature=float(feedback_role["temperature"]),
+                max_output_tokens=int(feedback_role["max_output_tokens"]),
+                max_semantic_retries=semantic_retry_attempts,
+                max_attempts=stage_max_attempts,
+                json_repair_attempts=json_repair_attempts,
+                stage_backoff_seconds=stage_backoff_seconds,
+                quota_backoff_seconds=quota_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
+                schema_hint="keys: strengths, weaknesses, error_patterns, guardrails, next_focus; each list[str]",
+            )
             feedback_digest_hash = _sha256_text(
                 json.dumps(feedback_digest, sort_keys=True, separators=(",", ":")),
             )[:16]
 
-            thinker_generation = thinker_client.generate_json(
-                system_prompt=_build_thinker_system_prompt(),
-                user_prompt=_build_thinker_user_prompt(
-                    mission=mission,
-                    existing_strategies=existing,
-                    feedback_digest=feedback_digest,
+            thinker_user_prompt = _build_thinker_user_prompt(
+                mission=mission,
+                existing_strategies=existing,
+                feedback_digest=feedback_digest,
+            )
+            thinker_generation = _call_stage_json(
+                stage_name="quant_thinker",
+                schema_hint=(
+                    "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                    "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                 ),
+                client=thinker_client,
+                system_prompt=_build_thinker_system_prompt(),
+                user_prompt=thinker_user_prompt,
                 temperature=float(thinker_role["temperature"]),
                 max_output_tokens=int(thinker_role["max_output_tokens"]),
+                max_attempts=stage_max_attempts,
+                json_repair_attempts=json_repair_attempts,
+                stage_backoff_seconds=stage_backoff_seconds,
+                quota_backoff_seconds=quota_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
             )
-            thinker_brief = _normalize_thinker_brief(
-                thinker_generation.payload,
-                mission_bar_configs=mission_bar_configs,
+            thinker_brief, thinker_generation = _normalize_with_semantic_retry(
+                stage_name="quant_thinker",
+                stage_result=thinker_generation,
+                normalize_fn=lambda payload: _normalize_thinker_brief(
+                    payload,
+                    mission_bar_configs=mission_bar_configs,
+                ),
+                client=thinker_client,
+                system_prompt=_build_thinker_system_prompt(),
+                base_user_prompt=thinker_user_prompt,
+                temperature=float(thinker_role["temperature"]),
+                max_output_tokens=int(thinker_role["max_output_tokens"]),
+                max_semantic_retries=semantic_retry_attempts,
+                max_attempts=stage_max_attempts,
+                json_repair_attempts=json_repair_attempts,
+                stage_backoff_seconds=stage_backoff_seconds,
+                quota_backoff_seconds=quota_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
+                schema_hint=(
+                    "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                    "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
+                ),
             )
             thinker_hash = _sha256_text(
                 json.dumps(thinker_brief, sort_keys=True, separators=(",", ":")),
             )[:16]
 
-            coder_generation = coder_client.generate_json(
+            coder_user_prompt = _build_coder_user_prompt(
+                thinker_brief=thinker_brief,
+                mission=mission,
+            )
+            coder_generation = _call_stage_json(
+                stage_name="coder",
+                schema_hint="keys: strategy_name, bar_configs, params, code",
+                client=coder_client,
                 system_prompt=_build_coder_system_prompt(),
-                user_prompt=_build_coder_user_prompt(
-                    thinker_brief=thinker_brief,
-                    mission=mission,
-                ),
+                user_prompt=coder_user_prompt,
                 temperature=float(coder_role["temperature"]),
                 max_output_tokens=int(coder_role["max_output_tokens"]),
+                max_attempts=stage_max_attempts,
+                json_repair_attempts=json_repair_attempts,
+                stage_backoff_seconds=stage_backoff_seconds,
+                quota_backoff_seconds=quota_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
             )
-            normalized = _normalize_coder_payload(
-                coder_generation.payload,
-                mission_bar_configs=mission_bar_configs,
-                thinker_brief=thinker_brief,
+            normalized, coder_generation = _normalize_with_semantic_retry(
+                stage_name="coder",
+                stage_result=coder_generation,
+                normalize_fn=lambda payload: _normalize_coder_payload(
+                    payload,
+                    mission_bar_configs=mission_bar_configs,
+                    thinker_brief=thinker_brief,
+                ),
+                client=coder_client,
+                system_prompt=_build_coder_system_prompt(),
+                base_user_prompt=coder_user_prompt,
+                temperature=float(coder_role["temperature"]),
+                max_output_tokens=int(coder_role["max_output_tokens"]),
+                max_semantic_retries=semantic_retry_attempts,
+                max_attempts=stage_max_attempts,
+                json_repair_attempts=json_repair_attempts,
+                stage_backoff_seconds=stage_backoff_seconds,
+                quota_backoff_seconds=quota_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
+                schema_hint="keys: strategy_name, bar_configs, params, code",
             )
 
             code = normalized["code"]
@@ -916,6 +1214,8 @@ def main() -> int:
                             "model": feedback_generation.model,
                             "response_id": feedback_generation.response_id,
                             "usage": feedback_generation.usage,
+                            "attempts": feedback_generation.attempts,
+                            "repaired": bool(feedback_generation.repaired),
                             "digest_hash": feedback_digest_hash,
                             "payload_hash": _sha256_text(feedback_generation.raw_text),
                         },
@@ -923,6 +1223,8 @@ def main() -> int:
                             "model": thinker_generation.model,
                             "response_id": thinker_generation.response_id,
                             "usage": thinker_generation.usage,
+                            "attempts": thinker_generation.attempts,
+                            "repaired": bool(thinker_generation.repaired),
                             "brief_hash": thinker_hash,
                             "payload_hash": _sha256_text(thinker_generation.raw_text),
                         },
@@ -930,6 +1232,8 @@ def main() -> int:
                             "model": coder_generation.model,
                             "response_id": coder_generation.response_id,
                             "usage": coder_generation.usage,
+                            "attempts": coder_generation.attempts,
+                            "repaired": bool(coder_generation.repaired),
                             "payload_hash": _sha256_text(coder_generation.raw_text),
                         },
                     },
@@ -996,6 +1300,8 @@ def main() -> int:
                             "model": feedback_generation.model,
                             "response_id": feedback_generation.response_id,
                             "usage": feedback_generation.usage,
+                            "attempts": feedback_generation.attempts,
+                            "repaired": bool(feedback_generation.repaired),
                             "digest_hash": feedback_digest_hash,
                             "payload_hash": _sha256_text(feedback_generation.raw_text),
                         },
@@ -1003,6 +1309,8 @@ def main() -> int:
                             "model": thinker_generation.model,
                             "response_id": thinker_generation.response_id,
                             "usage": thinker_generation.usage,
+                            "attempts": thinker_generation.attempts,
+                            "repaired": bool(thinker_generation.repaired),
                             "brief_hash": thinker_hash,
                             "payload_hash": _sha256_text(thinker_generation.raw_text),
                         },
@@ -1010,6 +1318,8 @@ def main() -> int:
                             "model": coder_generation.model,
                             "response_id": coder_generation.response_id,
                             "usage": coder_generation.usage,
+                            "attempts": coder_generation.attempts,
+                            "repaired": bool(coder_generation.repaired),
                             "payload_hash": _sha256_text(coder_generation.raw_text),
                         },
                         "code_hash": code_hash,

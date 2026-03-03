@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_module():
@@ -94,3 +95,74 @@ def test_task_id_is_stable_for_same_inputs():
     t1 = mod._task_id("alpha_x", "tick_610", params, "abcd1234")
     t2 = mod._task_id("alpha_x", "tick_610", {"b": 2, "a": 1}, "abcd1234")
     assert t1 == t2
+
+
+def test_extract_retry_after_seconds():
+    mod = _load_module()
+    assert mod._extract_retry_after_seconds("Please retry in 18.817401823s.") == 18.817401823
+    assert abs(mod._extract_retry_after_seconds("Please retry in 925.654664ms.") - 0.925654664) < 1e-9
+    assert mod._extract_retry_after_seconds("no retry hint") is None
+
+
+def test_call_stage_json_repairs_invalid_json():
+    mod = _load_module()
+
+    class _FakeClient:
+        def __init__(self):
+            self.calls = []
+            self._responses = [
+                "not-json",
+                '{"strengths":["x"],"weaknesses":["y"],"error_patterns":[],"guardrails":["g"],"next_focus":["n"]}',
+            ]
+
+        def generate_raw(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            text = self._responses.pop(0)
+            return SimpleNamespace(
+                raw_text=text,
+                model="fake-model",
+                response_id="resp1",
+                usage={"total_tokens": 1},
+            )
+
+    fake = _FakeClient()
+    out = mod._call_stage_json(
+        stage_name="feedback_analyst",
+        schema_hint="feedback schema",
+        client=fake,
+        system_prompt="s",
+        user_prompt="u",
+        temperature=0.1,
+        max_output_tokens=500,
+        max_attempts=2,
+        json_repair_attempts=1,
+        stage_backoff_seconds=0.01,
+        quota_backoff_seconds=0.01,
+        max_backoff_seconds=0.05,
+    )
+    assert out.repaired is True
+    assert out.payload["strengths"] == ["x"]
+    assert len(fake.calls) == 2
+
+
+def test_normalize_coder_payload_accepts_alternate_code_key():
+    mod = _load_module()
+    thinker = {
+        "strategy_name_hint": "hint_name",
+        "bar_configs": ["tick_610"],
+    }
+    payload = {
+        "name": "alt_name",
+        "bar_config": "tick_610",
+        "params": {"x": 1},
+        "python_code": "import numpy as np\nimport polars as pl\n"
+        "def generate_signal(df, params):\n    return np.zeros(len(df), dtype=np.int8)\n",
+    }
+    out = mod._normalize_coder_payload(
+        payload,
+        mission_bar_configs=["tick_610"],
+        thinker_brief=thinker,
+    )
+    assert out["strategy_name"] == "alt_name"
+    assert out["bar_configs"] == ["tick_610"]
+    assert "generate_signal" in out["code"]
