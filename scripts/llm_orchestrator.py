@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -24,7 +25,12 @@ from research.lib.atomic_io import atomic_json_write
 from research.lib.coordination import append_handoff, enqueue_task
 from research.lib.experiments import log_experiment
 from research.lib.feature_groups import filter_feature_group
-from research.lib.llm_client import LLMClientError, OpenAIChatJSONClient, extract_json_object
+from research.lib.llm_client import (
+    ClaudeCodeCLIClient,
+    LLMClientError,
+    LLMRawClient,
+    extract_json_object,
+)
 from research.signals import check_signal_causality, load_signal_module
 from src.framework.api import (
     ExecutionMode,
@@ -85,7 +91,7 @@ def _repair_json_payload(
     stage_name: str,
     schema_hint: str,
     raw_text: str,
-    client: OpenAIChatJSONClient,
+    client: LLMRawClient,
     max_output_tokens: int,
 ) -> StageJSONResult:
     system_prompt = (
@@ -121,7 +127,7 @@ def _call_stage_json(
     *,
     stage_name: str,
     schema_hint: str,
-    client: OpenAIChatJSONClient,
+    client: LLMRawClient,
     system_prompt: str,
     user_prompt: str,
     temperature: float,
@@ -206,7 +212,7 @@ def _normalize_with_semantic_retry(
     stage_name: str,
     stage_result: StageJSONResult,
     normalize_fn: Callable[[dict[str, Any]], Any],
-    client: OpenAIChatJSONClient,
+    client: LLMRawClient,
     system_prompt: str,
     base_user_prompt: str,
     temperature: float,
@@ -845,6 +851,46 @@ def _cfg_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _build_llm_client(
+    *,
+    provider: str,
+    model: str,
+    agent_cfg: dict[str, Any],
+    root: Path,
+) -> LLMRawClient:
+    raw_provider = str(provider).strip().lower()
+    if raw_provider not in {"claude", "claude_cli", "claude_code"}:
+        raise ValueError(
+            "Unsupported provider. This orchestrator is configured for Claude Code only "
+            "(set `provider: claude_cli`)."
+        )
+
+    cli_cfg = _cfg_dict(agent_cfg.get("claude_cli"))
+    cli_binary = str(
+        cli_cfg.get(
+            "binary",
+            agent_cfg.get("claude_binary", os.getenv("CLAUDE_CODE_BIN", "claude")),
+        ),
+    ).strip() or "claude"
+    timeout_seconds = float(cli_cfg.get("timeout_seconds", agent_cfg.get("timeout_seconds", 180)))
+    retries = int(cli_cfg.get("retries", agent_cfg.get("retries", 2)))
+    retry_backoff_seconds = float(cli_cfg.get("retry_backoff_seconds", agent_cfg.get("retry_backoff_seconds", 1.5)))
+    workdir_raw = str(cli_cfg.get("workdir", "")).strip()
+    workdir = root if not workdir_raw else (Path(workdir_raw) if Path(workdir_raw).is_absolute() else (root / workdir_raw))
+    extra_args_raw = cli_cfg.get("extra_args", [])
+    extra_args = [str(v) for v in extra_args_raw] if isinstance(extra_args_raw, list) else []
+
+    return ClaudeCodeCLIClient(
+        model=model,
+        cli_binary=cli_binary,
+        timeout_seconds=timeout_seconds,
+        max_retries=retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+        workdir=workdir,
+        extra_args=extra_args,
+    )
+
+
 def _resolve_role_cfg(
     *,
     agent_cfg: dict[str, Any],
@@ -969,38 +1015,24 @@ def main() -> int:
         default_max_output_tokens=2600,
     )
 
-    api_cfg = _cfg_dict(agent_cfg.get("api"))
-    api_key = str(api_cfg.get("api_key", agent_cfg.get("api_key", ""))).strip() or None
-    base_url = str(api_cfg.get("base_url", agent_cfg.get("base_url", "https://api.openai.com/v1")))
-    timeout_seconds = float(api_cfg.get("timeout_seconds", agent_cfg.get("timeout_seconds", 90)))
-    api_retries = int(api_cfg.get("retries", agent_cfg.get("api_retries", 2)))
-    retry_backoff_seconds = float(
-        api_cfg.get("retry_backoff_seconds", agent_cfg.get("api_retry_backoff_seconds", 1.5)),
-    )
-
-    feedback_client = OpenAIChatJSONClient(
+    provider = str(agent_cfg.get("provider", "claude_cli")).strip().lower()
+    feedback_client = _build_llm_client(
+        provider=provider,
         model=feedback_role["model"],
-        api_key=api_key,
-        base_url=base_url,
-        timeout_seconds=timeout_seconds,
-        max_retries=api_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
+        agent_cfg=agent_cfg,
+        root=root,
     )
-    thinker_client = OpenAIChatJSONClient(
+    thinker_client = _build_llm_client(
+        provider=provider,
         model=thinker_role["model"],
-        api_key=api_key,
-        base_url=base_url,
-        timeout_seconds=timeout_seconds,
-        max_retries=api_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
+        agent_cfg=agent_cfg,
+        root=root,
     )
-    coder_client = OpenAIChatJSONClient(
+    coder_client = _build_llm_client(
+        provider=provider,
         model=coder_role["model"],
-        api_key=api_key,
-        base_url=base_url,
-        timeout_seconds=timeout_seconds,
-        max_retries=api_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
+        agent_cfg=agent_cfg,
+        root=root,
     )
 
     signals_dir = root / "research" / "signals"
@@ -1016,6 +1048,7 @@ def main() -> int:
     print(
         "LLM orchestrator run_id="
         f"{run_id} mission={mission_name} "
+        f"provider={provider} "
         f"models=feedback:{feedback_role['model']} thinker:{thinker_role['model']} coder:{coder_role['model']}",
     )
     print(f"split={split} session_filter={session_filter} feature_group={feature_group}")

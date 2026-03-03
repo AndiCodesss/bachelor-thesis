@@ -4,24 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
+from pathlib import Path
+import shutil
+import subprocess
 import time
-from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from typing import Any, Protocol
 
 
 class LLMClientError(RuntimeError):
     """Raised when an LLM API call fails or returns invalid output."""
-
-
-@dataclass(frozen=True)
-class LLMGeneration:
-    payload: dict[str, Any]
-    raw_text: str
-    model: str
-    response_id: str | None
-    usage: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -30,6 +21,21 @@ class LLMRawGeneration:
     model: str
     response_id: str | None
     usage: dict[str, Any]
+
+
+class LLMRawClient(Protocol):
+    @property
+    def model(self) -> str: ...
+
+    def generate_raw(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        max_output_tokens: int = 2500,
+        force_json_object: bool = True,
+    ) -> LLMRawGeneration: ...
 
 
 def _strip_code_fences(text: str) -> str:
@@ -64,110 +70,114 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
-def _extract_chat_content(choice_message: Any) -> str:
-    if isinstance(choice_message, dict):
-        content = choice_message.get("content")
-    else:
-        content = None
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for part in content:
-            if isinstance(part, dict):
-                txt = part.get("text")
-                if txt is not None:
-                    chunks.append(str(txt))
-        return "\n".join(chunks).strip()
-    return ""
-
-
-class OpenAIChatJSONClient:
-    """Small OpenAI-compatible chat-completions JSON client."""
+class ClaudeCodeCLIClient:
+    """Claude Code CLI client (uses local `claude -p` execution)."""
 
     def __init__(
         self,
         *,
         model: str,
-        api_key: str | None = None,
-        base_url: str = "https://api.openai.com/v1",
-        timeout_seconds: float = 90.0,
+        cli_binary: str = "claude",
+        timeout_seconds: float = 180.0,
         max_retries: int = 2,
         retry_backoff_seconds: float = 1.5,
+        workdir: str | Path | None = None,
+        extra_args: list[str] | None = None,
     ) -> None:
-        key = api_key or os.getenv("LLM_API_KEY")
-        if not key:
-            raise LLMClientError("LLM_API_KEY is required")
-        self._api_key = str(key)
         self._model = str(model).strip()
         if not self._model:
             raise LLMClientError("model is required")
-        self._base_url = str(base_url).rstrip("/")
+
+        binary = str(cli_binary).strip() or "claude"
+        # If user passed a bare command name, resolve through PATH early for clearer errors.
+        if "/" not in binary:
+            resolved = shutil.which(binary)
+            if not resolved:
+                raise LLMClientError(f"Claude CLI binary not found on PATH: {binary}")
+            self._cli_binary = resolved
+        else:
+            path = Path(binary)
+            if not path.exists():
+                raise LLMClientError(f"Claude CLI binary not found: {binary}")
+            self._cli_binary = str(path)
+
         self._timeout_seconds = float(timeout_seconds)
         self._max_retries = max(0, int(max_retries))
         self._retry_backoff_seconds = max(0.1, float(retry_backoff_seconds))
+        self._workdir = str(workdir) if workdir is not None else None
+        self._extra_args = [str(v) for v in (extra_args or []) if str(v).strip()]
 
     @property
     def model(self) -> str:
         return self._model
 
-    def _post_json(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
-        url = f"{self._base_url}{endpoint}"
-        body = json.dumps(payload).encode("utf-8")
-        req = Request(
-            url=url,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        attempt = 0
-        while True:
-            try:
-                with urlopen(req, timeout=self._timeout_seconds) as resp:
-                    raw = resp.read().decode("utf-8")
-                parsed = json.loads(raw)
-                if not isinstance(parsed, dict):
-                    raise LLMClientError("LLM API returned non-object response")
-                return parsed
-            except HTTPError as exc:
-                detail = ""
-                try:
-                    detail = exc.read().decode("utf-8", errors="replace")
-                except Exception:
-                    detail = str(exc)
-                if attempt >= self._max_retries:
-                    raise LLMClientError(f"LLM HTTP {exc.code}: {detail[:500]}") from exc
-            except (URLError, TimeoutError, json.JSONDecodeError, LLMClientError) as exc:
-                if attempt >= self._max_retries:
-                    raise LLMClientError(f"LLM request failed: {exc}") from exc
-            attempt += 1
-            time.sleep(self._retry_backoff_seconds * attempt)
-
-    def generate_json(
+    def _run_once(
         self,
         *,
         system_prompt: str,
         user_prompt: str,
-        temperature: float = 0.2,
-        max_output_tokens: int = 2500,
-    ) -> LLMGeneration:
-        raw = self.generate_raw(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-            force_json_object=True,
-        )
-        json_payload = _extract_json_object(raw.raw_text)
-        return LLMGeneration(
-            payload=json_payload,
-            raw_text=raw.raw_text,
-            model=raw.model,
-            response_id=raw.response_id,
-            usage=raw.usage,
+        max_output_tokens: int,
+        force_json_object: bool,
+    ) -> LLMRawGeneration:
+        prompt = str(user_prompt)
+        if force_json_object:
+            prompt = (
+                f"{prompt}\n\n"
+                "CRITICAL OUTPUT RULE: Return ONLY one valid JSON object. "
+                "No markdown fences and no extra prose."
+            )
+        cmd = [
+            self._cli_binary,
+            "-p",
+            prompt,
+            "--output-format",
+            "text",
+            "--model",
+            self._model,
+            "--system-prompt",
+            str(system_prompt),
+        ]
+        cmd.extend(self._extra_args)
+        # Claude CLI does not expose strict max-token control for local subscription usage.
+        if max_output_tokens > 0:
+            cmd.extend(
+                [
+                    "--append-system-prompt",
+                    (
+                        "Keep responses concise and respect an approximate output budget "
+                        f"of {int(max_output_tokens)} tokens."
+                    ),
+                ],
+            )
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=self._workdir,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise LLMClientError(f"Claude CLI request timed out after {self._timeout_seconds}s") from exc
+        except OSError as exc:
+            raise LLMClientError(f"Failed to execute Claude CLI: {exc}") from exc
+
+        stdout = str(proc.stdout or "").strip()
+        stderr = str(proc.stderr or "").strip()
+        if proc.returncode != 0:
+            detail = stderr or stdout or f"exit_code={proc.returncode}"
+            raise LLMClientError(f"Claude CLI failed: {detail[:500]}")
+        if not stdout:
+            raise LLMClientError("Claude CLI returned empty output")
+
+        response_id = f"claude_cli_{int(time.time() * 1000)}"
+        return LLMRawGeneration(
+            raw_text=stdout,
+            model=self._model,
+            response_id=response_id,
+            usage={},
         )
 
     def generate_raw(
@@ -179,37 +189,21 @@ class OpenAIChatJSONClient:
         max_output_tokens: int = 2500,
         force_json_object: bool = True,
     ) -> LLMRawGeneration:
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": str(system_prompt)},
-                {"role": "user", "content": str(user_prompt)},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_output_tokens),
-        }
-        if force_json_object:
-            payload["response_format"] = {"type": "json_object"}
-        data = self._post_json("/chat/completions", payload)
-
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise LLMClientError("LLM response missing choices")
-        choice0 = choices[0]
-        message = choice0.get("message") if isinstance(choice0, dict) else None
-        raw_text = _extract_chat_content(message)
-        if not raw_text:
-            raise LLMClientError("LLM response contained no message content")
-
-        usage = data.get("usage")
-        usage_obj = usage if isinstance(usage, dict) else {}
-        response_id = data.get("id")
-        return LLMRawGeneration(
-            raw_text=raw_text,
-            model=self._model,
-            response_id=str(response_id) if response_id is not None else None,
-            usage=dict(usage_obj),
-        )
+        _ = float(temperature)  # not currently configurable in Claude CLI
+        attempt = 0
+        while True:
+            try:
+                return self._run_once(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_output_tokens=max_output_tokens,
+                    force_json_object=force_json_object,
+                )
+            except LLMClientError:
+                if attempt >= self._max_retries:
+                    raise
+            attempt += 1
+            time.sleep(self._retry_backoff_seconds * attempt)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -219,8 +213,8 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 __all__ = [
     "LLMClientError",
-    "LLMGeneration",
+    "LLMRawClient",
     "LLMRawGeneration",
-    "OpenAIChatJSONClient",
+    "ClaudeCodeCLIClient",
     "extract_json_object",
 ]

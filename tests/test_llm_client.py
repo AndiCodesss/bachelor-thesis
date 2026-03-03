@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from research.lib import llm_client
@@ -16,63 +14,48 @@ def test_extract_json_object_from_fenced_block():
     assert out["params"]["a"] == 1
 
 
-def test_generate_json_parses_chat_completion(monkeypatch: pytest.MonkeyPatch):
-    class _FakeResp:
-        def __enter__(self):
-            return self
+def test_claude_cli_generate_raw(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/claude")
 
-        def __exit__(self, exc_type, exc, tb):
-            return None
+    class _FakeProc:
+        returncode = 0
+        stdout = '{"ok": true}'
+        stderr = ""
 
-        def read(self) -> bytes:
-            payload = {
-                "id": "chatcmpl_123",
-                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "strategy_name": "alpha_s1",
-                                    "params": {"lookback": 20},
-                                    "bar_configs": ["tick_610"],
-                                    "code": "import numpy as np\\nimport polars as pl\\n"
-                                            "def generate_signal(df, params):\\n"
-                                            "    return np.zeros(len(df), dtype=np.int8)\\n",
-                                }
-                            ),
-                        },
-                    },
-                ],
-            }
-            return json.dumps(payload).encode("utf-8")
+    def _fake_run(cmd, **kwargs):
+        assert cmd[0] == "/usr/bin/claude"
+        assert "-p" in cmd
+        assert "--model" in cmd
+        assert "--system-prompt" in cmd
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is False
+        return _FakeProc()
 
-    monkeypatch.setattr(llm_client, "urlopen", lambda *_args, **_kwargs: _FakeResp())
-    client = llm_client.OpenAIChatJSONClient(model="gpt-5-mini", api_key="test-key")
-    out = client.generate_json(system_prompt="sys", user_prompt="usr")
-    assert out.response_id == "chatcmpl_123"
-    assert out.payload["strategy_name"] == "alpha_s1"
-    assert out.usage["total_tokens"] == 30
+    monkeypatch.setattr(llm_client.subprocess, "run", _fake_run)
+    client = llm_client.ClaudeCodeCLIClient(model="sonnet", cli_binary="claude")
+    out = client.generate_raw(system_prompt="sys", user_prompt="usr", force_json_object=True)
+    assert out.model == "sonnet"
+    assert out.raw_text == '{"ok": true}'
+    assert out.response_id is not None
+    assert out.usage == {}
 
 
-def test_generate_raw_returns_text_without_json_parse(monkeypatch: pytest.MonkeyPatch):
-    class _FakeResp:
-        def __enter__(self):
-            return self
+def test_claude_cli_missing_binary_raises(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: None)
+    with pytest.raises(llm_client.LLMClientError):
+        llm_client.ClaudeCodeCLIClient(model="sonnet", cli_binary="claude")
 
-        def __exit__(self, exc_type, exc, tb):
-            return None
 
-        def read(self) -> bytes:
-            payload = {
-                "id": "chatcmpl_raw_1",
-                "usage": {"total_tokens": 12},
-                "choices": [{"message": {"content": "plain text response"}}],
-            }
-            return json.dumps(payload).encode("utf-8")
+def test_claude_cli_nonzero_exit_raises(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/claude")
 
-    monkeypatch.setattr(llm_client, "urlopen", lambda *_args, **_kwargs: _FakeResp())
-    client = llm_client.OpenAIChatJSONClient(model="gpt-5-mini", api_key="test-key")
-    out = client.generate_raw(system_prompt="sys", user_prompt="usr", force_json_object=False)
-    assert out.response_id == "chatcmpl_raw_1"
-    assert out.raw_text == "plain text response"
+    class _FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "rate limit"
+
+    monkeypatch.setattr(llm_client.subprocess, "run", lambda *_args, **_kwargs: _FakeProc())
+    client = llm_client.ClaudeCodeCLIClient(model="sonnet", cli_binary="claude")
+    with pytest.raises(llm_client.LLMClientError):
+        client.generate_raw(system_prompt="sys", user_prompt="usr")

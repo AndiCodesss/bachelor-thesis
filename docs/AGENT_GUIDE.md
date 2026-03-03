@@ -73,6 +73,7 @@ Run both processes:
 
 ```bash
 set -a && source .env && set +a
+claude auth login  # one-time setup for Claude Max subscription
 
 # Process 1: LLM generator (writes research/signals + enqueues tasks)
 uv run python scripts/llm_orchestrator.py \
@@ -91,6 +92,9 @@ uv run python scripts/research.py \
 1. `feedback_analyst` (summarizes recent validator outcomes),
 2. `quant_thinker` (proposes one structured hypothesis),
 3. `coder` (implements only that hypothesis as signal code).
+
+The generator calls Claude through the local `claude` CLI (`provider: claude_cli`)
+rather than direct API billing.
 
 It uses lock-safe queue updates and writes audit logs to
 `results/logs/llm_orchestrator.jsonl`.

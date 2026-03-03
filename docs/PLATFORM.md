@@ -32,7 +32,7 @@ Research and promotion entrypoints verify lock before running.
 
 ## Autonomous Roles
 
-- `scripts/llm_orchestrator.py`: API-driven generator role. Produces/updates
+- `scripts/llm_orchestrator.py`: Claude Code CLI-driven generator role. Produces/updates
   `research/signals/*.py` and enqueues validation tasks.
   Internal roles: `feedback_analyst -> quant_thinker -> coder`.
 - `scripts/research.py --worker-agent validator`: execution role. Claims tasks,

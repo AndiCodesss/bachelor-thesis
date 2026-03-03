@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def _load_module():
     root = Path(__file__).resolve().parents[1]
@@ -166,3 +168,14 @@ def test_normalize_coder_payload_accepts_alternate_code_key():
     assert out["strategy_name"] == "alt_name"
     assert out["bar_configs"] == ["tick_610"]
     assert "generate_signal" in out["code"]
+
+
+def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):
+    mod = _load_module()
+    with pytest.raises(ValueError):
+        mod._build_llm_client(
+            provider="unsupported_provider",
+            model="sonnet",
+            agent_cfg={},
+            root=tmp_path,
+        )
