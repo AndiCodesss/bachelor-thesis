@@ -67,9 +67,14 @@ def factor_attribution(
     if len(trades) == 0:
         return {"available": False, "verdict": "INSUFFICIENT_DATA"}
 
-    # Compute strategy daily PnL from trades
-    # trades must have entry_time and a dollar PnL or enough info to compute one
-    assert "entry_time" in trades.columns, "trades missing entry_time"
+    # Compute strategy daily PnL from trades.
+    # Use exit date (PnL realization date). Fallback to entry_time for legacy
+    # callers that do not provide exit_time.
+    if "exit_time" in trades.columns:
+        date_col = "exit_time"
+    else:
+        assert "entry_time" in trades.columns, "trades missing exit_time/entry_time"
+        date_col = "entry_time"
 
     # Compute net PnL per trade if not already present
     if "pnl_dollars" in trades.columns:
@@ -90,9 +95,9 @@ def factor_attribution(
         )
         pnl_col = "_net_pnl"
 
-    # Group by entry date to get daily strategy PnL
+    # Group by realized date to get daily strategy PnL
     strategy_daily = (
-        trades.with_columns(pl.col("entry_time").dt.date().alias("date"))
+        trades.with_columns(pl.col(date_col).dt.date().alias("date"))
         .group_by("date")
         .agg(pl.col(pnl_col).sum().alias("strategy_pnl"))
         .sort("date")

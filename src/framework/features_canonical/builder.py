@@ -1,8 +1,8 @@
 """Feature pipeline — combines all feature modules into a unified matrix.
 
-Two-phase cache builder: aggregates each day's raw ticks to bars separately,
-then uses tiny cached bars (~200KB) from prior days as warmup context for
-feature computation. This keeps peak memory to 1 raw file at a time.
+Cache builder: aggregates target day's raw ticks to bars, loads prior-day
+warmup bars from a dedicated bar cache (untrimmed), then computes features.
+This keeps peak memory to 1 raw file at a time.
 """
 import gc
 import re
@@ -203,21 +203,8 @@ def build_feature_matrix(
     # Step 4: Compute interaction/regime features (needs joined matrix)
     result = compute_pipeline_features(result)
 
-    # Step 5: Drop rows with null labels (forward return edge effects)
-    result = result.filter(
-        pl.all_horizontal(pl.col(c).is_not_null() for c in LABEL_COLUMNS)
-    )
-
-    # Drop warmup rows where rolling features have not yet filled.
-    # sma_ratio_8 requires 8 bars of context — with cross-day warmup (3 prior days
-    # providing ~234 bars), this filter never drops target-day bars.  Without
-    # warmup context (first file in dataset), it drops the first 7 bars.
-    if "sma_ratio_8" in result.columns:
-        result = result.filter(pl.col("sma_ratio_8").is_not_null())
-    else:
-        result = result.filter(pl.col("return_1bar").is_not_null())
-
-    return result
+    # Step 5: Apply caller-facing row filters (labels + warmup rows).
+    return _apply_output_filters(result)
 
 
 def get_feature_columns(df_or_lf) -> list[str]:
@@ -286,13 +273,8 @@ def _compute_features_from_bars(
 
     if include_bar_columns:
         passthrough_cols = [
-            c for c in (
-                "ts_close", "bar_duration_ns", "trade_count",
-                "buy_volume", "sell_volume",
-                "large_trade_count", "large_buy_volume", "large_sell_volume",
-                "whale_trade_count_30", "whale_buy_volume_30", "whale_sell_volume_30",
-            )
-            if c in bars.columns and c not in result.columns
+            c for c in _BAR_COLUMNS
+            if c in bars.columns and c not in result.columns and c != "ts_event"
         ]
         if passthrough_cols:
             result = result.join(
@@ -301,15 +283,6 @@ def _compute_features_from_bars(
             )
 
     result = compute_pipeline_features(result)
-
-    result = result.filter(
-        pl.all_horizontal(pl.col(c).is_not_null() for c in LABEL_COLUMNS)
-    )
-    if "sma_ratio_8" in result.columns:
-        result = result.filter(pl.col("sma_ratio_8").is_not_null())
-    else:
-        result = result.filter(pl.col("return_1bar").is_not_null())
-
     return result
 
 
@@ -323,15 +296,15 @@ def load_cached_matrix(
     session_filter: str = "rth",
     warmup_days: int = WARMUP_CONTEXT_DAYS,
 ) -> pl.DataFrame:
-    """Load feature matrix from cache, or build using two-phase approach.
+    """Load feature matrix from cache, or build with warmup context.
 
-    Two-phase build (memory-efficient):
-      1. Aggregate target day's raw ticks → bars (~200KB), release raw data
-      2. Load cached bars from prior days as warmup context (~1MB total)
-      3. Compute features on combined bars → filter to target day → cache
+    Build approach (memory-efficient):
+      1. Load target day's bars from dedicated bar cache (or aggregate raw ticks)
+      2. Load prior-day warmup bars from dedicated bar cache
+         (falls back to raw tick aggregation if no cache exists yet)
+      3. Compute features on combined bars → filter to target day → feature-cache
 
-    Only 1 raw parquet file is in memory at a time. Warmup context comes
-    from tiny cached bar files, preventing OOM on high-volatility days.
+    Only 1 raw parquet file is in memory at a time.
 
     Args:
         session_filter: "rth" for Regular Trading Hours, "eth" for Extended.
@@ -340,31 +313,34 @@ def load_cached_matrix(
     cache_dir = _feature_cache_dir(bar_size, bar_type, bar_threshold, session_filter)
     cache_path = cache_dir / parquet_path.name
 
+    cache_required = _required_cache_columns(include_bar_columns, required_columns)
+
     if cache_path.exists():
         cached = pl.read_parquet(cache_path)
-        if required_columns is None or len(cached) == 0:
+        if len(cached) == 0:
             return cached
-        missing = [c for c in required_columns if c not in cached.columns]
-        if not missing:
-            return cached
+        missing = [c for c in cache_required if c not in cached.columns]
+        if not missing and not _is_legacy_filtered_cache(cached):
+            return _apply_output_filters(cached)
 
     session_fn = filter_eth if session_filter == "eth" else filter_rth
     target_date = _extract_date_from_filename(parquet_path.name)
+    bars_cache_dir = _bar_cache_dir(bar_size, bar_type, bar_threshold, session_filter)
 
-    # Phase 1: Build/load bars for target day (~200KB cached)
+    # Phase 1: Load target day's bars (cached or raw aggregation)
     current_bars = _load_or_build_bars(
-        parquet_path, cache_dir, bar_size, bar_type, bar_threshold, session_fn,
+        parquet_path, bars_cache_dir, bar_size, bar_type, bar_threshold, session_fn,
     )
 
     if len(current_bars) == 0:
         return pl.DataFrame()
 
-    # Phase 2: Build/load warmup bars from prior days (~200KB each, cached)
+    # Phase 2: Load warmup bars from dedicated bar cache (or raw fallback)
     context_files = _find_context_files(parquet_path, warmup_days)
     warmup_bars = [
         bars for fp in context_files
-        if len(bars := _load_or_build_bars(
-            fp, cache_dir, bar_size, bar_type, bar_threshold, session_fn,
+        if len(bars := _load_warmup_bars(
+            fp, bars_cache_dir, bar_size, bar_type, bar_threshold, session_fn,
         )) > 0
     ]
 
@@ -373,7 +349,7 @@ def load_cached_matrix(
     else:
         combined_bars = current_bars
 
-    # Phase 3: Compute features on combined bars
+    # Phase 3: Compute unfiltered features on combined bars
     df = _compute_features_from_bars(combined_bars, include_bar_columns)
     del combined_bars
     gc.collect()
@@ -384,48 +360,169 @@ def load_cached_matrix(
             pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date() == target_date
         )
 
-    if required_columns is not None and len(df) > 0:
-        missing = [c for c in required_columns if c not in df.columns]
+    if len(df) > 0:
+        missing = [c for c in cache_required if c not in df.columns]
         if missing:
             raise ValueError(
                 f"Missing required columns after build for {parquet_path.name}: {missing}",
             )
 
-    # Cache non-empty results
+    # Cache non-empty results (unfiltered)
     if len(df) > 0:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         df.write_parquet(cache_path)
 
-    return df
+    return _apply_output_filters(df)
 
 
-def _load_or_build_bars(
+def _build_bars_from_raw(
     raw_path: Path,
-    cache_dir: Path,
     bar_size: str,
     bar_type: str,
     bar_threshold: int | None,
     session_fn,
 ) -> pl.DataFrame:
-    """Load cached bars or aggregate from raw ticks and cache the result.
-
-    Bar files are stored alongside feature files with a .bars.parquet suffix
-    (~200KB each). This avoids re-aggregating 260MB raw files on every warmup.
-    """
-    bar_path = cache_dir / raw_path.name.replace(".parquet", ".bars.parquet")
-    if bar_path.exists():
-        return pl.read_parquet(bar_path)
-
+    """Aggregate raw ticks into bars (no caching of intermediate bars)."""
     lf = session_fn(pl.scan_parquet(str(raw_path)))
     bars = _aggregate_bars(lf, bar_size, bar_type, bar_threshold)
     del lf
     gc.collect()
-
-    if len(bars) > 0:
-        bar_path.parent.mkdir(parents=True, exist_ok=True)
-        bars.write_parquet(bar_path)
-
     return bars
+
+
+def _required_cache_columns(
+    include_bar_columns: bool,
+    required_columns: list[str] | None,
+) -> list[str]:
+    """Columns that must be present to accept an existing feature cache file."""
+    required = set(required_columns or [])
+    if include_bar_columns:
+        required.update(_BAR_COLUMNS)
+    return sorted(required)
+
+
+def _apply_output_filters(df: pl.DataFrame) -> pl.DataFrame:
+    """Apply caller-facing row filters on top of unfiltered cached features."""
+    if len(df) == 0:
+        return df
+
+    # Drop rows with null labels (forward return edge effects).
+    df = df.filter(
+        pl.all_horizontal(pl.col(c).is_not_null() for c in LABEL_COLUMNS)
+    )
+
+    # Drop warmup rows where rolling features have not yet filled.
+    # sma_ratio_8 requires 8 bars of context — with cross-day warmup, this
+    # should not drop target-day bars except at early dataset start.
+    if "sma_ratio_8" in df.columns:
+        return df.filter(pl.col("sma_ratio_8").is_not_null())
+    return df.filter(pl.col("return_1bar").is_not_null())
+
+
+def _is_legacy_filtered_cache(df: pl.DataFrame) -> bool:
+    """Detect old cache format that stored already-filtered rows.
+
+    Legacy caches dropped label-null tail rows before write. Unfiltered caches
+    should keep those rows, so for normal trading days we expect at least one
+    null in the forward-label columns.
+    """
+    if len(df) <= 12:
+        return False
+
+    # Legacy format 1: cache written after label filtering (no label-null tail).
+    if all(c in df.columns for c in LABEL_COLUMNS):
+        if all(df[c].null_count() == 0 for c in LABEL_COLUMNS):
+            return True
+
+    # Legacy format 2: OR breakout flags encoded as 0.0 before OR is ready.
+    # Current semantics: when OR is not ready (or_width is null), breakout flags
+    # are also null (unknown), not zero.
+    or_cols = {"or_width", "or_broken_up", "or_broken_down"}
+    if or_cols.issubset(df.columns):
+        mismatch = df.filter(
+            pl.col("or_width").is_null()
+            & (
+                pl.col("or_broken_up").is_not_null()
+                | pl.col("or_broken_down").is_not_null()
+            )
+        ).height
+        if mismatch > 0:
+            return True
+
+    return False
+
+
+# Bar columns needed for feature computation (input to _compute_features_from_bars)
+_BAR_COLUMNS = [
+    "ts_event", "ts_close", "bar_duration_ns",
+    "open", "high", "low", "close", "volume", "vwap",
+    "trade_count", "buy_volume", "sell_volume",
+    "large_trade_count", "large_buy_volume", "large_sell_volume",
+    "whale_trade_count_30", "whale_buy_volume_30", "whale_sell_volume_30",
+    "bid_price", "ask_price", "bid_size", "ask_size", "bid_count", "ask_count",
+    "msg_count", "add_count", "cancel_count", "modify_count", "latency_mean",
+    "stacked_imbalance_count", "stacked_imbalance_direction",
+    "zero_print_count", "zero_print_ratio",
+    "unfinished_high", "unfinished_low", "max_level_volume",
+    "volume_at_high", "volume_at_low",
+    "buy_vol_at_high", "sell_vol_at_high", "buy_vol_at_low", "sell_vol_at_low",
+    "vap_prices", "vap_volumes",
+]
+
+
+def _load_warmup_bars(
+    raw_path: Path,
+    bars_cache_dir: Path,
+    bar_size: str,
+    bar_type: str,
+    bar_threshold: int | None,
+    session_fn,
+) -> pl.DataFrame:
+    """Load untrimmed warmup bars from dedicated bar cache.
+
+    Falls back to raw aggregation when no cache exists or columns are missing.
+    """
+    return _load_or_build_bars(
+        raw_path, bars_cache_dir, bar_size, bar_type, bar_threshold, session_fn,
+    )
+
+
+def _load_or_build_bars(
+    raw_path: Path,
+    bars_cache_dir: Path,
+    bar_size: str,
+    bar_type: str,
+    bar_threshold: int | None,
+    session_fn,
+) -> pl.DataFrame:
+    """Load untrimmed bars from bar cache, or build from raw and persist."""
+    cache_path = bars_cache_dir / raw_path.name
+    if cache_path.exists():
+        available = set(pl.read_parquet_schema(cache_path))
+        if all(c in available for c in _BAR_COLUMNS):
+            return pl.read_parquet(cache_path, columns=_BAR_COLUMNS)
+
+    bars = _build_bars_from_raw(raw_path, bar_size, bar_type, bar_threshold, session_fn)
+    if len(bars) == 0:
+        return bars
+
+    missing_cols = [c for c in _BAR_COLUMNS if c not in bars.columns]
+    if missing_cols:
+        raise ValueError(f"Bar aggregation missing required columns: {missing_cols}")
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    bars.select(_BAR_COLUMNS).write_parquet(cache_path)
+    return bars
+
+
+def _bar_cache_dir(
+    bar_size: str,
+    bar_type: str,
+    bar_threshold: int | None,
+    session_filter: str,
+) -> Path:
+    """Directory holding untrimmed aggregated bars for warmup reuse."""
+    return _feature_cache_dir(bar_size, bar_type, bar_threshold, session_filter) / "_bars"
 
 
 def _feature_cache_dir(
@@ -494,8 +591,8 @@ def build_full_cache(
     """Build feature cache for all files in a split across all bar configs.
 
     Iterates chronologically through every file × bar config, calling
-    load_cached_matrix for each. Bars are cached as .bars.parquet (~200KB)
-    so warmup context loads instantly on subsequent files.
+    load_cached_matrix for each. Once a day is cached, its bar columns
+    are read directly for warmup context on subsequent files.
 
     Args:
         split: Data split to cache ("validate", "train").
@@ -579,5 +676,3 @@ def _bar_label(bc: dict) -> str:
     if bc["bar_type"] == "volume":
         return f"vol_{bc['bar_threshold']}"
     return f"{bc['bar_type']}_{bc['bar_threshold']}"
-
-

@@ -237,3 +237,30 @@ class TestFactorAttribution:
         assert set(result["factor_betas"].keys()) == {"market", "volatility", "momentum"}
         assert set(result["factor_t_stats"].keys()) == {"market", "volatility", "momentum"}
         assert set(result["factor_pvalues"].keys()) == {"market", "volatility", "momentum"}
+
+
+def test_factor_attribution_uses_exit_date_for_daily_pnl():
+    """Overnight trades should be attributed to realized (exit) date."""
+    bars = _make_bars(10, seed=123)
+    start = date(2024, 1, 2)
+
+    trades = pl.DataFrame(
+        {
+            "entry_time": [
+                datetime(start.year, start.month, start.day, 10, 0, tzinfo=timezone.utc),
+                datetime(start.year, start.month, start.day, 11, 0, tzinfo=timezone.utc),
+            ],
+            "exit_time": [
+                datetime(start.year, start.month, start.day + 3, 10, 0, tzinfo=timezone.utc),
+                datetime(start.year, start.month, start.day + 4, 10, 0, tzinfo=timezone.utc),
+            ],
+            "entry_price": [20000.0, 20000.0],
+            "exit_price": [20001.0, 19999.0],
+            "direction": [1, 1],
+            "size": [1, 1],
+        }
+    )
+
+    result = factor_attribution(trades, bars, min_days=1)
+    assert result["available"] is True
+    assert result["n_days"] >= 2

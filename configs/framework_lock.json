@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-03T12:38:28.001310+00:00",
+  "generated_at": "2026-03-03T15:26:40.208238+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 28,
   "files": [
@@ -61,8 +61,8 @@
     },
     {
       "path": "src/framework/features_canonical/builder.py",
-      "sha256": "2d47b8af43c647eabf5f71c7d91d03a863f8d234e4349eee734105de6278f7f5",
-      "size_bytes": 21396
+      "sha256": "29d3e8308c4172b0aff3af71bebce2a8fe7a0edfc38387dfa5e347b6310cea30",
+      "size_bytes": 24791
     },
     {
       "path": "src/framework/features_canonical/footprint.py",
@@ -96,8 +96,8 @@
     },
     {
       "path": "src/framework/features_canonical/opening_range.py",
-      "sha256": "7868865faa25c4b234811509de7fa499d32b0cfd9c897733e74bad20419501e7",
-      "size_bytes": 3647
+      "sha256": "c6bf418eee6f86aa4545c33474ec1849e1ebda9ed3de3508f6f327ff804d90b5",
+      "size_bytes": 3865
     },
     {
       "path": "src/framework/features_canonical/orderflow.py",
@@ -136,8 +136,8 @@
     },
     {
       "path": "src/framework/validation/factor_attribution.py",
-      "sha256": "ad14a5571dc52ac302186cdadefda80cdd497f7cb0e73085e772dd01cfca4749",
-      "size_bytes": 6653
+      "sha256": "27e960d90ad6b65c571092333874d66bd7ac23eb607d5b4d7c5f75150ba25986",
+      "size_bytes": 6810
     },
     {
       "path": "src/framework/validation/robustness.py",

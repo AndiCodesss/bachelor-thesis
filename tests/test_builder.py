@@ -3,6 +3,8 @@
 import pytest
 import polars as pl
 from datetime import datetime
+from pathlib import Path
+import src.framework.features_canonical.builder as builder_mod
 from src.framework.features_canonical.builder import build_feature_matrix, get_feature_columns, LABEL_COLUMNS
 from src.framework.data.loader import get_parquet_files
 
@@ -463,3 +465,81 @@ def test_build_feature_matrix_tick_threshold_validation():
 
     with pytest.raises(ValueError, match="bar_threshold must be > 0 for tick bars"):
         build_feature_matrix(synthetic_data.lazy(), bar_type="tick", bar_threshold=0)
+
+
+def test_load_cached_matrix_stores_unfiltered_cache_and_returns_filtered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cache should keep label-null tail rows; returned frame should filter them."""
+    files = get_parquet_files("train")
+    file_path = files[1]  # first full trading day
+
+    monkeypatch.setattr(builder_mod, "CACHE_DIR", tmp_path)
+
+    returned = builder_mod.load_cached_matrix(
+        file_path,
+        bar_size="5m",
+        bar_type="time",
+        session_filter="eth",
+        include_bar_columns=False,
+    )
+    assert len(returned) > 0
+    for col in LABEL_COLUMNS:
+        assert returned[col].null_count() == 0, f"Returned frame should filter null labels: {col}"
+
+    cache_path = builder_mod._feature_cache_dir("5m", "time", None, "eth") / file_path.name
+    cached = pl.read_parquet(cache_path)
+    assert len(cached) >= len(returned)
+    assert any(cached[col].null_count() > 0 for col in LABEL_COLUMNS), \
+        "Cached frame should retain unfiltered label-null tail rows"
+
+    # Cache hit should still return filtered output (filters applied at read time).
+    returned_cached = builder_mod.load_cached_matrix(
+        file_path,
+        bar_size="5m",
+        bar_type="time",
+        session_filter="eth",
+        include_bar_columns=False,
+    )
+    for col in LABEL_COLUMNS:
+        assert returned_cached[col].null_count() == 0, \
+            f"Cache-hit output should filter null labels: {col}"
+
+
+def test_load_cached_matrix_rebuilds_stale_cache_for_include_bar_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Existing cache without bar passthrough columns must be rebuilt when requested."""
+    files = get_parquet_files("train")
+    file_path = files[1]
+
+    monkeypatch.setattr(builder_mod, "CACHE_DIR", tmp_path)
+
+    _ = builder_mod.load_cached_matrix(
+        file_path,
+        bar_size="5m",
+        bar_type="time",
+        session_filter="eth",
+        include_bar_columns=False,
+    )
+
+    returned = builder_mod.load_cached_matrix(
+        file_path,
+        bar_size="5m",
+        bar_type="time",
+        session_filter="eth",
+        include_bar_columns=True,
+    )
+    required = {
+        "ts_close",
+        "bar_duration_ns",
+        "trade_count",
+        "buy_volume",
+        "sell_volume",
+        "vap_prices",
+        "vap_volumes",
+    }
+    missing = required - set(returned.columns)
+    assert not missing, f"Rebuilt output missing required bar columns: {sorted(missing)}"

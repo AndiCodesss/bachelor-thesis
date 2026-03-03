@@ -1,4 +1,4 @@
-"""Signal discovery and deterministic strategy identity helpers."""
+"""Signal discovery, strategy identity, and signal contract helpers."""
 
 from __future__ import annotations
 
@@ -14,6 +14,118 @@ import numpy as np
 import polars as pl
 
 SignalFn = Callable[[pl.DataFrame, dict[str, Any]], np.ndarray]
+_CAUSALITY_MIN_PREFIX_BARS = 32
+
+
+def _invoke_generate_signal(
+    *,
+    generate_fn: Callable[..., Any],
+    df: pl.DataFrame,
+    params: dict[str, Any],
+    accepts_state: bool,
+    model_state: Any | None,
+) -> np.ndarray:
+    if accepts_state:
+        raw = generate_fn(df, params, model_state)
+    else:
+        raw = generate_fn(df, params)
+    return np.asarray(raw, dtype=np.float64).reshape(-1)
+
+
+def _normalize_signal_for_causality(arr: np.ndarray, mode: str) -> tuple[np.ndarray | None, str | None]:
+    if mode == "strict":
+        if np.isnan(arr).any():
+            return None, "signal contains NaN"
+        unique_vals = set(np.unique(arr).tolist())
+        if not unique_vals.issubset({-1.0, 0.0, 1.0}):
+            return None, f"signal contains invalid values: {sorted(unique_vals)}"
+        return arr.astype(np.int8, copy=False), None
+
+    if mode == "sign":
+        normalized = np.sign(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)).astype(np.int8)
+        return normalized, None
+
+    raise ValueError(f"Unknown causality mode '{mode}'. Use 'strict' or 'sign'.")
+
+
+def check_signal_causality(
+    *,
+    generate_fn: Callable[..., Any],
+    df: pl.DataFrame,
+    params: dict[str, Any],
+    accepts_state: bool = False,
+    model_state: Any | None = None,
+    mode: str = "strict",
+    min_prefix_bars: int = _CAUSALITY_MIN_PREFIX_BARS,
+    full_signal: np.ndarray | None = None,
+) -> list[str]:
+    """Prefix-invariance causality check for signal functions.
+
+    A causal signal must produce identical outputs for the first K bars whether
+    computed on the first K bars only, or on the full frame and then sliced.
+    """
+    n_rows = len(df)
+    if n_rows < max(int(min_prefix_bars) + 1, 2):
+        return []
+
+    if full_signal is None:
+        full_raw = _invoke_generate_signal(
+            generate_fn=generate_fn,
+            df=df,
+            params=params,
+            accepts_state=accepts_state,
+            model_state=model_state,
+        )
+    else:
+        full_raw = np.asarray(full_signal, dtype=np.float64).reshape(-1)
+
+    if len(full_raw) != n_rows:
+        return [f"signal length {len(full_raw)} != expected {n_rows}"]
+
+    full_norm, err = _normalize_signal_for_causality(full_raw, mode)
+    if err is not None:
+        return [err]
+    assert full_norm is not None
+
+    candidate_cuts = {
+        int(round(n_rows * 0.50)),
+        int(round(n_rows * 0.75)),
+        int(round(n_rows * 0.90)),
+        n_rows - 1,
+    }
+    cuts = sorted(
+        cut for cut in candidate_cuts
+        if int(min_prefix_bars) <= cut < n_rows
+    )
+    if not cuts:
+        return []
+
+    for cut in cuts:
+        prefix_df = df[:cut]
+        prefix_raw = _invoke_generate_signal(
+            generate_fn=generate_fn,
+            df=prefix_df,
+            params=params,
+            accepts_state=accepts_state,
+            model_state=model_state,
+        )
+        if len(prefix_raw) != cut:
+            return [f"prefix signal length {len(prefix_raw)} != expected {cut}"]
+
+        prefix_norm, err = _normalize_signal_for_causality(prefix_raw, mode)
+        if err is not None:
+            return [err]
+        assert prefix_norm is not None
+
+        mismatch_idx = np.flatnonzero(full_norm[:cut] != prefix_norm)
+        if mismatch_idx.size > 0:
+            i = int(mismatch_idx[0])
+            return [
+                "non-causal signal: prefix mismatch at "
+                f"bar={i}, cut={cut}, full={int(full_norm[i])}, prefix={int(prefix_norm[i])}",
+            ]
+
+    return []
 
 
 def _signals_dir(signals_dir: Path | None = None) -> Path:
@@ -80,4 +192,5 @@ __all__ = [
     "load_signal_module",
     "get_strategy_metadata",
     "compute_strategy_id",
+    "check_signal_causality",
 ]

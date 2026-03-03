@@ -56,14 +56,17 @@ def compute_opening_range_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     df = df.join(or_stats, on="_date", how="left")
 
-    # Null out OR values for bars still in the forming period (no lookahead)
+    # Null out OR values until OR is complete.
+    # This includes pre-open ETH bars (minutes_since_open < 0) to avoid
+    # leaking 09:30-10:00 OR stats into earlier bars.
+    or_not_ready = pl.col("_min_since_open") < OR_PERIOD_MINUTES
     df = df.with_columns([
-        pl.when(pl.col("_in_or"))
+        pl.when(or_not_ready)
         .then(None)
         .otherwise(pl.col("_or_high"))
         .alias("_or_high"),
 
-        pl.when(pl.col("_in_or"))
+        pl.when(or_not_ready)
         .then(None)
         .otherwise(pl.col("_or_low"))
         .alias("_or_low"),
@@ -82,12 +85,16 @@ def compute_opening_range_features(bars: pl.DataFrame) -> pl.DataFrame:
         .alias("position_in_or"),
 
         # "Breakout above OR high = trend day candidate"
-        pl.when(pl.col("close") > pl.col("_or_high"))
+        pl.when(or_not_ready)
+        .then(None)
+        .when(pl.col("close") > pl.col("_or_high"))
         .then(1.0).otherwise(0.0)
         .alias("or_broken_up"),
 
         # "Breakout below OR low = trend day candidate"
-        pl.when(pl.col("close") < pl.col("_or_low"))
+        pl.when(or_not_ready)
+        .then(None)
+        .when(pl.col("close") < pl.col("_or_low"))
         .then(1.0).otherwise(0.0)
         .alias("or_broken_down"),
     ])

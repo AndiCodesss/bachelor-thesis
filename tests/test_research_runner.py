@@ -6,6 +6,7 @@ from pathlib import Path
 import types
 
 import numpy as np
+import polars as pl
 import pytest
 
 
@@ -154,3 +155,98 @@ def test_execute_claimed_task_passes_session_filter_to_strategy_id(
 
     assert captured["bar_config"] == "tick_610"
     assert captured["session_filter"] == "rth"
+
+
+def test_seed_seen_terminal_task_ids_prevents_resume_double_count(tmp_path: Path):
+    mod = _load_runner_module()
+    queue_path = tmp_path / "queue.json"
+    queue = {
+        "schema_version": "1.0",
+        "tasks": [
+            {
+                "task_id": "t1",
+                "state": "completed",
+                "verdict": "PASS",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:01:00+00:00",
+            },
+            {
+                "task_id": "t2",
+                "state": "failed",
+                "verdict": "FAIL",
+                "created_at": "2026-01-01T00:02:00+00:00",
+                "completed_at": "2026-01-01T00:03:00+00:00",
+            },
+            {
+                "task_id": "t3",
+                "state": "completed",
+                "verdict": "PASS",
+                "created_at": "2026-01-01T00:04:00+00:00",
+                "completed_at": "2026-01-01T00:05:00+00:00",
+            },
+        ],
+    }
+    queue_path.write_text(json.dumps(queue), encoding="utf-8")
+
+    seen = mod._seed_seen_terminal_task_ids(queue_path, already_counted=2)
+    assert seen == {"t1", "t2"}
+
+    # After seeding, only truly new terminal tasks should be counted.
+    new_verdicts = mod._collect_new_terminal_task_verdicts(queue_path, seen)
+    assert new_verdicts == ["PASS"]
+
+
+def test_execute_claimed_task_rejects_non_causal_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=lambda _df, _params: np.zeros(64, dtype=np.int8),
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_1")
+
+    fake_file = tmp_path / "nq_2024-01-02.parquet"
+    fake_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "get_split_files", lambda _split: [fake_file])
+
+    start = np.datetime64("2024-01-02T14:30:00")
+    bars = pl.DataFrame(
+        {
+            "ts_event": pl.datetime_range(start, start + np.timedelta64(63, "m"), interval="1m", eager=True),
+            "open": np.linspace(100.0, 101.0, 64),
+            "high": np.linspace(100.5, 101.5, 64),
+            "low": np.linspace(99.5, 100.5, 64),
+            "close": np.linspace(100.0, 101.0, 64),
+        }
+    ).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    monkeypatch.setattr(mod, "load_cached_matrix", lambda *args, **kwargs: bars)
+    monkeypatch.setattr(mod, "check_signal_causality", lambda **kwargs: ["non-causal signal"])
+
+    with pytest.raises(ValueError, match="signal causality failed"):
+        mod._execute_claimed_task(
+            task={
+                "task_id": "t_causal_guard",
+                "strategy_name": "dummy",
+                "split": "validate",
+                "bar_config": "time_1m",
+                "params": {},
+                "run_gauntlet": False,
+            },
+            mission={
+                "run_gauntlet": False,
+                "target_sharpe": 10.0,
+                "min_trade_count": 100,
+                "session_filter": "rth",
+            },
+            run_id="run_x",
+            run_dir=tmp_path,
+            framework_lock_hash="abc123",
+            git_commit=None,
+            experiments_path=tmp_path / "experiments.jsonl",
+            experiments_lock=tmp_path / "experiments.lock",
+        )

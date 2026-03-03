@@ -128,6 +128,7 @@ Same agent, same engine, same rules — only the feature space changes.
 ├── scripts/
 │   ├── research.py                       # Autonomous research loop entrypoint
 │   ├── promote.py                        # Candidate promotion gate runner
+│   ├── cache_runner.py                   # Bulk feature-cache rebuild helper
 │   └── framework/
 │       ├── build_lock.py                 # Build framework integrity manifest
 │       ├── verify_lock.py                # Verify integrity before runs
@@ -200,6 +201,7 @@ export NQ_DATA_PATH="/path/to/NQ_raw"
 uv sync                                                                         # install dependencies
 uv run pytest -q                                                                # run tests
 uv run python scripts/framework/verify_lock.py --manifest configs/framework_lock.json --mode error   # verify integrity
+uv run python scripts/cache_runner.py --split all --session-filter eth --bar-filter tick_610 --clean # rebuild cache
 uv run python scripts/research.py --mission configs/missions/alpha-discovery.yaml --max-experiments 100 --auto-mode  # research loop
 uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.json --verify-only        # promotion verification
 ```

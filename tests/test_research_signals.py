@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import polars as pl
 
-from research.signals import compute_strategy_id, discover_signals
+from research.signals import check_signal_causality, compute_strategy_id, discover_signals
 
 
 def _df(n: int = 32) -> pl.DataFrame:
@@ -80,3 +80,58 @@ def test_strategy_id_stable_with_no_env() -> None:
     # example_ema_turn_paramsHash_codeHash = 5 segments
     assert len(id_bare.split("_")) == 5
 
+
+def _causal_signal(df: pl.DataFrame, _params: dict) -> np.ndarray:
+    close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+    prev = np.roll(close, 1)
+    prev[0] = close[0]
+    return np.where(close > prev, 1, np.where(close < prev, -1, 0)).astype(np.int8)
+
+
+def _future_peek_signal(df: pl.DataFrame, _params: dict) -> np.ndarray:
+    close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+    nxt = np.roll(close, -1)
+    nxt[-1] = close[-1]
+    return np.where(nxt > close, 1, np.where(nxt < close, -1, 0)).astype(np.int8)
+
+
+def _future_peek_continuous(df: pl.DataFrame, _params: dict) -> np.ndarray:
+    close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+    nxt = np.roll(close, -1)
+    nxt[-1] = close[-1]
+    return nxt - close
+
+
+def test_signal_causality_check_passes_causal_signal() -> None:
+    errors = check_signal_causality(
+        generate_fn=_causal_signal,
+        df=_df(96),
+        params={},
+        mode="strict",
+        min_prefix_bars=8,
+    )
+    assert errors == []
+
+
+def test_signal_causality_check_rejects_future_peek_signal() -> None:
+    errors = check_signal_causality(
+        generate_fn=_future_peek_signal,
+        df=_df(96),
+        params={},
+        mode="strict",
+        min_prefix_bars=8,
+    )
+    assert errors
+    assert "non-causal signal" in errors[0]
+
+
+def test_signal_causality_check_sign_mode_rejects_future_peek_continuous() -> None:
+    errors = check_signal_causality(
+        generate_fn=_future_peek_continuous,
+        df=_df(96),
+        params={},
+        mode="sign",
+        min_prefix_bars=8,
+    )
+    assert errors
+    assert "non-causal signal" in errors[0]

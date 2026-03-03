@@ -22,6 +22,7 @@ if __package__ is None or __package__ == "":
 from research.lib.atomic_io import atomic_json_write
 from research.lib.candidates import load_candidate
 from research.lib.promotion import verify_candidate_artifacts
+from research.signals import check_signal_causality
 from research.lib.trial_counter import estimate_effective_trials
 from research.ml.promotion_gates import WalkForwardFold, WalkForwardValidator, evaluate_promotion_gates
 from src.framework import __version__ as framework_version
@@ -255,10 +256,20 @@ def _daily_returns_from_trades(trades: pl.DataFrame, *, cost_multiplier: float =
     if len(daily) == 0:
         return []
 
-    pnls = daily["_net_pnl"].to_list()
+    # Match backtest metrics logic: include non-trading weekdays as 0 PnL.
+    min_date = daily["_date"].min()
+    max_date = daily["_date"].max()
+    all_bdays = pl.DataFrame({
+        "_date": pl.date_range(min_date, max_date, "1d", eager=True),
+    }).filter(pl.col("_date").dt.weekday() <= 5)
+    # Include actual trade dates (covers weekend trades in tests/synthetic data).
+    all_dates = pl.concat([
+        all_bdays.select("_date"),
+        daily.select("_date"),
+    ]).unique().sort("_date")
+    daily = all_dates.join(daily, on="_date", how="left").fill_null(0.0)
 
-    # Return only trading-day PnLs (skip weekends/holidays with no trades)
-    return [float(v) for v in pnls]
+    return [float(v) for v in daily["_net_pnl"].to_list()]
 
 
 def _daily_trade_counts_from_trades(trades: pl.DataFrame) -> list[int]:
@@ -275,10 +286,19 @@ def _daily_trade_counts_from_trades(trades: pl.DataFrame) -> list[int]:
     if len(daily) == 0:
         return []
 
-    counts = daily["_n"].to_list()
+    # Match _daily_returns_from_trades date grid so density metrics are consistent.
+    min_date = daily["_date"].min()
+    max_date = daily["_date"].max()
+    all_bdays = pl.DataFrame({
+        "_date": pl.date_range(min_date, max_date, "1d", eager=True),
+    }).filter(pl.col("_date").dt.weekday() <= 5)
+    all_dates = pl.concat([
+        all_bdays.select("_date"),
+        daily.select("_date"),
+    ]).unique().sort("_date")
+    daily = all_dates.join(daily, on="_date", how="left").fill_null(0)
 
-    # Return only trading-day counts (skip weekends/holidays with no trades)
-    return [int(v) for v in counts]
+    return [int(v) for v in daily["_n"].to_list()]
 
 
 def _concat_frames(frames: list[pl.DataFrame]) -> pl.DataFrame:
@@ -372,9 +392,7 @@ def _generate_signal_array(
     params: dict[str, Any],
     model_state: Any | None,
 ) -> np.ndarray:
-    # Strip label columns so signal code cannot access forward returns
-    _label_cols_present = [c for c in LABEL_COLUMNS if c in bars.columns]
-    safe_bars = bars.drop(_label_cols_present) if _label_cols_present else bars
+    safe_bars = _safe_signal_bars(bars)
     if runtime.generate_accepts_state:
         raw = runtime.generate_fn(safe_bars, params, model_state)
     else:
@@ -387,6 +405,12 @@ def _generate_signal_array(
     return np.sign(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)).astype(np.int8)
 
 
+def _safe_signal_bars(bars: pl.DataFrame) -> pl.DataFrame:
+    """Remove forward-looking label columns before calling strategy code."""
+    _label_cols_present = [c for c in LABEL_COLUMNS if c in bars.columns]
+    return bars.drop(_label_cols_present) if _label_cols_present else bars
+
+
 def _run_signal_on_files(
     *,
     files: tuple[Path, ...] | list[Path],
@@ -397,11 +421,28 @@ def _run_signal_on_files(
     backtest_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     trade_frames: list[pl.DataFrame] = []
+    causality_checked = False
 
     for file_path in files:
         bars = load_bars(Path(file_path))
         if len(bars) == 0:
             continue
+
+        # Causality check (prefix invariance) once per evaluation run on the
+        # first sufficiently long frame. Uses post-sign signal semantics.
+        if not causality_checked:
+            causality_errors = check_signal_causality(
+                generate_fn=runtime.generate_fn,
+                df=_safe_signal_bars(bars),
+                params=signal_params,
+                accepts_state=runtime.generate_accepts_state,
+                model_state=model_state,
+                mode="sign",
+            )
+            if causality_errors:
+                raise ValueError(f"signal causality failed: {causality_errors}")
+            if len(bars) >= 33:
+                causality_checked = True
 
         signal = _generate_signal_array(runtime, bars, signal_params, model_state)
         bars_with_signal = bars.with_columns(pl.Series("signal", signal).cast(pl.Int8))

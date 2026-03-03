@@ -35,7 +35,12 @@ from research.lib.coordination import (
     watchdog_check_timeouts,
 )
 from research.lib.experiments import log_experiment
-from research.signals import compute_strategy_id, discover_signals, load_signal_module
+from research.signals import (
+    check_signal_causality,
+    compute_strategy_id,
+    discover_signals,
+    load_signal_module,
+)
 from src.framework import __version__ as framework_version
 from src.framework.api import (
     ExecutionMode,
@@ -184,6 +189,32 @@ def _collect_new_terminal_task_verdicts(queue_path: Path, seen_task_ids: set[str
         seen_task_ids.add(task_id)
         verdicts.append(str(task.get("verdict", "FAIL")))
     return verdicts
+
+
+def _seed_seen_terminal_task_ids(queue_path: Path, already_counted: int) -> set[str]:
+    """Seed seen terminal task ids from queue for resume-safe budget accounting.
+
+    We assume the first N terminal tasks (ordered by completed_at/created_at)
+    are already reflected in MissionBudget.experiments_run, and only unseen
+    terminal tasks should increment budget after resume.
+    """
+    payload = _read_json(queue_path)
+    terminal_tasks = [
+        task for task in payload.get("tasks", [])
+        if task.get("state") in {"completed", "failed"} and str(task.get("task_id", "")).strip()
+    ]
+    terminal_tasks.sort(
+        key=lambda task: (
+            str(task.get("completed_at", "")),
+            str(task.get("created_at", "")),
+            str(task.get("task_id", "")),
+        )
+    )
+    n_seed = max(0, min(int(already_counted), len(terminal_tasks)))
+    return {
+        str(task["task_id"])
+        for task in terminal_tasks[:n_seed]
+    }
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -452,6 +483,7 @@ def _execute_claimed_task(
     all_trades: list[pl.DataFrame] = []
     bars_processed = 0
     signal_count = 0
+    causality_checked = False
 
     for file_path in files:
         df = load_cached_matrix(
@@ -469,6 +501,21 @@ def _execute_claimed_task(
         # Strip label columns so strategy code cannot access forward returns
         _label_cols_present = [c for c in LABEL_COLUMNS if c in df.columns]
         strategy_df = df.drop(_label_cols_present) if _label_cols_present else df
+
+        # Causality check (prefix invariance) once per task on first sufficiently
+        # long frame. Prevents strategy code from peeking into future rows.
+        if not causality_checked:
+            causality_errors = check_signal_causality(
+                generate_fn=strategy_fn,
+                df=strategy_df,
+                params=params,
+                mode="strict",
+            )
+            if causality_errors:
+                raise ValueError(f"{task_id}: signal causality failed: {causality_errors}")
+            if len(strategy_df) >= 33:
+                causality_checked = True
+
         raw_signal = np.asarray(strategy_fn(strategy_df, params))
         signal_errors = _validate_signal_array(raw_signal, len(df))
         if signal_errors:
@@ -670,7 +717,10 @@ def main() -> None:
         mission_name=mission_name,
         reset_on_mission_change=True,
     )
-    seen_terminal_tasks: set[str] = set()
+    seen_terminal_tasks: set[str] = (
+        _seed_seen_terminal_task_ids(state_paths["queue"], budget.experiments_run)
+        if args.resume else set()
+    )
 
     logs_dir = root / "results" / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)

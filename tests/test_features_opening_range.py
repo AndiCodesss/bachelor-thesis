@@ -42,6 +42,8 @@ def test_or_null_during_forming_period():
     for i in range(6):
         assert result["or_width"][i] is None, f"Bar {i} should have null or_width"
         assert result["position_in_or"][i] is None, f"Bar {i} should have null position_in_or"
+        assert result["or_broken_up"][i] is None, f"Bar {i} should have null or_broken_up"
+        assert result["or_broken_down"][i] is None, f"Bar {i} should have null or_broken_down"
 
     # Bar 6 (minute 30) should have non-null OR features
     assert result["or_width"][6] is not None, "Bar 6 (30 min) should have or_width"
@@ -264,6 +266,61 @@ def test_1m_bars_or_period():
     # First 30 bars (minutes 0-29) should have null features
     for i in range(30):
         assert result["or_width"][i] is None, f"Bar {i} (1m) should be null during OR"
+        assert result["or_broken_up"][i] is None, f"Bar {i} (1m) should be null during OR"
+        assert result["or_broken_down"][i] is None, f"Bar {i} (1m) should be null during OR"
 
     # Bar 30 (minute 30) should be non-null
     assert result["or_width"][30] is not None, "Bar 30 (1m) should have OR features"
+
+
+def test_pre_open_eth_bars_do_not_receive_or_stats():
+    """Pre-open ETH bars must not see OR values from 09:30-10:00."""
+    rows = []
+    utc_offset = 4  # EDT
+    date = datetime(2024, 7, 15)
+
+    # Pre-open ETH bar at 08:00 ET (before OR exists)
+    rows.append({
+        "ts_event": datetime(date.year, date.month, date.day, 8 + utc_offset, 0),
+        "open": 21000.0,
+        "high": 21002.0,
+        "low": 20998.0,
+        "close": 21001.0,
+    })
+
+    # OR bars 09:30-09:55 ET
+    for i in range(6):
+        h, m = divmod(9 * 60 + 30 + i * 5, 60)
+        rows.append({
+            "ts_event": datetime(date.year, date.month, date.day, h + utc_offset, m),
+            "open": 21000.0 + i,
+            "high": 21010.0 + i,
+            "low": 20990.0 - i,
+            "close": 21001.0 + i,
+        })
+
+    # First bar after OR completes (10:00 ET)
+    rows.append({
+        "ts_event": datetime(date.year, date.month, date.day, 10 + utc_offset, 0),
+        "open": 21010.0,
+        "high": 21012.0,
+        "low": 21008.0,
+        "close": 21011.0,
+    })
+
+    bars = pl.DataFrame(rows).with_columns(
+        pl.col("ts_event").dt.replace_time_zone("UTC"),
+    )
+    result = compute_opening_range_features(bars)
+
+    # Pre-open bar must not have OR-derived values (no lookahead).
+    assert result["or_width"][0] is None
+    assert result["position_in_or"][0] is None
+    assert result["or_broken_up"][0] is None
+    assert result["or_broken_down"][0] is None
+
+    # After OR completion, values should be available.
+    assert result["or_width"][-1] is not None
+    assert result["position_in_or"][-1] is not None
+    assert result["or_broken_up"][-1] is not None
+    assert result["or_broken_down"][-1] is not None
