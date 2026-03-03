@@ -454,6 +454,7 @@ def _execute_claimed_task(
             bar_type=parsed_bar["bar_type"],
             bar_threshold=parsed_bar["bar_threshold"],
             include_bar_columns=True,
+            session_filter="eth",
         )
         if len(df) == 0:
             continue

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-02T19:21:34.662803+00:00",
+  "generated_at": "2026-03-03T11:11:24.057048+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 13,
   "files": [
@@ -46,8 +46,8 @@
     },
     {
       "path": "src/framework/features_canonical/builder.py",
-      "sha256": "7be7eb88b156614f5a1bc11d5c1ad6f0e1abf3abd959e4232f7204fbc206c2a1",
-      "size_bytes": 13969
+      "sha256": "83cf95695952a5cf7eaad7b0ee3048bb235fa38458957d299073bc047e3b816a",
+      "size_bytes": 21294
     },
     {
       "path": "src/framework/security/framework_lock.py",

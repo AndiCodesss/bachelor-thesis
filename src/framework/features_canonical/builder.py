@@ -1,4 +1,10 @@
-"""Feature pipeline — combines all feature modules into a unified matrix."""
+"""Feature pipeline — combines all feature modules into a unified matrix.
+
+Two-phase cache builder: aggregates each day's raw ticks to bars separately,
+then uses tiny cached bars (~200KB) from prior days as warmup context for
+feature computation. This keeps peak memory to 1 raw file at a time.
+"""
+import gc
 import re
 from datetime import date as _date_cls
 from pathlib import Path
@@ -18,7 +24,6 @@ from src.framework.features_canonical.footprint import compute_footprint_feature
 from src.framework.features_canonical.opening_range import compute_opening_range_features
 from src.framework.features_canonical.ohlcv_indicators import compute_ohlcv_indicators
 from src.framework.features_canonical.pipeline import compute_pipeline_features
-from src.framework.features_canonical.multi_timeframe import compute_multi_timeframe_features
 from src.framework.data.constants import RESULTS_DIR
 from src.framework.data.loader import filter_rth, filter_eth
 
@@ -198,14 +203,7 @@ def build_feature_matrix(
     # Step 4: Compute interaction/regime features (needs joined matrix)
     result = compute_pipeline_features(result)
 
-    # Step 5: Multi-timeframe features (only for minute/hour time bars > 1m)
-    # Skip for sub-minute bars (e.g., 30s) because MTF source is 1m.
-    if bar_type == "time" and bar_size != "1m" and (bar_size.endswith("m") or bar_size.endswith("h")):
-        mtf_df = compute_multi_timeframe_features(lf, bar_size=bar_size, source_bar_size="1m")
-        if len(mtf_df.columns) > 1:  # has columns beyond ts_event
-            result = result.join(mtf_df, on="ts_event", how="left", suffix="_mtf")
-
-    # Step 6: Drop rows with null labels (forward return edge effects)
+    # Step 5: Drop rows with null labels (forward return edge effects)
     result = result.filter(
         pl.all_horizontal(pl.col(c).is_not_null() for c in LABEL_COLUMNS)
     )
@@ -232,6 +230,89 @@ def get_feature_columns(df_or_lf) -> list[str]:
     return [c for c in all_cols if c not in NON_FEATURE_COLUMNS]
 
 
+def _aggregate_bars(
+    lf: pl.LazyFrame,
+    bar_size: str,
+    bar_type: str,
+    bar_threshold: int | None,
+) -> pl.DataFrame:
+    """Aggregate raw ticks into bars."""
+    if bar_type == "time":
+        return aggregate_time_bars(lf, bar_size)
+    elif bar_type == "volume":
+        if bar_threshold is None or bar_threshold <= 0:
+            raise ValueError("bar_threshold must be > 0 for volume bars")
+        return aggregate_volume_bars(lf, bar_threshold)
+    elif bar_type == "tick":
+        if bar_threshold is None or bar_threshold <= 0:
+            raise ValueError("bar_threshold must be > 0 for tick bars")
+        return aggregate_tick_bars(lf, bar_threshold)
+    raise ValueError(f"Unknown bar_type: {bar_type}")
+
+
+def _compute_features_from_bars(
+    bars: pl.DataFrame,
+    include_bar_columns: bool = False,
+) -> pl.DataFrame:
+    """Compute all features from pre-aggregated bars.
+
+    Same logic as build_feature_matrix steps 2-6, but operates on bars
+    directly instead of raw tick data.
+    """
+    if len(bars) == 0:
+        return pl.DataFrame()
+
+    momentum_feats = compute_momentum_features(bars)
+    result = momentum_feats
+
+    for feats, suffix in [
+        (compute_orderflow_features(bars), "_orderflow"),
+        (compute_book_features(bars), "_book"),
+        (compute_microstructure_features(bars), "_micro"),
+        (compute_microstructure_v2_features(bars), "_micro_v2"),
+        (compute_toxicity_features(bars), "_toxicity"),
+        (compute_volume_profile_features(bars), "_vp"),
+        (compute_statistical_features(bars), "_stat"),
+        (compute_aggressor_features(bars), "_aggressor"),
+        (compute_footprint_features(bars), "_footprint"),
+        (compute_opening_range_features(bars), "_or"),
+        (compute_labels(bars), "_labels"),
+        (compute_ohlcv_indicators(bars), "_ohlcv"),
+    ]:
+        result = result.join(feats, on="ts_event", how="left", suffix=suffix)
+
+    if "close_labels" in result.columns:
+        result = result.drop("close_labels")
+
+    if include_bar_columns:
+        passthrough_cols = [
+            c for c in (
+                "ts_close", "bar_duration_ns", "trade_count",
+                "buy_volume", "sell_volume",
+                "large_trade_count", "large_buy_volume", "large_sell_volume",
+                "whale_trade_count_30", "whale_buy_volume_30", "whale_sell_volume_30",
+            )
+            if c in bars.columns and c not in result.columns
+        ]
+        if passthrough_cols:
+            result = result.join(
+                bars.select(["ts_event", *passthrough_cols]),
+                on="ts_event", how="left",
+            )
+
+    result = compute_pipeline_features(result)
+
+    result = result.filter(
+        pl.all_horizontal(pl.col(c).is_not_null() for c in LABEL_COLUMNS)
+    )
+    if "sma_ratio_8" in result.columns:
+        result = result.filter(pl.col("sma_ratio_8").is_not_null())
+    else:
+        result = result.filter(pl.col("return_1bar").is_not_null())
+
+    return result
+
+
 def load_cached_matrix(
     parquet_path: Path,
     bar_size: str = "5m",
@@ -242,18 +323,22 @@ def load_cached_matrix(
     session_filter: str = "rth",
     warmup_days: int = WARMUP_CONTEXT_DAYS,
 ) -> pl.DataFrame:
-    """Load aggregated feature matrix from cache, or build and cache it.
+    """Load feature matrix from cache, or build using two-phase approach.
+
+    Two-phase build (memory-efficient):
+      1. Aggregate target day's raw ticks → bars (~200KB), release raw data
+      2. Load cached bars from prior days as warmup context (~1MB total)
+      3. Compute features on combined bars → filter to target day → cache
+
+    Only 1 raw parquet file is in memory at a time. Warmup context comes
+    from tiny cached bar files, preventing OOM on high-volatility days.
 
     Args:
-        session_filter: "rth" for Regular Trading Hours, "eth" for Extended (London+RTH).
-        warmup_days: Number of prior trading days to prepend for rolling-window
-            warmup.  Set to 0 to disable cross-day context (original behaviour).
+        session_filter: "rth" for Regular Trading Hours, "eth" for Extended.
+        warmup_days: Number of prior calendar-day files for rolling-window warmup.
     """
-    cache_key = _cache_key(
-        bar_size, bar_type, bar_threshold, include_bar_columns, session_filter,
-        warmup_days=warmup_days,
-    )
-    cache_path = CACHE_DIR / cache_key / parquet_path.name
+    cache_dir = _feature_cache_dir(bar_size, bar_type, bar_threshold, session_filter)
+    cache_path = cache_dir / parquet_path.name
 
     if cache_path.exists():
         cached = pl.read_parquet(cache_path)
@@ -263,28 +348,37 @@ def load_cached_matrix(
         if not missing:
             return cached
 
-    # Discover prior-day context files for rolling-window warmup
-    context_files = _find_context_files(parquet_path, warmup_days)
     session_fn = filter_eth if session_filter == "eth" else filter_rth
+    target_date = _extract_date_from_filename(parquet_path.name)
 
-    # Build combined LazyFrame: context days + target day
-    target_lf = session_fn(pl.scan_parquet(str(parquet_path)))
-    if context_files:
-        context_lfs = [session_fn(pl.scan_parquet(str(f))) for f in context_files]
-        combined_lf = pl.concat([*context_lfs, target_lf])
-    else:
-        combined_lf = target_lf
-
-    df = build_feature_matrix(
-        combined_lf,
-        bar_size=bar_size,
-        bar_type=bar_type,
-        bar_threshold=bar_threshold,
-        include_bar_columns=include_bar_columns,
+    # Phase 1: Build/load bars for target day (~200KB cached)
+    current_bars = _load_or_build_bars(
+        parquet_path, cache_dir, bar_size, bar_type, bar_threshold, session_fn,
     )
 
-    # Filter to target date only (strip warmup context rows)
-    target_date = _extract_date_from_filename(parquet_path.name)
+    if len(current_bars) == 0:
+        return pl.DataFrame()
+
+    # Phase 2: Build/load warmup bars from prior days (~200KB each, cached)
+    context_files = _find_context_files(parquet_path, warmup_days)
+    warmup_bars = [
+        bars for fp in context_files
+        if len(bars := _load_or_build_bars(
+            fp, cache_dir, bar_size, bar_type, bar_threshold, session_fn,
+        )) > 0
+    ]
+
+    if warmup_bars:
+        combined_bars = pl.concat([*warmup_bars, current_bars])
+    else:
+        combined_bars = current_bars
+
+    # Phase 3: Compute features on combined bars
+    df = _compute_features_from_bars(combined_bars, include_bar_columns)
+    del combined_bars
+    gc.collect()
+
+    # Filter to target date only (strip warmup rows)
     if target_date is not None and context_files and len(df) > 0:
         df = df.filter(
             pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date() == target_date
@@ -305,6 +399,55 @@ def load_cached_matrix(
     return df
 
 
+def _load_or_build_bars(
+    raw_path: Path,
+    cache_dir: Path,
+    bar_size: str,
+    bar_type: str,
+    bar_threshold: int | None,
+    session_fn,
+) -> pl.DataFrame:
+    """Load cached bars or aggregate from raw ticks and cache the result.
+
+    Bar files are stored alongside feature files with a .bars.parquet suffix
+    (~200KB each). This avoids re-aggregating 260MB raw files on every warmup.
+    """
+    bar_path = cache_dir / raw_path.name.replace(".parquet", ".bars.parquet")
+    if bar_path.exists():
+        return pl.read_parquet(bar_path)
+
+    lf = session_fn(pl.scan_parquet(str(raw_path)))
+    bars = _aggregate_bars(lf, bar_size, bar_type, bar_threshold)
+    del lf
+    gc.collect()
+
+    if len(bars) > 0:
+        bar_path.parent.mkdir(parents=True, exist_ok=True)
+        bars.write_parquet(bar_path)
+
+    return bars
+
+
+def _feature_cache_dir(
+    bar_size: str,
+    bar_type: str,
+    bar_threshold: int | None,
+    session_filter: str,
+) -> Path:
+    """Cache directory: one folder per bar type (e.g. eth_tick_610/)."""
+    if bar_type == "time":
+        name = bar_size
+    elif bar_type == "volume":
+        name = f"vol_{bar_threshold}"
+    elif bar_type == "tick":
+        name = f"{bar_type}_{bar_threshold}"
+    else:
+        name = bar_size
+    if session_filter == "eth":
+        name = f"eth_{name}"
+    return CACHE_DIR / name
+
+
 def _extract_date_from_filename(name: str) -> _date_cls | None:
     """Extract trading date from parquet filename like nq_2023-03-01.parquet."""
     m = _DATE_RE.search(name)
@@ -314,15 +457,10 @@ def _extract_date_from_filename(name: str) -> _date_cls | None:
 
 
 def _find_context_files(target_path: Path, n_days: int) -> list[Path]:
-    """Find the *n_days* preceding daily parquet files for cross-day warmup.
-
-    Searches the parent-of-parent directory (data root) for all parquet files
-    sorted by name (== chronological order), then returns the *n_days* files
-    immediately preceding *target_path*.
-    """
+    """Find the *n_days* preceding daily parquet files for cross-day warmup."""
     if n_days <= 0:
         return []
-    data_root = target_path.parent.parent  # e.g., NQ_raw/
+    data_root = target_path.parent.parent
     if not data_root.is_dir():
         return []
     all_files = sorted(data_root.rglob("nq_*.parquet"))
@@ -338,28 +476,106 @@ def _find_context_files(target_path: Path, n_days: int) -> list[Path]:
     return all_files[start:target_idx]
 
 
-def _cache_key(
-    bar_size: str,
-    bar_type: str,
-    bar_threshold: int | None,
-    include_bar_columns: bool = False,
-    session_filter: str = "rth",
-    warmup_days: int = 0,
-) -> str:
-    """Generate cache directory name for the bar configuration."""
-    if bar_type == "time":
-        base = bar_size
-    elif bar_type == "volume":
-        base = f"vol_{bar_threshold}"
-    elif bar_type == "tick":
-        base = f"tick_{bar_threshold}"
-    else:
-        base = bar_size
-    key = f"{base}_bars" if include_bar_columns else base
-    if session_filter == "eth":
-        key = f"eth_{key}"
-    if warmup_days > 0:
-        key = f"{key}_w{warmup_days}"
-    return key
+# Default bar configurations for NQ E-mini futures
+BAR_CONFIGS = [
+    {"bar_type": "tick",   "bar_size": "5m", "bar_threshold": 610},
+    {"bar_type": "volume", "bar_size": "5m", "bar_threshold": 2000},
+    {"bar_type": "time",   "bar_size": "1m", "bar_threshold": None},
+]
+
+
+def build_full_cache(
+    split: str = "validate",
+    bar_configs: list[dict] | None = None,
+    session_filter: str = "eth",
+    file_limit: int | None = None,
+    bar_filter: str | None = None,
+) -> dict:
+    """Build feature cache for all files in a split across all bar configs.
+
+    Iterates chronologically through every file × bar config, calling
+    load_cached_matrix for each. Bars are cached as .bars.parquet (~200KB)
+    so warmup context loads instantly on subsequent files.
+
+    Args:
+        split: Data split to cache ("validate", "train").
+        bar_configs: List of bar config dicts. Defaults to BAR_CONFIGS.
+        session_filter: "eth" or "rth".
+        file_limit: Process only first N files (for testing).
+        bar_filter: Single bar label like "tick_610", "vol_2000", "1m".
+
+    Returns:
+        Dict with total, completed, errors counts.
+    """
+    from src.framework.api import ExecutionMode, get_split_files, set_execution_mode
+
+    set_execution_mode(ExecutionMode.RESEARCH)
+    files = get_split_files(split)
+
+    if file_limit is not None:
+        files = files[:file_limit]
+
+    configs = bar_configs or BAR_CONFIGS
+    if bar_filter:
+        configs = [bc for bc in configs if _bar_label(bc) == bar_filter]
+        if not configs:
+            available = [_bar_label(bc) for bc in (bar_configs or BAR_CONFIGS)]
+            raise ValueError(f"Unknown bar_filter '{bar_filter}'. Available: {available}")
+
+    total = len(files) * len(configs)
+    completed = 0
+    errors = 0
+
+    print(f"Cache build: {len(files)} files x {len(configs)} bar configs = {total} tasks")
+    print(f"Session: {session_filter}, Warmup: {WARMUP_CONTEXT_DAYS} days")
+    print("=" * 70, flush=True)
+
+    for bc in configs:
+        label = _bar_label(bc)
+        cache_dir = _feature_cache_dir(bc["bar_size"], bc["bar_type"], bc["bar_threshold"], session_filter)
+        print(f"\n--- {label} → {cache_dir.name}/ ---", flush=True)
+
+        for fp in files:
+            completed += 1
+            feat_path = cache_dir / fp.name
+
+            if feat_path.exists():
+                cached = pl.read_parquet(feat_path)
+                print(f"  [{completed}/{total}] {fp.name} -> {len(cached)} rows (cached)", flush=True)
+                continue
+
+            try:
+                df = load_cached_matrix(
+                    fp,
+                    bar_size=bc["bar_size"],
+                    bar_type=bc["bar_type"],
+                    bar_threshold=bc["bar_threshold"],
+                    include_bar_columns=True,
+                    session_filter=session_filter,
+                )
+                print(
+                    f"  [{completed}/{total}] {fp.name} -> {len(df)} rows, "
+                    f"{len(df.columns)} cols",
+                    flush=True,
+                )
+            except Exception as e:
+                errors += 1
+                print(f"  [{completed}/{total}] {fp.name} -> ERROR: {e}", flush=True)
+
+    print(f"\n{'=' * 70}")
+    print(f"Done! {completed - errors}/{completed} in {total} tasks")
+    if errors:
+        print(f"ERRORS: {errors}")
+
+    return {"total": total, "completed": completed, "errors": errors}
+
+
+def _bar_label(bc: dict) -> str:
+    """Human-readable bar config label: tick_610, vol_2000, 1m."""
+    if bc["bar_type"] == "time":
+        return bc["bar_size"]
+    if bc["bar_type"] == "volume":
+        return f"vol_{bc['bar_threshold']}"
+    return f"{bc['bar_type']}_{bc['bar_threshold']}"
 
 
