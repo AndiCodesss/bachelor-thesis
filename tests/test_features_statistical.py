@@ -228,6 +228,36 @@ def test_vol_zscore_constant_vol():
             assert abs(z) < 2.0
 
 
+def test_vol_zscore_resets_at_day_boundary():
+    day1 = [datetime(2024, 7, 15, 14, 0, 0) + timedelta(minutes=5 * i) for i in range(60)]
+    day2 = [datetime(2024, 7, 16, 14, 0, 0) + timedelta(minutes=5 * i) for i in range(3)]
+    ts = day1 + day2
+
+    # Day1: volatile to create non-trivial yz_volatility history.
+    closes_day1 = [100.0 + ((-1) ** i) * 5.0 for i in range(60)]
+    highs_day1 = [c + 2.0 for c in closes_day1]
+    lows_day1 = [c - 2.0 for c in closes_day1]
+    opens_day1 = [c - 1.0 for c in closes_day1]
+
+    # Day2: flat/quiet open.
+    closes_day2 = [150.0, 150.0, 150.0]
+    highs_day2 = [151.0, 151.0, 151.0]
+    lows_day2 = [149.0, 149.0, 149.0]
+    opens_day2 = [150.0, 150.0, 150.0]
+
+    bars = _make_bars(
+        ts,
+        closes_day1 + closes_day2,
+        highs=highs_day1 + highs_day2,
+        lows=lows_day1 + lows_day2,
+        opens=opens_day1 + opens_day2,
+    )
+    result = compute_statistical_features(bars)
+
+    first_day2_idx = len(day1)
+    assert result["vol_zscore"][first_day2_idx] == 0.0
+
+
 # --------------- VWAP deviation ---------------
 
 def test_vwap_deviation_known_values():

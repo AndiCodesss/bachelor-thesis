@@ -129,8 +129,8 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # --- Vol z-score ---
     bars = bars.with_columns([
-        pl.col("yz_volatility").rolling_mean(window_size=VOL_ZSCORE_WINDOW, min_samples=1).alias("_vol_mean"),
-        pl.col("yz_volatility").rolling_std(window_size=VOL_ZSCORE_WINDOW, min_samples=2).alias("_vol_std"),
+        pl.col("yz_volatility").rolling_mean(window_size=VOL_ZSCORE_WINDOW, min_samples=1).over("_date").alias("_vol_mean"),
+        pl.col("yz_volatility").rolling_std(window_size=VOL_ZSCORE_WINDOW, min_samples=2).over("_date").alias("_vol_std"),
     ])
 
     bars = bars.with_columns(

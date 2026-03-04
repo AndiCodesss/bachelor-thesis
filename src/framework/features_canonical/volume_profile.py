@@ -158,6 +158,8 @@ def _compute_swing_vp_features(
     low: np.ndarray,
     close: np.ndarray,
     safe_atr: np.ndarray,
+    date_list: list,
+    day_start_idx: dict,
     prices_per_bar: list[np.ndarray],
     sizes_per_bar: list[np.ndarray],
 ) -> dict[str, np.ndarray]:
@@ -177,8 +179,18 @@ def _compute_swing_vp_features(
     breakout_start = -1
     bars_count = 0
 
+    prev_day = None
     for i in range(n):
-        if i >= lookback:
+        d = date_list[i]
+        day_start = day_start_idx.get(d, i)
+        if prev_day != d:
+            # Reset swing state at session boundary.
+            cur_dir = 0
+            breakout_start = -1
+            bars_count = 0
+            prev_day = d
+
+        if (i - day_start) >= lookback:
             ch_high = high[i - lookback:i].max()
             ch_low = low[i - lookback:i].min()
 
@@ -256,16 +268,19 @@ def compute_volume_profile_features(bars: pl.DataFrame) -> pl.DataFrame:
         return _nan_result_missing_vap(bars["ts_event"])
 
     # True Range for ATR (14-bar rolling)
-    bars = bars.with_columns([
+    bars = bars.with_columns(
         pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
+    )
+    prev_close = pl.col("close").shift(1).over("_date")
+    bars = bars.with_columns([
         pl.max_horizontal(
             pl.col("high") - pl.col("low"),
-            (pl.col("high") - pl.col("close").shift(1)).abs(),
-            (pl.col("low") - pl.col("close").shift(1)).abs(),
+            (pl.col("high") - prev_close).abs(),
+            (pl.col("low") - prev_close).abs(),
         ).alias("_true_range"),
     ])
     bars = bars.with_columns(
-        pl.col("_true_range").rolling_mean(window_size=14, min_samples=1).alias("_atr"),
+        pl.col("_true_range").rolling_mean(window_size=14, min_samples=1).over("_date").alias("_atr"),
     )
 
     bars_df = bars
@@ -397,7 +412,11 @@ def compute_volume_profile_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     poc_slope_6 = np.full(n, np.nan)
     for i in range(6, n):
-        if not np.isnan(rolling_poc_arr[i]) and not np.isnan(rolling_poc_arr[i - 6]):
+        if (
+            date_list[i] == date_list[i - 6]
+            and not np.isnan(rolling_poc_arr[i])
+            and not np.isnan(rolling_poc_arr[i - 6])
+        ):
             poc_slope_6[i] = (rolling_poc_arr[i] - rolling_poc_arr[i - 6]) / safe_atr[i]
 
     # Rolling VA position
@@ -412,7 +431,7 @@ def compute_volume_profile_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # --- Swing-anchored volume profile ---
     swing = _compute_swing_vp_features(
-        high, low, close, safe_atr, prices_per_bar, sizes_per_bar,
+        high, low, close, safe_atr, date_list, day_start_idx, prices_per_bar, sizes_per_bar,
     )
 
     # Build result DataFrame

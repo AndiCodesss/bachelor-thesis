@@ -2,7 +2,7 @@
 
 import numpy as np
 import polars as pl
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.framework.features_canonical.volume_profile import compute_volume_profile_features, _compute_profile
 
 
@@ -206,6 +206,94 @@ class TestVolumeProfileFeatures:
 
         result = compute_volume_profile_features(bars)
         assert result["rolling_poc"][2] == 200.0
+
+    def test_atr_normalization_resets_at_day_boundary(self):
+        """ATR-normalized distances must not be diluted by prior-session ranges."""
+        day1_ts = [datetime(2024, 3, 15, 14, 0, 0) + timedelta(minutes=5 * i) for i in range(14)]
+        day2_ts = [datetime(2024, 3, 16, 9, 30, 0), datetime(2024, 3, 16, 9, 35, 0)]
+        timestamps = day1_ts + day2_ts
+
+        closes = [100.0] * 14 + [200.0, 201.0]
+        highs = [150.0] * 14 + [200.0, 201.0]
+        lows = [100.0] * 14 + [199.0, 200.0]
+        vap_prices = [[100.0] for _ in range(14)] + [[200.0], [200.0, 201.0]]
+        vap_volumes = [[100] for _ in range(14)] + [[1000], [1000, 1]]
+
+        bars = pl.DataFrame({
+            "ts_event": timestamps,
+            "open": closes,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": [100] * len(timestamps),
+            "vap_prices": vap_prices,
+            "vap_volumes": vap_volumes,
+        }).with_columns(
+            pl.col("ts_event").dt.replace_time_zone("UTC"),
+            pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
+        )
+
+        result = compute_volume_profile_features(bars)
+        last_idx = len(result) - 1
+        assert result["rolling_poc"][last_idx] == 200.0
+        assert result["rolling_poc_distance"][last_idx] > 0.5
+
+    def test_poc_slope_6_does_not_cross_day_boundary(self):
+        timestamps = [datetime(2024, 3, 15, 15, 0, 0) + timedelta(minutes=5 * i) for i in range(6)]
+        timestamps.append(datetime(2024, 3, 16, 9, 30, 0))
+        closes = [100.0] * 6 + [200.0]
+
+        bars = pl.DataFrame({
+            "ts_event": timestamps,
+            "open": closes,
+            "high": [c + 1.0 for c in closes],
+            "low": [c - 1.0 for c in closes],
+            "close": closes,
+            "volume": [100] * len(closes),
+            "vap_prices": [[c] for c in closes],
+            "vap_volumes": [[100] for _ in closes],
+        }).with_columns(
+            pl.col("ts_event").dt.replace_time_zone("UTC"),
+            pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
+        )
+
+        result = compute_volume_profile_features(bars)
+        val = result["poc_slope_6"][6]
+        assert val is None or np.isnan(val)
+
+    def test_swing_breakout_resets_at_day_boundary(self):
+        day1_ts = [datetime(2024, 3, 15, 14, 0, 0) + timedelta(minutes=5 * i) for i in range(15)]
+        day2_ts = [datetime(2024, 3, 16, 9, 30, 0), datetime(2024, 3, 16, 9, 35, 0)]
+        timestamps = day1_ts + day2_ts
+
+        day1_closes = [100.0] * 12 + [101.0, 102.0, 103.0]
+        closes = day1_closes + [102.0, 102.0]
+
+        bars = pl.DataFrame({
+            "ts_event": timestamps,
+            "open": [c - 0.25 for c in closes],
+            "high": [c + 0.5 for c in closes],
+            "low": [c - 0.5 for c in closes],
+            "close": closes,
+            "volume": [100] * len(closes),
+            "vap_prices": [[c - 0.25, c, c + 0.25] for c in closes],
+            "vap_volumes": [[1, 100, 1] for _ in closes],
+        }).with_columns(
+            pl.col("ts_event").dt.replace_time_zone("UTC"),
+            pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
+        )
+
+        result = compute_volume_profile_features(bars)
+        first_day2_idx = len(day1_ts)
+        assert result["breakout_direction"][first_day2_idx] == 0.0
+        val = result["bars_since_breakout"][first_day2_idx]
+        assert val is None or np.isnan(val)
 
     def test_poc_slope_null_for_first_6(self):
         bars = self._make_multi_bar_data(n_bars=10)
