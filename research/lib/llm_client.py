@@ -81,6 +81,7 @@ class ClaudeCodeCLIClient:
         timeout_seconds: float = 180.0,
         max_retries: int = 2,
         retry_backoff_seconds: float = 1.5,
+        retry_max_backoff_seconds: float = 30.0,
         workdir: str | Path | None = None,
         extra_args: list[str] | None = None,
     ) -> None:
@@ -104,6 +105,10 @@ class ClaudeCodeCLIClient:
         self._timeout_seconds = float(timeout_seconds)
         self._max_retries = max(0, int(max_retries))
         self._retry_backoff_seconds = max(0.1, float(retry_backoff_seconds))
+        self._retry_max_backoff_seconds = max(
+            self._retry_backoff_seconds,
+            float(retry_max_backoff_seconds),
+        )
         self._workdir = str(workdir) if workdir is not None else None
         self._extra_args = [str(v) for v in (extra_args or []) if str(v).strip()]
 
@@ -210,7 +215,12 @@ class ClaudeCodeCLIClient:
                 if attempt >= self._max_retries:
                     raise
             attempt += 1
-            time.sleep(self._retry_backoff_seconds * attempt)
+            sleep_seconds = self._retry_backoff_seconds
+            for _ in range(max(0, attempt - 1)):
+                sleep_seconds = min(self._retry_max_backoff_seconds, sleep_seconds * 2.0)
+                if sleep_seconds >= self._retry_max_backoff_seconds:
+                    break
+            time.sleep(sleep_seconds)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:

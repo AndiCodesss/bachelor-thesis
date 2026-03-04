@@ -35,6 +35,7 @@ from src.framework.security.framework_lock import verify_manifest
 
 
 _MONTH_RE = re.compile(r"nq_(\d{4}-\d{2})-\d{2}\.parquet$")
+_CAUSALITY_MIN_ROWS = 33
 
 
 @dataclass(frozen=True)
@@ -422,33 +423,45 @@ def _run_signal_on_files(
 ) -> dict[str, Any]:
     trade_frames: list[pl.DataFrame] = []
     causality_checked = False
+    causality_frames: list[pl.DataFrame] = []
+    causality_row_count = 0
 
     for file_path in files:
         bars = load_bars(Path(file_path))
         if len(bars) == 0:
             continue
 
-        # Causality check (prefix invariance) once per evaluation run on the
-        # first sufficiently long frame. Uses post-sign signal semantics.
+        # Causality check (prefix invariance) once per evaluation run on >=33 bars.
+        # Buffers short files so the check still runs for coarse bar sizes.
         if not causality_checked:
-            causality_errors = check_signal_causality(
-                generate_fn=runtime.generate_fn,
-                df=_safe_signal_bars(bars),
-                params=signal_params,
-                accepts_state=runtime.generate_accepts_state,
-                model_state=model_state,
-                mode="sign",
-            )
-            if causality_errors:
-                raise ValueError(f"signal causality failed: {causality_errors}")
-            if len(bars) >= 33:
+            causality_frames.append(_safe_signal_bars(bars))
+            causality_row_count += len(bars)
+            if causality_row_count >= _CAUSALITY_MIN_ROWS:
+                causality_df = pl.concat(causality_frames).sort("ts_event")
+                causality_errors = check_signal_causality(
+                    generate_fn=runtime.generate_fn,
+                    df=causality_df,
+                    params=signal_params,
+                    accepts_state=runtime.generate_accepts_state,
+                    model_state=model_state,
+                    mode="sign",
+                )
+                if causality_errors:
+                    raise ValueError(f"signal causality failed: {causality_errors}")
                 causality_checked = True
+                causality_frames.clear()
 
         signal = _generate_signal_array(runtime, bars, signal_params, model_state)
         bars_with_signal = bars.with_columns(pl.Series("signal", signal).cast(pl.Int8))
         trades = run_backtest(bars_with_signal, signal_col="signal", **backtest_kwargs)
         if len(trades) > 0:
             trade_frames.append(trades)
+
+    if causality_row_count > 0 and not causality_checked:
+        raise ValueError(
+            f"signal causality check requires at least "
+            f"{_CAUSALITY_MIN_ROWS} bars, got {causality_row_count}"
+        )
 
     trades_df = _concat_frames(trade_frames) if trade_frames else pl.DataFrame(schema=TRADE_SCHEMA)
     metrics = compute_metrics(trades_df)

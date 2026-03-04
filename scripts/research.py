@@ -56,6 +56,9 @@ from src.framework.data.constants import RESULTS_DIR
 from src.framework.features_canonical.builder import LABEL_COLUMNS
 from src.framework.security.framework_lock import verify_manifest
 
+_ALLOWED_RESEARCH_SPLITS = {"train", "validate"}
+_CAUSALITY_MIN_ROWS = 33
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -436,7 +439,7 @@ def _execute_claimed_task(
 ) -> tuple[str, dict[str, Any]]:
     task_id = str(task.get("task_id", "")).strip()
     strategy_name = str(task.get("strategy_name", "")).strip()
-    split = str(task.get("split", "validate")).lower()
+    split = str(task.get("split", "validate")).strip().lower()
     bar_config = str(task.get("bar_config", "volume_2000"))
     params = task.get("params", {})
     if not isinstance(params, dict):
@@ -447,6 +450,9 @@ def _execute_claimed_task(
         raise ValueError(f"{task_id}: strategy_name is required")
     if split == "test":
         raise PermissionError(f"{task_id}: test split is forbidden in research mode")
+    if split not in _ALLOWED_RESEARCH_SPLITS:
+        allowed = ", ".join(sorted(_ALLOWED_RESEARCH_SPLITS))
+        raise ValueError(f"{task_id}: unsupported split '{split}'. Allowed: {allowed}")
 
     # Session filter from mission config (default: eth for extended hours)
     session_filter = str(mission.get("session_filter", "eth")).lower()
@@ -484,6 +490,8 @@ def _execute_claimed_task(
     bars_processed = 0
     signal_count = 0
     causality_checked = False
+    causality_frames: list[pl.DataFrame] = []
+    causality_row_count = 0
 
     for file_path in files:
         df = load_cached_matrix(
@@ -502,19 +510,23 @@ def _execute_claimed_task(
         _label_cols_present = [c for c in LABEL_COLUMNS if c in df.columns]
         strategy_df = df.drop(_label_cols_present) if _label_cols_present else df
 
-        # Causality check (prefix invariance) once per task on first sufficiently
-        # long frame. Prevents strategy code from peeking into future rows.
+        # Causality check (prefix invariance) once per task on >=33 bars.
+        # Buffers short files so the check still runs for coarser bar sizes.
         if not causality_checked:
-            causality_errors = check_signal_causality(
-                generate_fn=strategy_fn,
-                df=strategy_df,
-                params=params,
-                mode="strict",
-            )
-            if causality_errors:
-                raise ValueError(f"{task_id}: signal causality failed: {causality_errors}")
-            if len(strategy_df) >= 33:
+            causality_frames.append(strategy_df)
+            causality_row_count += len(strategy_df)
+            if causality_row_count >= _CAUSALITY_MIN_ROWS:
+                causality_df = pl.concat(causality_frames).sort("ts_event")
+                causality_errors = check_signal_causality(
+                    generate_fn=strategy_fn,
+                    df=causality_df,
+                    params=params,
+                    mode="strict",
+                )
+                if causality_errors:
+                    raise ValueError(f"{task_id}: signal causality failed: {causality_errors}")
                 causality_checked = True
+                causality_frames.clear()
 
         raw_signal = np.asarray(strategy_fn(strategy_df, params))
         signal_errors = _validate_signal_array(raw_signal, len(df))
@@ -535,6 +547,12 @@ def _execute_claimed_task(
         trades = run_backtest(df_signal, signal_col="signal", **bt_kwargs)
         if len(trades) > 0:
             all_trades.append(trades)
+
+    if causality_row_count > 0 and not causality_checked:
+        raise ValueError(
+            f"{task_id}: signal causality check requires at least "
+            f"{_CAUSALITY_MIN_ROWS} bars, got {causality_row_count}"
+        )
 
     signals_df = pl.concat(all_signals).sort("ts_event") if all_signals else _empty_signal_frame()
     trades_df = pl.concat(all_trades) if all_trades else pl.DataFrame(schema=TRADE_SCHEMA)

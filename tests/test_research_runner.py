@@ -250,3 +250,106 @@ def test_execute_claimed_task_rejects_non_causal_signal(
             experiments_path=tmp_path / "experiments.jsonl",
             experiments_lock=tmp_path / "experiments.lock",
         )
+
+
+def test_execute_claimed_task_rejects_unknown_split(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=lambda _df, _params: np.zeros(8, dtype=np.int8),
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+
+    with pytest.raises(ValueError, match="unsupported split"):
+        mod._execute_claimed_task(
+            task={
+                "task_id": "t_bad_split",
+                "strategy_name": "dummy",
+                "split": "paper",
+                "bar_config": "time_1m",
+                "params": {},
+                "run_gauntlet": False,
+            },
+            mission={
+                "run_gauntlet": False,
+                "target_sharpe": 0.0,
+                "min_trade_count": 0,
+                "session_filter": "rth",
+            },
+            run_id="run_x",
+            run_dir=tmp_path,
+            framework_lock_hash="abc123",
+            git_commit=None,
+            experiments_path=tmp_path / "experiments.jsonl",
+            experiments_lock=tmp_path / "experiments.lock",
+        )
+
+
+def test_execute_claimed_task_requires_min_bars_for_causality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=lambda _df, _params: np.zeros(20, dtype=np.int8),
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_short")
+
+    fake_file = tmp_path / "nq_2024-01-02.parquet"
+    fake_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "get_split_files", lambda _split: [fake_file])
+
+    start = np.datetime64("2024-01-02T14:30:00")
+    bars = pl.DataFrame(
+        {
+            "ts_event": pl.datetime_range(start, start + np.timedelta64(19, "m"), interval="1m", eager=True),
+            "open": np.linspace(100.0, 101.0, 20),
+            "high": np.linspace(100.5, 101.5, 20),
+            "low": np.linspace(99.5, 100.5, 20),
+            "close": np.linspace(100.0, 101.0, 20),
+        }
+    ).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    monkeypatch.setattr(mod, "load_cached_matrix", lambda *args, **kwargs: bars)
+
+    causality_calls = {"count": 0}
+
+    def _record_causality(**_kwargs):
+        causality_calls["count"] += 1
+        return []
+
+    monkeypatch.setattr(mod, "check_signal_causality", _record_causality)
+
+    with pytest.raises(ValueError, match="requires at least 33 bars"):
+        mod._execute_claimed_task(
+            task={
+                "task_id": "t_short_causal_guard",
+                "strategy_name": "dummy",
+                "split": "validate",
+                "bar_config": "time_1m",
+                "params": {},
+                "run_gauntlet": False,
+            },
+            mission={
+                "run_gauntlet": False,
+                "target_sharpe": 0.0,
+                "min_trade_count": 0,
+                "session_filter": "rth",
+            },
+            run_id="run_x",
+            run_dir=tmp_path,
+            framework_lock_hash="abc123",
+            git_commit=None,
+            experiments_path=tmp_path / "experiments.jsonl",
+            experiments_lock=tmp_path / "experiments.lock",
+        )
+
+    assert causality_calls["count"] == 0

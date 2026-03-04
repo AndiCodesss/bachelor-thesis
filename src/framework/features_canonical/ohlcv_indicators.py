@@ -166,9 +166,17 @@ def compute_ohlcv_indicators(bars: pl.DataFrame) -> pl.DataFrame:
         pl.col("high").rolling_max(window_size=STOCH_K_PERIOD, min_samples=STOCH_K_PERIOD)
         .alias("_highest_high"),
     ])
+    bars = bars.with_columns([
+        (pl.col("_highest_high") - pl.col("_lowest_low")).alias("_stoch_range"),
+    ])
     bars = bars.with_columns(
-        ((pl.col("close") - pl.col("_lowest_low"))
-         / (pl.col("_highest_high") - pl.col("_lowest_low") + _EPS) * 100)
+        pl.when(pl.col("_stoch_range").abs() <= _EPS)
+        .then(50.0)
+        .otherwise(
+            ((pl.col("close") - pl.col("_lowest_low"))
+             / (pl.col("_stoch_range") + _EPS) * 100)
+            .clip(lower_bound=0.0, upper_bound=100.0)
+        )
         .alias("stoch_k_14")
     )
     bars = bars.with_columns(

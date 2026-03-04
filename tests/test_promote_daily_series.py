@@ -94,3 +94,41 @@ def test_promote_rejects_non_causal_signal(tmp_path: Path):
             load_bars=lambda _p: bars,
             backtest_kwargs={"entry_on_next_open": False},
         )
+
+
+def test_promote_requires_min_bars_for_causality(tmp_path: Path):
+    mod = _load_promote_module()
+
+    n = 20
+    start = datetime(2024, 1, 2, 9, 30, tzinfo=timezone.utc)
+    ts = [start + timedelta(minutes=i) for i in range(n)]
+    close = np.linspace(100.0, 102.0, n)
+    bars = pl.DataFrame(
+        {
+            "ts_event": ts,
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(n, 1000, dtype=np.uint32),
+        }
+    )
+
+    runtime = mod.SignalRuntime(
+        generate_fn=lambda df, _params: np.zeros(len(df), dtype=np.int8),
+        generate_accepts_state=False,
+        fit_fn=None,
+        fit_on_files_fn=None,
+    )
+    fake_file = tmp_path / "nq_2024-01-02.parquet"
+    fake_file.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires at least 33 bars"):
+        mod._run_signal_on_files(
+            files=[fake_file],
+            runtime=runtime,
+            signal_params={},
+            model_state=None,
+            load_bars=lambda _p: bars,
+            backtest_kwargs={"entry_on_next_open": False},
+        )

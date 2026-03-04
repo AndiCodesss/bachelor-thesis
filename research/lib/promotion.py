@@ -30,14 +30,20 @@ def _resolve_path(raw: str, project_root: Path) -> Path:
     return p if p.is_absolute() else (project_root / p)
 
 
-def get_git_commit(project_root: Path) -> str:
-    proc = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def get_git_commit(project_root: Path, *, timeout_seconds: float = 10.0) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Timed out reading git commit after {float(timeout_seconds):.1f}s",
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError("Unable to read git commit via `git rev-parse HEAD`")
     return proc.stdout.strip()
@@ -127,4 +133,3 @@ def verify_candidate_artifacts(
         "checks": checks,
         "warnings": warnings,
     }
-

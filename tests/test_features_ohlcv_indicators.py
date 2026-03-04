@@ -367,6 +367,21 @@ def test_stoch_bounded():
         assert (valid[col] <= 100.01).all(), f"{col} has values above 100"
 
 
+def test_stoch_flat_range_stays_bounded():
+    """Degenerate high==low windows must not produce extreme %K outliers."""
+    n = 20
+    closes = [100.0] * (n - 1) + [101.0]
+    highs = [100.0] * n
+    lows = [100.0] * n
+    bars = _make_bars(_ts_seq(n), closes, highs=highs, lows=lows)
+    result = compute_ohlcv_indicators(bars)
+
+    valid_k = result.filter(pl.col("stoch_k_14").is_not_null())
+    assert len(valid_k) > 0
+    assert (valid_k["stoch_k_14"] >= -0.01).all()
+    assert (valid_k["stoch_k_14"] <= 100.01).all()
+
+
 # --------------- ADX ---------------
 
 def test_adx_bounded():
