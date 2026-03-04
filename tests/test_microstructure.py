@@ -1,6 +1,7 @@
 """Tests for microstructure feature engineering."""
 
 import polars as pl
+import pytest
 from datetime import datetime, timedelta
 from src.framework.features_canonical.microstructure import compute_microstructure_features
 from src.framework.data.bars import aggregate_time_bars
@@ -43,6 +44,7 @@ def _make_bars(rows):
     )
 
 
+@pytest.mark.slow
 def test_compute_microstructure_features_shape():
     """Verify compute_microstructure_features produces expected output columns."""
     files = get_parquet_files("train")
@@ -160,6 +162,7 @@ def test_microstructure_multiple_bars():
     assert abs(result.row(2, named=True)["cancel_rate_change"] - 0.5) < 0.01
 
 
+@pytest.mark.slow
 def test_microstructure_non_empty():
     """Assert non-empty DataFrame after feature computation on real data."""
     files = get_parquet_files("train")

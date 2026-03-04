@@ -1,5 +1,7 @@
 """Bar-by-bar backtesting engine for NQ futures trading."""
 
+import math
+
 import polars as pl
 from src.framework.data.constants import TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
 
@@ -15,7 +17,11 @@ TRADE_SCHEMA = {
 
 def _points_to_dollars(points: float) -> float:
     """Convert points to dollars using tick-quantized math."""
-    ticks = int(round(points / TICK_SIZE))
+    ticks_float = points / TICK_SIZE
+    if ticks_float >= 0:
+        ticks = int(math.floor(ticks_float + 0.5))
+    else:
+        ticks = int(math.ceil(ticks_float - 0.5))
     return float(ticks * TICK_VALUE)
 
 
@@ -101,7 +107,7 @@ def run_backtest(
     active_profit_target = profit_target
     active_stop_loss = stop_loss
     # Pending entry for entry_on_next_open mode
-    pending_direction = 0  # signal direction waiting for next bar's open
+    pending_direction = 0  # signal direction waiting for the next available bar's open
 
     for i in range(len(signals)):
         bar_date = timestamps[i].date()
@@ -111,17 +117,17 @@ def run_backtest(
             current_date = bar_date
             daily_pnl = 0.0
             daily_stopped = False
-            pending_direction = 0  # cancel pending entry across day boundary
 
         # Check if this is the last bar of the day
-        is_last_bar = (i == len(signals) - 1) or (timestamps[i + 1].date() != bar_date)
+        has_next_bar = i < len(signals) - 1
+        is_last_bar = (not has_next_bar) or (timestamps[i + 1].date() != bar_date)
 
         # Execute ONLY the previous bar's pending signal, then expire it.
         signal_to_execute = pending_direction
         pending_direction = 0
 
         # Fill pending entry at this bar's open (entry_on_next_open mode)
-        if signal_to_execute != 0 and position == 0 and not daily_stopped and not is_last_bar:
+        if signal_to_execute != 0 and position == 0 and not daily_stopped:
             position = signal_to_execute
             entry_price = opens[i]
             entry_time = timestamps[i]
@@ -307,9 +313,9 @@ def run_backtest(
                     daily_stopped = True
                     continue
 
-            # Open new position if signal is not flat, not stopped, not last bar,
-            # and not in mandatory re-entry cooldown after force exit
-            if sig != 0 and not daily_stopped and not is_last_bar and not skip_reentry:
+            # Open new position if signal is not flat, not stopped, has a next bar
+            # to execute against, and not in mandatory re-entry cooldown after force exit
+            if sig != 0 and not daily_stopped and has_next_bar and not skip_reentry:
                 if entry_on_next_open:
                     # Defer entry to next bar's open
                     pending_direction = sig

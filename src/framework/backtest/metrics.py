@@ -93,8 +93,8 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
     if gross_losses < 0:
         profit_factor = gross_wins / abs(gross_losses)
     elif gross_wins > 0:
-        # All winners, no losses → cap at 99.0
-        profit_factor = 99.0
+        # All winners, no losses -> mathematically unbounded.
+        profit_factor = np.inf
     else:
         # No wins, no losses (all breakeven) → 0
         profit_factor = 0.0
@@ -102,6 +102,7 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
     # Sharpe ratio: annualized from daily PnL aggregation
     # Aggregate trade PnLs to daily level, then use sqrt(252)
     trade_pnls = df["net_pnl"].to_numpy()
+    sharpe_ratio = np.nan
     if trade_count > 1 and "exit_time" in trades.columns:
         # Group trades by exit date to get daily PnLs
         daily_pnl_df = df.with_columns(
@@ -127,15 +128,6 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
                 daily_std = np.std(trading_day_pnls, ddof=1)
                 if daily_std > 0:
                     sharpe_ratio = (np.mean(trading_day_pnls) / daily_std) * np.sqrt(252)
-                else:
-                    sharpe_ratio = 0.0
-            else:
-                sharpe_ratio = 0.0
-        else:
-            # Single active date only -> no sample variance.
-            sharpe_ratio = 0.0
-    else:
-        sharpe_ratio = 0.0
 
     # Drawdown calculation (relative to initial capital)
     equity_curve = np.cumsum(trade_pnls)

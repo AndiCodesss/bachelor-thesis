@@ -171,7 +171,7 @@ def test_zero_print_direction():
 # --- Tests: unfinished business features -----------------------------------
 
 def test_bars_since_unfinished():
-    """bars_since_unfinished counts bars since last flag=1, NaN before first flag."""
+    """bars_since_unfinished counts bars since last flag=1, null before first flag."""
     rows = [
         _make_bar(datetime(2024, 7, 15, 10, 0), unfinished_high=0),
         _make_bar(datetime(2024, 7, 15, 10, 5), unfinished_high=0),
@@ -182,11 +182,10 @@ def test_bars_since_unfinished():
     df = _make_bars_df(rows)
     result = compute_footprint_features(df)
 
-    import math
     bars_since = result["bars_since_unfinished_high"].to_list()
-    # Before first flag: NaN
-    assert math.isnan(bars_since[0]), "Before first flag should be NaN"
-    assert math.isnan(bars_since[1]), "Before first flag should be NaN"
+    # Before first flag: null
+    assert bars_since[0] is None, "Before first flag should be null"
+    assert bars_since[1] is None, "Before first flag should be null"
     # After the flag at bar 2, counts should be 0 (at flag), 1, 2
     assert bars_since[2] == 0.0, "At flag bar, count should be 0"
     assert bars_since[3] == 1.0, "1 bar after flag"
@@ -390,6 +389,8 @@ def test_no_nulls_in_output():
     rows = [_make_bar(base + timedelta(minutes=i*5),
                       stacked_count=i % 3, stacked_dir=1 if i % 3 > 0 else 0,
                       zero_count=i % 2, zero_ratio=0.1 * (i % 2),
+                      unfinished_high=1 if i == 0 else 0,
+                      unfinished_low=1 if i == 0 else 0,
                       buy_vol=60 + i, sell_vol=40 + i)
             for i in range(30)]
     df = _make_bars_df(rows)

@@ -6,6 +6,7 @@ from src.framework.data.loader import get_parquet_files, load_split, filter_rth,
 from src.framework.data.constants import TRAIN_FOLDERS, VALIDATE_FOLDERS, TEST_FOLDERS
 
 
+@pytest.mark.slow
 def test_get_parquet_files_train():
     """Verify get_parquet_files returns non-empty list for train split."""
     files = get_parquet_files("train")
@@ -20,12 +21,14 @@ def test_get_parquet_files_invalid_split():
         get_parquet_files("invalid_split")
 
 
+@pytest.mark.slow
 def test_load_split_lazy():
     """Load train split lazily and verify it returns LazyFrame."""
     lf = load_split("train", lazy=True)
     assert isinstance(lf, pl.LazyFrame), "Should return LazyFrame when lazy=True"
 
 
+@pytest.mark.slow
 def test_load_split_schema():
     """Verify loaded data has expected columns."""
     # Use single file for faster testing
@@ -54,6 +57,7 @@ def test_load_split_schema():
         assert col in df.columns, f"Expected column '{col}' not found in schema"
 
 
+@pytest.mark.slow
 def test_filter_rth():
     """Load 1 day, filter RTH, verify all timestamps within 09:30-16:00 ET."""
     from datetime import time
@@ -83,6 +87,7 @@ def test_filter_rth():
     assert max_time < time(16, 0, 0), f"Max time {max_time} after RTH end"
 
 
+@pytest.mark.slow
 def test_validate_data():
     """Run validation and verify stats dict has expected keys."""
     # Use single file for faster testing
@@ -107,6 +112,7 @@ def test_validate_data():
     assert stats["date_range"]["end"] is not None
 
 
+@pytest.mark.slow
 def test_no_date_overlap():
     """Verify TRAIN/VALIDATE/TEST folder lists have zero overlap."""
     train_set = set(TRAIN_FOLDERS)

@@ -14,6 +14,7 @@ from research.lib.atomic_io import atomic_json_write
 
 
 VALID_VERDICTS = {"PASS", "FAIL", "ERROR", "NEEDS_WORK", "ABANDON"}
+DEFAULT_LOCK_TIMEOUT_SECONDS = 30
 
 
 def _utc_now() -> datetime:
@@ -64,11 +65,13 @@ def update_json_file(
     lock_path: Path,
     default_payload: dict[str, Any],
     update_fn: Callable[[dict[str, Any]], dict[str, Any] | None],
+    lock_timeout_seconds: int = DEFAULT_LOCK_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Lock sidecar file, apply update_fn, atomically persist JSON."""
+    json_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_json(json_path, default_payload)
-    with portalocker.Lock(lock_path, mode="a", timeout=5):
+    with portalocker.Lock(lock_path, mode="a", timeout=max(1, int(lock_timeout_seconds))):
+        _ensure_json(json_path, default_payload)
         payload = _read_json(json_path)
         updated = update_fn(payload)
         if updated is None:

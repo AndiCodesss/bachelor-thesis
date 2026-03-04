@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import types
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -109,6 +110,51 @@ def test_bootstrap_tasks_and_claim_priority(tmp_path: Path, monkeypatch: pytest.
     assert claimed["assigned_to"] == "validator"
 
 
+def test_bootstrap_tasks_deduplicates_existing_combinations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+    queue = tmp_path / "queue.json"
+    lock = tmp_path / "queue.lock"
+    queue.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "done_1",
+                        "state": "completed",
+                        "strategy_name": "alpha_a",
+                        "split": "validate",
+                        "bar_config": "tick_610",
+                        "params": {"lookback": 5},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _dummy_signal(_df, _params):
+        return np.array([0], dtype=np.int8)
+
+    dummy_module = types.SimpleNamespace(DEFAULT_PARAMS={"lookback": 5}, generate_signal=_dummy_signal)
+    monkeypatch.setattr(mod, "discover_signals", lambda: {"alpha_a": _dummy_signal})
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+
+    created = mod._bootstrap_tasks_if_empty(
+        queue_path=queue,
+        lock_path=lock,
+        mission={
+            "bar_configs": ["tick_610"],
+            "splits_allowed": ["validate"],
+        },
+        max_new_tasks=10,
+    )
+    assert created == 0
+
+
 def test_execute_claimed_task_passes_session_filter_to_strategy_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -194,6 +240,136 @@ def test_seed_seen_terminal_task_ids_prevents_resume_double_count(tmp_path: Path
     # After seeding, only truly new terminal tasks should be counted.
     new_verdicts = mod._collect_new_terminal_task_verdicts(queue_path, seen)
     assert new_verdicts == ["PASS"]
+
+
+def test_prune_terminal_tasks_keeps_recent_terminal_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+    monkeypatch.setattr(mod, "_MIN_QUEUE_TERMINAL_KEEP", 1)
+
+    queue_path = tmp_path / "queue.json"
+    lock_path = tmp_path / "queue.lock"
+    queue_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {"task_id": "p1", "state": "pending"},
+                    {"task_id": "c1", "state": "completed", "created_at": "2026-01-01T00:00:00+00:00", "completed_at": "2026-01-01T00:01:00+00:00"},
+                    {"task_id": "c2", "state": "failed", "created_at": "2026-01-01T00:02:00+00:00", "completed_at": "2026-01-01T00:03:00+00:00"},
+                    {"task_id": "c3", "state": "completed", "created_at": "2026-01-01T00:04:00+00:00", "completed_at": "2026-01-01T00:05:00+00:00"},
+                    {"task_id": "w1", "state": "in_progress"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pruned = mod._prune_terminal_tasks(
+        queue_path=queue_path,
+        lock_path=lock_path,
+        max_terminal_tasks=2,
+    )
+    assert pruned == 1
+
+    payload = json.loads(queue_path.read_text(encoding="utf-8"))
+    remaining_ids = [str(t.get("task_id")) for t in payload.get("tasks", [])]
+    assert "p1" in remaining_ids
+    assert "w1" in remaining_ids
+    assert "c1" not in remaining_ids
+    assert "c2" in remaining_ids
+    assert "c3" in remaining_ids
+
+
+def test_execute_claimed_task_gauntlet_respects_metric_thresholds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    def _signal_fn(df, _params):
+        arr = np.zeros(len(df), dtype=np.int8)
+        arr[::2] = 1
+        arr[1::2] = -1
+        return arr
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=_signal_fn,
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_thresholds")
+    monkeypatch.setattr(mod, "check_signal_causality", lambda **kwargs: [])
+    monkeypatch.setattr(mod, "run_validation_gauntlet", lambda *_args, **_kwargs: {"overall_verdict": "PASS"})
+    monkeypatch.setattr(
+        mod,
+        "compute_metrics",
+        lambda _trades, **_kwargs: {
+            "trade_count": 5,
+            "win_count": 0,
+            "loss_count": 0,
+            "win_rate": 0.0,
+            "gross_pnl": 0.0,
+            "total_costs": 0.0,
+            "net_pnl": 0.0,
+            "avg_trade_pnl": 0.0,
+            "max_win": 0.0,
+            "max_loss": 0.0,
+            "profit_factor": 0.0,
+            "sharpe_ratio": 0.3,
+            "max_drawdown": 0.0,
+            "max_drawdown_pct": 0.0,
+            "avg_holding_time_min": 0.0,
+            "avg_bars_held": 0.0,
+        },
+    )
+    monkeypatch.setattr(mod, "run_backtest", lambda *_args, **_kwargs: pl.DataFrame(schema=mod.TRADE_SCHEMA))
+
+    fake_file = tmp_path / "nq_2024-01-02.parquet"
+    fake_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "get_split_files", lambda _split: [fake_file])
+
+    start = np.datetime64("2024-01-02T14:30:00")
+    bars = pl.DataFrame(
+        {
+            "ts_event": pl.datetime_range(start, start + np.timedelta64(39, "m"), interval="1m", eager=True),
+            "open": np.linspace(100.0, 101.0, 40),
+            "high": np.linspace(100.5, 101.5, 40),
+            "low": np.linspace(99.5, 100.5, 40),
+            "close": np.linspace(100.0, 101.0, 40),
+        }
+    ).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    monkeypatch.setattr(mod, "load_cached_matrix", lambda *args, **kwargs: bars)
+
+    verdict, _details = mod._execute_claimed_task(
+        task={
+            "task_id": "t_gauntlet_thresholds",
+            "strategy_name": "dummy",
+            "split": "validate",
+            "bar_config": "time_1m",
+            "params": {},
+            "run_gauntlet": True,
+            "write_candidate": False,
+        },
+        mission={
+            "run_gauntlet": True,
+            "target_sharpe": 1.0,
+            "min_trade_count": 10,
+            "session_filter": "rth",
+            "write_candidates": False,
+        },
+        run_id="run_x",
+        run_dir=tmp_path,
+        framework_lock_hash="abc123",
+        git_commit=None,
+        experiments_path=tmp_path / "experiments.jsonl",
+        experiments_lock=tmp_path / "experiments.lock",
+    )
+
+    assert verdict == "FAIL"
 
 
 def test_execute_claimed_task_rejects_non_causal_signal(
@@ -353,3 +529,139 @@ def test_execute_claimed_task_requires_min_bars_for_causality(
         )
 
     assert causality_calls["count"] == 0
+
+
+def test_execute_claimed_task_accepts_legacy_signal_function_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    def _legacy_signal(df, _params):
+        return np.zeros(len(df), dtype=np.int8)
+
+    dummy_module = types.SimpleNamespace(
+        signal=_legacy_signal,
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_legacy")
+    monkeypatch.setattr(mod, "check_signal_causality", lambda **kwargs: [])
+
+    fake_file = tmp_path / "nq_2024-01-02.parquet"
+    fake_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "get_split_files", lambda _split: [fake_file])
+
+    start = np.datetime64("2024-01-02T14:30:00")
+    bars = pl.DataFrame(
+        {
+            "ts_event": pl.datetime_range(start, start + np.timedelta64(39, "m"), interval="1m", eager=True),
+            "open": np.linspace(100.0, 101.0, 40),
+            "high": np.linspace(100.5, 101.5, 40),
+            "low": np.linspace(99.5, 100.5, 40),
+            "close": np.linspace(100.0, 101.0, 40),
+        }
+    ).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    monkeypatch.setattr(mod, "load_cached_matrix", lambda *args, **kwargs: bars)
+
+    verdict, _details = mod._execute_claimed_task(
+        task={
+            "task_id": "t_legacy_fn",
+            "strategy_name": "dummy",
+            "split": "validate",
+            "bar_config": "time_1m",
+            "params": {},
+            "run_gauntlet": False,
+            "write_candidate": False,
+        },
+        mission={
+            "run_gauntlet": False,
+            "target_sharpe": -1.0,
+            "min_trade_count": 0,
+            "session_filter": "rth",
+            "write_candidates": False,
+        },
+        run_id="run_x",
+        run_dir=tmp_path,
+        framework_lock_hash="abc123",
+        git_commit=None,
+        experiments_path=tmp_path / "experiments.jsonl",
+        experiments_lock=tmp_path / "experiments.lock",
+    )
+    assert verdict in {"PASS", "FAIL"}
+
+
+def test_execute_claimed_task_supports_stateful_signal_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+    captures: dict[str, Any] = {"accepts_state": None, "last_state_calls": 0}
+
+    def _stateful_signal(df, _params, model_state):
+        assert isinstance(model_state, dict)
+        model_state["calls"] = int(model_state.get("calls", 0)) + 1
+        captures["last_state_calls"] = model_state["calls"]
+        return np.zeros(len(df), dtype=np.int8)
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=_stateful_signal,
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_stateful")
+
+    def _fake_causality(**kwargs):
+        captures["accepts_state"] = kwargs.get("accepts_state")
+        return []
+
+    monkeypatch.setattr(mod, "check_signal_causality", _fake_causality)
+
+    fake_1 = tmp_path / "nq_2024-01-02.parquet"
+    fake_2 = tmp_path / "nq_2024-01-03.parquet"
+    fake_1.write_text("", encoding="utf-8")
+    fake_2.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "get_split_files", lambda _split: [fake_1, fake_2])
+
+    start = np.datetime64("2024-01-02T14:30:00")
+    bars = pl.DataFrame(
+        {
+            "ts_event": pl.datetime_range(start, start + np.timedelta64(39, "m"), interval="1m", eager=True),
+            "open": np.linspace(100.0, 101.0, 40),
+            "high": np.linspace(100.5, 101.5, 40),
+            "low": np.linspace(99.5, 100.5, 40),
+            "close": np.linspace(100.0, 101.0, 40),
+        }
+    ).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    monkeypatch.setattr(mod, "load_cached_matrix", lambda *args, **kwargs: bars)
+
+    verdict, _details = mod._execute_claimed_task(
+        task={
+            "task_id": "t_stateful",
+            "strategy_name": "dummy",
+            "split": "validate",
+            "bar_config": "time_1m",
+            "params": {},
+            "run_gauntlet": False,
+            "write_candidate": False,
+        },
+        mission={
+            "run_gauntlet": False,
+            "target_sharpe": -1.0,
+            "min_trade_count": 0,
+            "session_filter": "rth",
+            "write_candidates": False,
+        },
+        run_id="run_x",
+        run_dir=tmp_path,
+        framework_lock_hash="abc123",
+        git_commit=None,
+        experiments_path=tmp_path / "experiments.jsonl",
+        experiments_lock=tmp_path / "experiments.lock",
+    )
+
+    assert verdict in {"PASS", "FAIL"}
+    assert captures["accepts_state"] is True
+    assert captures["last_state_calls"] == 2

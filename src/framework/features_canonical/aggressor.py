@@ -103,23 +103,23 @@ def compute_aggressor_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # CVD slope: average CVD change per bar over N bars — buying/selling momentum
     # Use .over("_date") shifts to prevent cross-day contamination
-    # Guard with idx > N (not >=) to keep first N bars null after warmup filter drops bar 0
+    # Guard with idx >= N so slope uses exactly N-bar deltas.
     cvd_f = pl.col("cvd").cast(pl.Float64)
     bars = bars.with_columns([
-        pl.when(idx > 3).then((cvd_f - cvd_f.shift(3).over("_date")) / 3.0).otherwise(None)
+        pl.when(idx >= 3).then((cvd_f - cvd_f.shift(3).over("_date")) / 3.0).otherwise(None)
         .alias("cvd_slope_3"),
-        pl.when(idx > 6).then((cvd_f - cvd_f.shift(6).over("_date")) / 6.0).otherwise(None)
+        pl.when(idx >= 6).then((cvd_f - cvd_f.shift(6).over("_date")) / 6.0).otherwise(None)
         .alias("cvd_slope_6"),
-        pl.when(idx > 12).then((cvd_f - cvd_f.shift(12).over("_date")) / 12.0).otherwise(None)
+        pl.when(idx >= 12).then((cvd_f - cvd_f.shift(12).over("_date")) / 12.0).otherwise(None)
         .alias("cvd_slope_12"),
     ])
 
     # CVD acceleration: is buying/selling pressure speeding up or slowing down?
     bars = bars.with_columns([
-        pl.when(idx > 6)
+        pl.when(idx >= 6)
         .then(pl.col("cvd_slope_3") - pl.col("cvd_slope_3").shift(3).over("_date")).otherwise(None)
         .alias("cvd_accel_3"),
-        pl.when(idx > 12)
+        pl.when(idx >= 12)
         .then(pl.col("cvd_slope_6") - pl.col("cvd_slope_6").shift(6).over("_date")).otherwise(None)
         .alias("cvd_accel_6"),
     ])

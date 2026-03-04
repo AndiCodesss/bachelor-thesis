@@ -172,6 +172,48 @@ def test_compute_adaptive_costs_preserves_trade_columns():
         assert col in result.columns
 
 
+def test_compute_adaptive_costs_non_rth_uses_neutral_session_progress():
+    """Non-RTH trades should not get edge penalties from session_progress."""
+    non_rth_bar_ts = datetime(2025, 3, 1, 8, 0, 0)   # ~03:00 ET
+    mid_rth_bar_ts = datetime(2025, 3, 1, 17, 45, 0)  # ~12:45 ET (session midpoint)
+
+    bars_non_rth = pl.DataFrame({
+        "ts_event": [non_rth_bar_ts],
+        "close": [18000.0],
+        "volume": [100.0],
+        "ask_price": [18000.25],
+        "bid_price": [18000.00],
+    })
+    bars_mid_rth = pl.DataFrame({
+        "ts_event": [mid_rth_bar_ts],
+        "close": [18000.0],
+        "volume": [100.0],
+        "ask_price": [18000.25],
+        "bid_price": [18000.00],
+    })
+
+    trades_non_rth = pl.DataFrame({
+        "entry_time": [non_rth_bar_ts],
+        "exit_time": [non_rth_bar_ts + timedelta(minutes=5)],
+        "entry_price": [18000.0],
+        "exit_price": [18001.0],
+        "direction": [1],
+        "size": [1],
+    })
+    trades_mid_rth = pl.DataFrame({
+        "entry_time": [mid_rth_bar_ts],
+        "exit_time": [mid_rth_bar_ts + timedelta(minutes=5)],
+        "entry_price": [18000.0],
+        "exit_price": [18001.0],
+        "direction": [1],
+        "size": [1],
+    })
+
+    cost_non_rth = compute_adaptive_costs(trades_non_rth, bars_non_rth)["adaptive_cost_rt"][0]
+    cost_mid_rth = compute_adaptive_costs(trades_mid_rth, bars_mid_rth)["adaptive_cost_rt"][0]
+    assert cost_non_rth == pytest.approx(cost_mid_rth, abs=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # metrics backward compatibility
 # ---------------------------------------------------------------------------

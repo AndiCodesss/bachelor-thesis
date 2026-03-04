@@ -262,12 +262,14 @@ def test_cvd_slope_3_known_answer():
     result = compute_aggressor_features(df)
 
     # CVD: 10, 20, 30, 40, 50, 60, 70
+    # slope_3[3] = (40 - 10) / 3 = 10.0
     # slope_3[4] = (50 - 20) / 3 = 10.0
     # slope_3[5] = (60 - 30) / 3 = 10.0
+    assert result["cvd_slope_3"][3] == 10.0
     assert result["cvd_slope_3"][4] == 10.0
     assert result["cvd_slope_3"][5] == 10.0
-    # First 4 bars: null (idx > 3 guard to account for warmup bar drop)
-    for i in range(4):
+    # First 3 bars: null (idx < 3)
+    for i in range(3):
         assert result["cvd_slope_3"][i] is None
 
 
@@ -281,10 +283,11 @@ def test_cvd_slope_6_known_answer():
     result = compute_aggressor_features(df)
 
     # CVD: 10, 20, 30, 40, 50, 60, 70, 80
+    # slope_6[6] = (70 - 10) / 6 = 10.0
     # slope_6[7] = (80 - 20) / 6 = 10.0
-    # First 7 bars (idx 0-6) are null (idx > 6 guard)
+    assert result["cvd_slope_6"][6] == 10.0
     assert result["cvd_slope_6"][7] == 10.0
-    for i in range(7):
+    for i in range(6):
         assert result["cvd_slope_6"][i] is None
 
 
@@ -300,10 +303,10 @@ def test_cvd_accel_constant_slope():
 
     # Constant slope => accel = slope_3[i] - slope_3[i-3] = 10 - 10 = 0
     accel = result["cvd_accel_3"].to_list()
-    # accel_3 valid from idx > 6 (idx 7+). First 7 bars null
-    for i in range(7):
+    # accel_3 valid from idx >= 6. First 6 bars null.
+    for i in range(6):
         assert accel[i] is None
-    assert accel[7] == 0.0
+    assert accel[6] == 0.0
 
 
 def test_cvd_accel_accelerating():
@@ -390,16 +393,16 @@ def test_cvd_slope_no_cross_day_contamination():
     df = _make_bars_df(rows)
     result = compute_aggressor_features(df)
 
-    # First 4 bars of day 2 (idx 5-8) should have null cvd_slope_3
-    # because idx > 3 guard uses per-day bar index (0-based within day 2)
-    for i in range(5, 9):
+    # First 3 bars of day 2 (idx 5-7) should have null cvd_slope_3
+    # because idx >= 3 guard uses per-day bar index (0-based within day 2)
+    for i in range(5, 8):
         assert result["cvd_slope_3"][i] is None, (
             f"Bar {i} (day 2) should have null cvd_slope_3, got {result['cvd_slope_3'][i]}"
         )
 
 
 def test_cvd_day_boundary_after_warmup_drop():
-    """After dropping bar 0 (warmup), first 3 visible bars should still have null cvd_slope_3."""
+    """After dropping bar 0, first 2 visible bars should have null cvd_slope_3."""
     rows = []
     for i in range(10):
         total_min = 30 + i * 5
@@ -410,8 +413,8 @@ def test_cvd_day_boundary_after_warmup_drop():
 
     # Simulate warmup filter: drop bar 0, re-index
     result_filtered = result.slice(1)  # drop first row
-    # First 3 bars (original idx 1, 2, 3) should be null
-    for i in range(3):
+    # First 2 bars (original idx 1, 2) should be null
+    for i in range(2):
         assert result_filtered["cvd_slope_3"][i] is None, (
             f"Post-warmup bar {i} should have null cvd_slope_3, got {result_filtered['cvd_slope_3'][i]}"
         )

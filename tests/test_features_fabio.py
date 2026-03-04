@@ -238,6 +238,8 @@ class TestSwingVPFeatures:
         highs = []
         lows = []
         volumes = []
+        vap_prices = []
+        vap_volumes = []
         base = 18000.0
 
         for i in range(n_bars):
@@ -254,6 +256,8 @@ class TestSwingVPFeatures:
             highs.append(c + 1.0)
             lows.append(c - 1.0)
             volumes.append(100)
+            vap_prices.append([c - 0.25, c, c + 0.25])
+            vap_volumes.append([1, 100, 1])
 
         return pl.DataFrame({
             "ts_event": timestamps,
@@ -262,9 +266,13 @@ class TestSwingVPFeatures:
             "low": lows,
             "close": closes,
             "volume": volumes,
+            "vap_prices": vap_prices,
+            "vap_volumes": vap_volumes,
         }).with_columns(
             pl.col("ts_event").dt.replace_time_zone("UTC"),
             pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
         )
 
     def test_breakout_direction_detected(self):

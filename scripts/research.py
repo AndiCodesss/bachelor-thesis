@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -13,7 +14,8 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+import traceback
+from typing import Any, Callable
 
 import numpy as np
 import polars as pl
@@ -36,6 +38,7 @@ from research.lib.coordination import (
 )
 from research.lib.experiments import log_experiment
 from research.signals import (
+    CAUSALITY_MIN_PREFIX_BARS,
     check_signal_causality,
     compute_strategy_id,
     discover_signals,
@@ -57,7 +60,9 @@ from src.framework.features_canonical.builder import LABEL_COLUMNS
 from src.framework.security.framework_lock import verify_manifest
 
 _ALLOWED_RESEARCH_SPLITS = {"train", "validate"}
-_CAUSALITY_MIN_ROWS = 33
+_CAUSALITY_MIN_ROWS = CAUSALITY_MIN_PREFIX_BARS + 1
+_DEFAULT_QUEUE_TERMINAL_KEEP = 2000
+_MIN_QUEUE_TERMINAL_KEEP = 200
 
 
 def _utc_now() -> str:
@@ -220,6 +225,47 @@ def _seed_seen_terminal_task_ids(queue_path: Path, already_counted: int) -> set[
     }
 
 
+def _prune_terminal_tasks(
+    *,
+    queue_path: Path,
+    lock_path: Path,
+    max_terminal_tasks: int,
+) -> int:
+    """Bound queue file size by dropping oldest terminal tasks."""
+    keep = max(_MIN_QUEUE_TERMINAL_KEEP, int(max_terminal_tasks))
+    out: dict[str, int] = {"pruned": 0}
+
+    def _update(queue: dict[str, Any]) -> dict[str, Any]:
+        tasks = list(queue.get("tasks", []))
+        terminal_indices = [
+            idx for idx, task in enumerate(tasks)
+            if task.get("state") in {"completed", "failed"}
+        ]
+        overflow = len(terminal_indices) - keep
+        if overflow <= 0:
+            return queue
+
+        terminal_indices.sort(
+            key=lambda idx: (
+                str(tasks[idx].get("completed_at", "")),
+                str(tasks[idx].get("created_at", "")),
+                str(tasks[idx].get("task_id", "")),
+            )
+        )
+        drop = set(terminal_indices[:overflow])
+        out["pruned"] = len(drop)
+        queue["tasks"] = [task for idx, task in enumerate(tasks) if idx not in drop]
+        return queue
+
+    update_json_file(
+        json_path=queue_path,
+        lock_path=lock_path,
+        default_payload={"schema_version": "1.0", "tasks": []},
+        update_fn=_update,
+    )
+    return int(out["pruned"])
+
+
 def _as_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -289,6 +335,56 @@ def _validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
     return errors
 
 
+def _resolve_strategy_callable(
+    *,
+    task_id: str,
+    strategy_name: str,
+    strategy_module: Any,
+) -> tuple[Callable[..., Any], bool]:
+    strategy_fn = getattr(strategy_module, "generate_signal", None)
+    if not callable(strategy_fn):
+        strategy_fn = getattr(strategy_module, "signal", None)
+    if not callable(strategy_fn):
+        raise ValueError(
+            f"{task_id}: strategy '{strategy_name}' has no callable "
+            "generate_signal(df, params[, model_state]) or signal(...)",
+        )
+
+    sig = inspect.signature(strategy_fn)
+    params = list(sig.parameters.values())
+    positional = [
+        p for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+    if len(positional) < 2 and not has_varargs:
+        raise ValueError(
+            f"{task_id}: strategy '{strategy_name}' must accept at least "
+            "df and params positional arguments",
+        )
+    accepts_state = len(positional) >= 3 or has_varargs
+    return strategy_fn, accepts_state
+
+
+def _invoke_strategy_callable(
+    *,
+    strategy_fn: Callable[..., Any],
+    strategy_df: pl.DataFrame,
+    params: dict[str, Any],
+    accepts_state: bool,
+    model_state: Any | None,
+) -> np.ndarray:
+    if accepts_state:
+        return np.asarray(strategy_fn(strategy_df, params, model_state))
+    return np.asarray(strategy_fn(strategy_df, params))
+
+
+def _task_bootstrap_key(*, strategy_name: str, split: str, bar_config: str, params: dict[str, Any]) -> str:
+    params_obj = params if isinstance(params, dict) else {}
+    params_blob = json.dumps(params_obj, sort_keys=True, separators=(",", ":"), default=str)
+    return f"{strategy_name}|{split}|{bar_config}|{params_blob}"
+
+
 def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
     return (_as_int(task.get("priority"), 1_000_000), str(task.get("created_at", "")))
 
@@ -333,8 +429,6 @@ def _bootstrap_tasks_if_empty(
     bar_configs_raw = mission.get("bar_configs", ["volume_2000"])
     bar_configs = [str(v) for v in bar_configs_raw] if isinstance(bar_configs_raw, list) else ["volume_2000"]
     split = str((mission.get("splits_allowed") or ["validate"])[0]).lower()
-    if split == "test":
-        split = "validate"
 
     max_retries = _as_int(mission.get("max_retries"), 2)
     timeout_minutes = _as_int(mission.get("task_timeout_minutes"), 30)
@@ -352,6 +446,15 @@ def _bootstrap_tasks_if_empty(
             return queue
 
         existing_ids = {str(t.get("task_id", "")) for t in tasks}
+        existing_task_keys = {
+            _task_bootstrap_key(
+                strategy_name=str(t.get("strategy_name", "")),
+                split=str(t.get("split", "")),
+                bar_config=str(t.get("bar_config", "")),
+                params=t.get("params", {}) if isinstance(t.get("params", {}), dict) else {},
+            )
+            for t in tasks
+        }
         now = _utc_now()
         created = 0
         serial = len(tasks)
@@ -368,6 +471,14 @@ def _bootstrap_tasks_if_empty(
                 serial += 1
                 task_id = f"auto_{serial:05d}_{_slug(strategy_name)}_{_slug(bar_cfg)}"
                 if task_id in existing_ids:
+                    continue
+                task_key = _task_bootstrap_key(
+                    strategy_name=strategy_name,
+                    split=split,
+                    bar_config=bar_cfg,
+                    params=default_params,
+                )
+                if task_key in existing_task_keys:
                     continue
 
                 task: dict[str, Any] = {
@@ -391,6 +502,7 @@ def _bootstrap_tasks_if_empty(
                     task["max_files"] = int(default_max_files)
                 tasks.append(task)
                 existing_ids.add(task_id)
+                existing_task_keys.add(task_key)
                 created += 1
 
             if created >= max_new_tasks:
@@ -459,9 +571,12 @@ def _execute_claimed_task(
 
     parsed_bar = _parse_bar_config(bar_config)
     strategy_module = load_signal_module(strategy_name)
-    strategy_fn = getattr(strategy_module, "generate_signal", None)
-    if not callable(strategy_fn):
-        raise ValueError(f"{task_id}: strategy '{strategy_name}' has no generate_signal(df, params)")
+    strategy_fn, strategy_accepts_state = _resolve_strategy_callable(
+        task_id=task_id,
+        strategy_name=strategy_name,
+        strategy_module=strategy_module,
+    )
+    strategy_state: Any | None = {} if strategy_accepts_state else None
 
     strategy_id = compute_strategy_id(
         strategy_name, params, strategy_fn,
@@ -521,15 +636,24 @@ def _execute_claimed_task(
                     generate_fn=strategy_fn,
                     df=causality_df,
                     params=params,
+                    accepts_state=strategy_accepts_state,
+                    model_state=None,
                     mode="strict",
+                    min_prefix_bars=CAUSALITY_MIN_PREFIX_BARS,
                 )
                 if causality_errors:
                     raise ValueError(f"{task_id}: signal causality failed: {causality_errors}")
                 causality_checked = True
                 causality_frames.clear()
 
-        raw_signal = np.asarray(strategy_fn(strategy_df, params))
-        signal_errors = _validate_signal_array(raw_signal, len(df))
+        raw_signal = _invoke_strategy_callable(
+            strategy_fn=strategy_fn,
+            strategy_df=strategy_df,
+            params=params,
+            accepts_state=strategy_accepts_state,
+            model_state=strategy_state,
+        )
+        signal_errors = _validate_signal_array(raw_signal, len(strategy_df))
         if signal_errors:
             raise ValueError(f"{task_id}: signal contract failed: {signal_errors}")
 
@@ -556,20 +680,28 @@ def _execute_claimed_task(
 
     signals_df = pl.concat(all_signals).sort("ts_event") if all_signals else _empty_signal_frame()
     trades_df = pl.concat(all_trades) if all_trades else pl.DataFrame(schema=TRADE_SCHEMA)
-    metrics = compute_metrics(trades_df)
+    metrics = compute_metrics(
+        trades_df,
+        cost_override_col="adaptive_cost_rt" if "adaptive_cost_rt" in trades_df.columns else None,
+    )
 
     gauntlet: dict[str, Any] | None = None
     if run_gauntlet and len(signals_df) > 0 and signal_count > 0:
         gauntlet = run_validation_gauntlet(signals_df, signal_col="signal", **bt_kwargs)
 
+    target_sharpe = float(mission.get("target_sharpe", 0.0))
+    min_trade_count = int(mission.get("min_trade_count", 1))
+    meets_metric_thresholds = (
+        metrics["sharpe_ratio"] >= target_sharpe
+        and metrics["trade_count"] >= min_trade_count
+    )
+
     verdict = "FAIL"
     if run_gauntlet:
-        if gauntlet and gauntlet.get("overall_verdict") == "PASS":
+        if gauntlet and gauntlet.get("overall_verdict") == "PASS" and meets_metric_thresholds:
             verdict = "PASS"
     else:
-        target_sharpe = float(mission.get("target_sharpe", 0.0))
-        min_trade_count = int(mission.get("min_trade_count", 1))
-        if metrics["sharpe_ratio"] >= target_sharpe and metrics["trade_count"] >= min_trade_count:
+        if meets_metric_thresholds:
             verdict = "PASS"
 
     summary = {
@@ -722,6 +854,10 @@ def main() -> None:
     if "test" in splits_allowed:
         raise ValueError("Mission cannot include test split in research mode")
     mission_name = str(mission.get("mission_name", mission_path.stem))
+    queue_terminal_keep = _as_int(
+        mission.get("queue_terminal_keep", _DEFAULT_QUEUE_TERMINAL_KEEP),
+        _DEFAULT_QUEUE_TERMINAL_KEEP,
+    )
     run_id = _run_id(mission_name)
     run_dir = (RESULTS_DIR / "runs" / run_id).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -770,10 +906,14 @@ def main() -> None:
 
     def _watchdog_loop() -> None:
         while not stop_watchdog.is_set():
-            watchdog_check_timeouts(
-                queue_path=state_paths["queue"],
-                lock_path=state_paths["queue_lock"],
-            )
+            try:
+                watchdog_check_timeouts(
+                    queue_path=state_paths["queue"],
+                    lock_path=state_paths["queue_lock"],
+                )
+            except Exception:
+                print("ERROR: watchdog loop crashed; continuing.", file=sys.stderr, flush=True)
+                traceback.print_exc()
             stop_watchdog.wait(timeout=max(1, int(args.watchdog_seconds)))
 
     watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True, name="research-watchdog")
@@ -849,8 +989,12 @@ def main() -> None:
                                 lease_duration_minutes=lease_minutes,
                             )
                         except Exception:
-                            # Best effort heartbeat; watchdog handles true failures.
-                            pass
+                            print(
+                                f"WARN: heartbeat update failed for task {claimed.get('task_id')}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            traceback.print_exc()
                         stop_heartbeat.wait(timeout=max(1, interval))
 
                 hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True, name="task-heartbeat")
@@ -903,6 +1047,13 @@ def main() -> None:
                     verdict=verdict,
                     details=details,
                 )
+                pruned = _prune_terminal_tasks(
+                    queue_path=state_paths["queue"],
+                    lock_path=state_paths["queue_lock"],
+                    max_terminal_tasks=queue_terminal_keep,
+                )
+                if pruned > 0:
+                    print(f"Queue compaction: pruned {pruned} terminal tasks.")
                 continue
 
             if counts["pending"] == 0 and counts["in_progress"] == 0:

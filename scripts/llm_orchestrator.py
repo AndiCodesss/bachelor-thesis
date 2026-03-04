@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import traceback
 from typing import Any, Callable
 
 import numpy as np
@@ -291,15 +292,21 @@ def _strip_code_fences(text: str) -> str:
 
 def _parse_bar_config(bar_config: str) -> dict[str, Any]:
     raw = str(bar_config).strip().lower()
-    if raw.startswith("tick_"):
-        return {"bar_type": "tick", "bar_size": "5m", "bar_threshold": int(raw.split("_", 1)[1])}
-    if raw.startswith("volume_"):
-        return {"bar_type": "volume", "bar_size": "5m", "bar_threshold": int(raw.split("_", 1)[1])}
-    if raw.startswith("vol_"):
-        return {"bar_type": "volume", "bar_size": "5m", "bar_threshold": int(raw.split("_", 1)[1])}
-    if raw.startswith("time_"):
-        return {"bar_type": "time", "bar_size": raw.split("_", 1)[1], "bar_threshold": None}
-    raise ValueError(f"Unsupported bar_config '{bar_config}'")
+    match = re.fullmatch(r"(tick|volume|vol|time)_(.+)", raw)
+    if not match:
+        raise ValueError(f"Unsupported bar_config '{bar_config}'")
+    kind, suffix = match.groups()
+
+    if kind == "time":
+        if not re.fullmatch(r"[1-9][0-9]*[mh]", suffix):
+            raise ValueError(f"Invalid time bar size in '{bar_config}'")
+        return {"bar_type": "time", "bar_size": suffix, "bar_threshold": None}
+
+    if not suffix.isdigit() or int(suffix) <= 0:
+        raise ValueError(f"Invalid bar threshold in '{bar_config}'")
+
+    bar_type = "volume" if kind in {"volume", "vol"} else "tick"
+    return {"bar_type": bar_type, "bar_size": "5m", "bar_threshold": int(suffix)}
 
 
 def _validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
@@ -629,7 +636,10 @@ def _load_sample_strategy_df(
     max_files: int = 20,
     max_rows: int = 1200,
 ) -> pl.DataFrame:
-    parsed = _parse_bar_config(bar_config)
+    try:
+        parsed = _parse_bar_config(bar_config)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid bar_config '{bar_config}': {exc}") from exc
     files = get_split_files(split)
     if not files:
         raise RuntimeError(f"No files found for split={split}")
@@ -1555,6 +1565,7 @@ def main() -> int:
                 )
 
         except (LLMClientError, ValueError, RuntimeError) as exc:
+            trace = traceback.format_exc()
             log_experiment(
                 {
                     "run_id": run_id,
@@ -1562,11 +1573,13 @@ def main() -> int:
                     "event": "generation_error",
                     "iteration": iteration_no,
                     "error": f"{type(exc).__name__}: {exc}",
+                    "traceback": trace,
                 },
                 experiments_path=orchestrator_log_path,
                 lock_path=orchestrator_log_lock,
             )
             print(f"generation error: {type(exc).__name__}: {exc}")
+            print(trace, file=sys.stderr, flush=True)
 
         iterations_done += 1
         state = {

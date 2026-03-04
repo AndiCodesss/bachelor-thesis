@@ -170,6 +170,23 @@ class TestMTFFixedFeatures:
         r2 = compute_multi_timeframe_features(lf, bar_size="5m", source_bar_size="1m")
         assert r1.columns == r2.columns
 
+    def test_fallback_feature_selection_when_fixed_features_missing(self, monkeypatch):
+        """If fixed feature names are unavailable, fallback selection should still emit features."""
+        monkeypatch.setattr(
+            "src.framework.features_canonical.multi_timeframe.FIXED_MTF_FEATURES",
+            ["__missing_feature_a__", "__missing_feature_b__"],
+        )
+        lf = _build_synthetic_lf(12)
+        result = compute_multi_timeframe_features(
+            lf,
+            bar_size="5m",
+            source_bar_size="1m",
+            top_n=3,
+            agg_ops=["mean"],
+        )
+        feature_cols = [c for c in result.columns if c != "ts_event"]
+        assert len(feature_cols) > 0
+
 
 class TestMTFAggregationValues:
     """Verify aggregation operations produce correct values."""

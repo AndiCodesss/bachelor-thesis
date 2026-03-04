@@ -122,7 +122,31 @@ def compute_multi_timeframe_features(
     top_features = [f for f in FIXED_MTF_FEATURES if f in available_cols]
 
     if len(top_features) == 0:
-        return pl.DataFrame({"ts_event": pl.Series([], dtype=pl.Datetime("ns", "UTC"))})
+        # Fallback for schema drift: pick top-N numeric non-excluded columns by variance.
+        numeric_candidates = [
+            name for name, dtype in df_1m.schema.items()
+            if name not in _EXCLUDE_COLUMNS and name != "ts_event" and dtype.is_numeric()
+        ]
+        if len(numeric_candidates) == 0:
+            return pl.DataFrame({"ts_event": pl.Series([], dtype=pl.Datetime("ns", "UTC"))})
+
+        variance_row = df_1m.select([
+            pl.col(name).cast(pl.Float64).var().alias(name)
+            for name in numeric_candidates
+        ]).row(0, named=True)
+
+        def _variance_key(name: str) -> tuple[int, float, str]:
+            value = variance_row.get(name)
+            if value is None:
+                return (1, 0.0, name)
+            val = float(value)
+            if val != val or val == float("inf") or val == float("-inf"):
+                return (1, 0.0, name)
+            return (0, -val, name)
+
+        ranked = sorted(numeric_candidates, key=_variance_key)
+        n_pick = max(1, min(int(top_n), len(ranked)))
+        top_features = ranked[:n_pick]
 
     # Build aggregation expressions
     agg_exprs = []

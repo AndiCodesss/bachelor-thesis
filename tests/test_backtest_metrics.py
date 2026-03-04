@@ -139,7 +139,7 @@ def test_empty_trades():
 
 
 def test_all_winners():
-    """Test with all winning trades - profit factor should be capped at 99.0."""
+    """Test with all winning trades - profit factor is unbounded."""
     base_time = datetime(2025, 2, 1, 10, 0, 0)
 
     trades = pl.DataFrame({
@@ -165,7 +165,7 @@ def test_all_winners():
     assert metrics["win_count"] == 3
     assert metrics["loss_count"] == 0
     assert metrics["win_rate"] == 1.0
-    assert metrics["profit_factor"] == 99.0  # Capped
+    assert np.isinf(metrics["profit_factor"])
     assert metrics["net_pnl"] > 0
     assert metrics["max_loss"] == 0.0  # No losses
 
@@ -207,7 +207,7 @@ def test_all_losers():
 
 
 def test_single_trade_sharpe():
-    """Test with single trade - Sharpe should be 0.0 (can't compute std)."""
+    """Test with single trade - Sharpe should be NaN (undefined)."""
     base_time = datetime(2025, 2, 1, 10, 0, 0)
 
     trades = pl.DataFrame({
@@ -222,7 +222,28 @@ def test_single_trade_sharpe():
     metrics = compute_metrics(trades)
 
     assert metrics["trade_count"] == 1
-    assert metrics["sharpe_ratio"] == 0.0  # Can't compute from single sample
+    assert np.isnan(metrics["sharpe_ratio"])
+
+
+def test_single_day_trades_sharpe_is_nan():
+    """Multiple trades on one active date should produce undefined Sharpe."""
+    day = datetime(2025, 2, 1, 10, 0, 0)
+
+    trades = pl.DataFrame({
+        "entry_time": [day, day + timedelta(hours=1)],
+        "exit_time": [
+            day + timedelta(minutes=30),
+            day + timedelta(hours=1, minutes=30),
+        ],
+        "entry_price": [18000.0, 18020.0],
+        "exit_price": [18010.0, 18010.0],
+        "direction": [1, -1],
+        "size": [1, 1],
+    })
+
+    metrics = compute_metrics(trades)
+    assert metrics["trade_count"] == 2
+    assert np.isnan(metrics["sharpe_ratio"])
 
 
 def test_sharpe_zero_fills_gap_days():
@@ -337,7 +358,7 @@ def test_drawdown_specific_sequence():
 
 
 def test_identical_trades_sharpe():
-    """Test with identical daily PnLs - std = 0, Sharpe should be 0."""
+    """Test with identical daily PnLs - std = 0, Sharpe should be NaN."""
     # Spread across 5 days, 1 identical trade per day → identical daily PnLs → std=0
     trades = pl.DataFrame({
         "entry_time": [
@@ -356,7 +377,7 @@ def test_identical_trades_sharpe():
 
     assert metrics["trade_count"] == 5
     assert metrics["win_count"] == 5
-    assert metrics["sharpe_ratio"] == 0.0  # All daily PnLs identical -> std = 0
+    assert np.isnan(metrics["sharpe_ratio"])
 
 
 def test_multiple_contracts():

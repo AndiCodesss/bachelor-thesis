@@ -13,8 +13,8 @@ from typing import Any, Callable
 import numpy as np
 import polars as pl
 
-SignalFn = Callable[[pl.DataFrame, dict[str, Any]], np.ndarray]
-_CAUSALITY_MIN_PREFIX_BARS = 32
+SignalFn = Callable[..., np.ndarray]
+CAUSALITY_MIN_PREFIX_BARS = 32
 
 
 def _invoke_generate_signal(
@@ -56,7 +56,7 @@ def check_signal_causality(
     accepts_state: bool = False,
     model_state: Any | None = None,
     mode: str = "strict",
-    min_prefix_bars: int = _CAUSALITY_MIN_PREFIX_BARS,
+    min_prefix_bars: int = CAUSALITY_MIN_PREFIX_BARS,
     full_signal: np.ndarray | None = None,
 ) -> list[str]:
     """Prefix-invariance causality check for signal functions.
@@ -147,7 +147,7 @@ def load_signal_module(strategy_name: str, signals_dir: Path | None = None) -> M
 
 
 def discover_signals(signals_dir: Path | None = None) -> dict[str, SignalFn]:
-    """Discover all strategy files exposing `generate_signal(df, params)`."""
+    """Discover all strategy files exposing `generate_signal` or `signal`."""
     directory = _signals_dir(signals_dir)
     found: dict[str, SignalFn] = {}
     for path in sorted(directory.glob("*.py")):
@@ -155,6 +155,8 @@ def discover_signals(signals_dir: Path | None = None) -> dict[str, SignalFn]:
             continue
         module = load_signal_module(path.stem, directory)
         fn = getattr(module, "generate_signal", None)
+        if not callable(fn):
+            fn = getattr(module, "signal", None)
         if callable(fn):
             found[path.stem] = fn
     return found
@@ -187,6 +189,7 @@ def compute_strategy_id(
 
 
 __all__ = [
+    "CAUSALITY_MIN_PREFIX_BARS",
     "SignalFn",
     "discover_signals",
     "load_signal_module",

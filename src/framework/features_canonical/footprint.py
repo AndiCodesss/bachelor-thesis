@@ -208,13 +208,13 @@ def _bars_since_flag(col_name: str) -> pl.Expr:
 
     Uses cumulative sum as group marker: each time the flag is 1, a new group
     starts. Within each group, row number gives bars since flag.
-    Returns NaN for bars before the first flag ever fires.
+    Returns null for bars before the first flag ever fires.
     """
     flag = pl.col(col_name).cast(pl.UInt32)
     group = flag.cum_sum()
     count = pl.int_range(pl.len()).over(group)
-    # Group 0 = before any flag fired -> NaN
-    return pl.when(group > 0).then(count.cast(pl.Float64)).otherwise(float("nan"))
+    # Group 0 = before any flag fired -> null (consistent missing-value semantics)
+    return pl.when(group > 0).then(count.cast(pl.Float64)).otherwise(None)
 
 
 def _empty_result() -> pl.DataFrame:

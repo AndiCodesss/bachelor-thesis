@@ -28,7 +28,13 @@ def atomic_json_write(file_path: Path | str, data: dict[str, Any]) -> None:
     )
 
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        try:
+            f = os.fdopen(fd, "w", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+
+        with f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())

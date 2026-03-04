@@ -73,15 +73,23 @@ def compute_opening_range_features(bars: pl.DataFrame) -> pl.DataFrame:
     ])
 
     # Derived features (null during OR period, populated after)
+    or_range = pl.col("_or_high") - pl.col("_or_low")
+    or_mid = (pl.col("_or_high") + pl.col("_or_low")) / 2.0
     df = df.with_columns([
         # "Narrow OR = directional day; wide OR = rotational day"
-        ((pl.col("_or_high") - pl.col("_or_low"))
-         / (pl.col("close") + 1e-9))
+        # Normalize by OR midpoint (not close) for scale-stable comparability.
+        pl.when(or_mid.is_not_null() & (or_mid.abs() > 1e-9))
+        .then(or_range / or_mid.abs())
+        .otherwise(None)
         .alias("or_width"),
 
         # "0=at OR low, 1=at OR high, >1=broken up, <0=broken down"
-        ((pl.col("close") - pl.col("_or_low"))
-         / (pl.col("_or_high") - pl.col("_or_low") + 1e-9))
+        # Degenerate OR (high == low): set neutral 0.5 instead of epsilon inflation.
+        pl.when(or_range.is_null())
+        .then(None)
+        .when(or_range.abs() <= 1e-9)
+        .then(0.5)
+        .otherwise((pl.col("close") - pl.col("_or_low")) / or_range)
         .alias("position_in_or"),
 
         # "Breakout above OR high = trend day candidate"

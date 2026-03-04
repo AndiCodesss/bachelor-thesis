@@ -464,7 +464,10 @@ def _run_signal_on_files(
         )
 
     trades_df = _concat_frames(trade_frames) if trade_frames else pl.DataFrame(schema=TRADE_SCHEMA)
-    metrics = compute_metrics(trades_df)
+    metrics = compute_metrics(
+        trades_df,
+        cost_override_col="adaptive_cost_rt" if "adaptive_cost_rt" in trades_df.columns else None,
+    )
 
     daily_returns = _daily_returns_from_trades(trades_df, cost_multiplier=1.0)
     daily_returns_2x = _daily_returns_from_trades(trades_df, cost_multiplier=2.0)

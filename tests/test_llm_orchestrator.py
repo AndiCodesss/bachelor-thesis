@@ -107,6 +107,16 @@ def test_extract_retry_after_seconds():
     assert mod._extract_retry_after_seconds("no retry hint") is None
 
 
+def test_parse_bar_config_rejects_malformed_thresholds():
+    mod = _load_module()
+    with pytest.raises(ValueError):
+        mod._parse_bar_config("tick_")
+    with pytest.raises(ValueError):
+        mod._parse_bar_config("volume_bad")
+    with pytest.raises(ValueError):
+        mod._parse_bar_config("time_0m")
+
+
 def test_call_stage_json_repairs_invalid_json():
     mod = _load_module()
 

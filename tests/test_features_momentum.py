@@ -1,6 +1,7 @@
 """Tests for momentum feature engineering."""
 
 import polars as pl
+import pytest
 from datetime import datetime
 from src.framework.features_canonical.momentum import compute_momentum_features
 from src.framework.data.bars import aggregate_time_bars
@@ -37,6 +38,7 @@ def _make_bars(ohlcv_list):
     }).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
 
 
+@pytest.mark.slow
 def test_compute_momentum_features_basic():
     """Test momentum features on real data sample."""
     from src.framework.data.loader import get_parquet_files, filter_rth
@@ -135,6 +137,7 @@ def test_close_position_edge_cases():
         f"close_position should be 0.5 when high==low, got {result['close_position'][0]}"
 
 
+@pytest.mark.slow
 def test_no_nulls_in_features():
     """Verify no NaN/null in computed features (except first bar for lagged features)."""
     from src.framework.data.loader import get_parquet_files, filter_rth
@@ -249,6 +252,7 @@ def test_wick_ratio_zero_range():
     assert row["body_ratio"] == 0.0, "Zero range: body_ratio should be 0"
 
 
+@pytest.mark.slow
 def test_wick_ratio_columns_in_shape_test():
     """Verify wick ratio columns are present in real data output."""
     from src.framework.data.loader import get_parquet_files, filter_rth

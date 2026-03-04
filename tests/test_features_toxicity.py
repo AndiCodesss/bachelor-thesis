@@ -62,6 +62,16 @@ def test_vpin_zscore_constant():
         assert abs(z) < 3.0, f"Z-score too extreme for near-constant VPIN, got {z}"
 
 
+def test_vpin_zscore_requires_reasonable_warmup():
+    """Z-score should stay null until enough history has accumulated."""
+    n = 40
+    bars = _make_bars(n, buy_volumes=[700] * n, sell_volumes=[300] * n)
+    result = compute_toxicity_features(bars)
+    # VPIN_ZSCORE_MIN_SAMPLES = 25 -> first 24 should be null.
+    assert result["vpin_zscore"][:24].null_count() == 24
+    assert result["vpin_zscore"][24] is not None
+
+
 def test_vpin_risk_off_flag_above():
     """Risk-off flag should be 1 when VPIN > threshold."""
     n = 30

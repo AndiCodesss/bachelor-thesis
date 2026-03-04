@@ -202,12 +202,10 @@ def test_cost_sensitivity_test_marginal_signal():
 
     result = cost_sensitivity_test(df_marginal, signal_col="marginal_signal")
 
-    # This should likely FAIL at 1.5x costs due to low edge
-    # Note: outcome depends on random signal, but with SEED=42 should be consistent
-    assert "verdict" in result
-    assert "pnl_1x" in result
-    assert "pnl_1_5x" in result
-    assert "pnl_2x" in result
+    assert result["verdict"] in {"PASS", "FAIL"}
+    expected = "PASS" if result["pnl_1_5x"] > 0 else "FAIL"
+    assert result["verdict"] == expected
+    assert result["pnl_1x"] > result["pnl_1_5x"] > result["pnl_2x"]
 
 
 def test_decay_test_perfect_signal():

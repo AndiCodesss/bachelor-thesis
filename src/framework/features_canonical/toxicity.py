@@ -4,6 +4,7 @@ import polars as pl
 # VPIN parameters
 VPIN_WINDOW = 20  # rolling window of bars for VPIN calculation
 VPIN_ZSCORE_LOOKBACK = 100  # bars for z-score normalization
+VPIN_ZSCORE_MIN_SAMPLES = max(10, VPIN_ZSCORE_LOOKBACK // 4)
 VPIN_RISK_OFF_THRESHOLD = 0.7  # binary flag threshold
 
 
@@ -61,6 +62,13 @@ def compute_toxicity_features(bars: pl.DataFrame) -> pl.DataFrame:
 def _zscore_expr(col_name: str, lookback: int) -> pl.Expr:
     """Rolling z-score expression: (x - mean) / std over lookback window."""
     col = pl.col(col_name)
-    mean = col.rolling_mean(window_size=lookback, min_samples=2)
-    std = col.rolling_std(window_size=lookback, min_samples=2)
-    return pl.when(std > 0).then((col - mean) / std).otherwise(0.0)
+    min_samples = max(2, min(lookback, VPIN_ZSCORE_MIN_SAMPLES))
+    mean = col.rolling_mean(window_size=lookback, min_samples=min_samples)
+    std = col.rolling_std(window_size=lookback, min_samples=min_samples)
+    return (
+        pl.when(std.is_null())
+        .then(None)
+        .when(std > 0)
+        .then((col - mean) / std)
+        .otherwise(0.0)
+    )

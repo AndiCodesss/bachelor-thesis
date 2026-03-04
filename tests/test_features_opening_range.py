@@ -51,7 +51,7 @@ def test_or_null_during_forming_period():
 
 
 def test_or_width_known_answer():
-    """OR width = (or_high - or_low) / close."""
+    """OR width = (or_high - or_low) / OR midpoint."""
     # Create bars where OR period has known high and low
     rows = []
     utc_offset = 4  # EDT
@@ -81,8 +81,8 @@ def test_or_width_known_answer():
     )
     result = compute_opening_range_features(df)
 
-    # OR high = 21010, OR low = 20990, close at bar 6 = 21005
-    expected_width = (21010.0 - 20990.0) / (21005.0 + 1e-9)
+    # OR high = 21010, OR low = 20990, OR midpoint = 21000
+    expected_width = (21010.0 - 20990.0) / 21000.0
     assert abs(result["or_width"][6] - expected_width) < 1e-6
 
 
@@ -116,6 +116,33 @@ def test_position_in_or_known_answer():
 
     # position = (21010 - 21000) / (21020 - 21000) = 0.5
     assert abs(result["position_in_or"][6] - 0.5) < 1e-6
+
+
+def test_position_in_or_zero_width_is_neutral():
+    """When OR high == OR low, position_in_or should be neutral 0.5."""
+    rows = []
+    utc_offset = 4
+    date = datetime(2024, 7, 15)
+    for i in range(6):
+        h, m = divmod(9 * 60 + 30 + i * 5, 60)
+        ts = datetime(date.year, date.month, date.day, h + utc_offset, m)
+        rows.append({
+            "ts_event": ts,
+            "open": 21000.0,
+            "high": 21000.0,
+            "low": 21000.0,
+            "close": 21000.0,
+        })
+    rows.append({
+        "ts_event": datetime(date.year, date.month, date.day, 10 + utc_offset, 0),
+        "open": 21000.0,
+        "high": 21000.0,
+        "low": 21000.0,
+        "close": 21000.0,
+    })
+    df = pl.DataFrame(rows).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    result = compute_opening_range_features(df)
+    assert result["position_in_or"][6] == 0.5
 
 
 def test_or_broken_up():

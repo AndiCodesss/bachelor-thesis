@@ -1,9 +1,10 @@
 """Tests for backtesting engine."""
 
 from datetime import datetime, timedelta, timezone
+import math
 import polars as pl
 import pytest
-from src.framework.backtest.engine import run_backtest, TRADE_SCHEMA
+from src.framework.backtest.engine import run_backtest, TRADE_SCHEMA, _points_to_dollars
 from src.framework.data.constants import TICK_SIZE, TICK_VALUE
 
 UTC = timezone.utc
@@ -23,6 +24,11 @@ def create_test_df(timestamps, closes, signals, highs=None, lows=None, opens=Non
     if opens is not None:
         data["open"] = opens
     return pl.DataFrame(data).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+
+
+def test_points_to_dollars_rounds_half_ticks_away_from_zero():
+    assert _points_to_dollars(TICK_SIZE / 2.0) == TICK_VALUE
+    assert _points_to_dollars(-TICK_SIZE / 2.0) == -TICK_VALUE
 
 
 def test_always_long():
@@ -391,7 +397,7 @@ def test_engine_metrics_integration():
     assert metrics["trade_count"] == 2
     assert metrics["win_count"] == 2
     assert metrics["win_rate"] == 1.0
-    assert metrics["profit_factor"] == 99.0  # All winners, capped
+    assert math.isinf(metrics["profit_factor"])  # All winners, no losses
 
 
 def test_invalid_signal_values():
@@ -781,10 +787,8 @@ def test_entry_on_next_open_enters_at_open_price():
     assert trade["exit_price"] == closes[2]
 
 
-def test_entry_on_next_open_pending_signal_expires_when_unfillable():
-    """Pending signal should not persist beyond its next-bar execution window."""
-    # Day 1: signal on bar 1 creates pending long for bar 2, but bar 2 is last bar (unfillable).
-    # Day 2: no new signals. If pending were stale, day 2 could incorrectly enter.
+def test_entry_on_next_open_carries_last_bar_signal_across_day_boundary():
+    """Signal on day-end bar should execute at next day open when next bar exists."""
     day1_start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
     day2_start = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
     timestamps = [
@@ -799,9 +803,28 @@ def test_entry_on_next_open_pending_signal_expires_when_unfillable():
     closes = [18002.0, 18006.0, 18011.0, 18102.0, 18106.0, 18111.0]
     highs = [18003.0, 18007.0, 18012.0, 18103.0, 18107.0, 18112.0]
     lows = [17999.0, 18004.0, 18009.0, 18099.0, 18104.0, 18109.0]
-    signals = [0, 1, 1, 0, 0, 0]
+    signals = [0, 0, 1, 1, 0, 0]
 
     df = create_test_df(timestamps, closes, signals, highs=highs, lows=lows, opens=opens)
     trades = run_backtest(df, entry_on_next_open=True)
 
-    assert len(trades) == 0, "Unfilled pending signal must expire instead of carrying forward"
+    assert len(trades) == 1
+    trade = trades.row(0, named=True)
+    assert trade["entry_time"] == timestamps[3]
+    assert trade["entry_price"] == opens[3]
+    assert trade["exit_time"] == timestamps[4]
+
+
+def test_entry_on_next_open_pending_signal_expires_without_next_bar():
+    """Pending signal on terminal bar should expire when there is no next bar."""
+    start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(3)]
+    opens = [18000.0, 18005.0, 18010.0]
+    closes = [18002.0, 18006.0, 18011.0]
+    highs = [18003.0, 18007.0, 18012.0]
+    lows = [17999.0, 18004.0, 18009.0]
+    signals = [0, 0, 1]
+
+    df = create_test_df(timestamps, closes, signals, highs=highs, lows=lows, opens=opens)
+    trades = run_backtest(df, entry_on_next_open=True)
+    assert len(trades) == 0

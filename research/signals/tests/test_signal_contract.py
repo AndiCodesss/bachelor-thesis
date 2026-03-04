@@ -79,7 +79,9 @@ def test_signal_contract(module_name: str):
     sig = inspect.signature(fn)
     params = list(sig.parameters.keys())
 
-    if len(params) >= 2:
+    if len(params) >= 3:
+        result = fn(bars, {}, {})
+    elif len(params) >= 2:
         result = fn(bars, {})
     else:
         result = fn(bars)
