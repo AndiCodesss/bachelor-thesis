@@ -142,6 +142,24 @@ def test_weighted_book_imbalance_bounded(sample_bars):
     assert (non_null <= 1.01).all()
 
 
+def test_weighted_book_imbalance_negative_when_ask_side_dominates():
+    """Unsigned inputs must not underflow when ask weight exceeds bid weight."""
+    bars = _make_bars([{
+        "ts_event": datetime(2024, 1, 2, 9, 30, 0),
+        "buy_volume": 10,
+        "sell_volume": 10,
+        "bid_size": 1,
+        "bid_count": 1,
+        "ask_size": 10,
+        "ask_count": 10,
+    }])
+
+    result = compute_microstructure_v2_features(bars)
+    val = result["weighted_book_imbalance"][0]
+    assert val < 0
+    assert abs(val - ((1 - 100) / (1 + 100 + 1))) < 1e-9
+
+
 def test_micro_price_momentum_first_bar_null():
     """First bar has no previous bar, so micro_price_momentum should be null."""
     bars = _make_bars([

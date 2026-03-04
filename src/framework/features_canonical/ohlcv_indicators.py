@@ -73,14 +73,26 @@ def compute_ohlcv_indicators(bars: pl.DataFrame) -> pl.DataFrame:
 
     # --- SMA ratios: close / SMA(N) - 1 ---
     bars = bars.with_columns([
-        (pl.col("close") / pl.col("close").rolling_mean(window_size=n, min_samples=n) - 1)
+        pl.col("close").rolling_mean(window_size=n, min_samples=n).alias(f"_sma_{n}")
+        for n in SMA_PERIODS
+    ])
+    bars = bars.with_columns([
+        pl.when(pl.col(f"_sma_{n}").abs() > _EPS)
+        .then(pl.col("close") / pl.col(f"_sma_{n}") - 1.0)
+        .otherwise(None)
         .alias(f"sma_ratio_{n}")
         for n in SMA_PERIODS
     ])
 
     # --- EMA ratios: close / EMA(N) - 1 ---
     bars = bars.with_columns([
-        (pl.col("close") / pl.col("close").ewm_mean(span=n, adjust=False, min_samples=n) - 1)
+        pl.col("close").ewm_mean(span=n, adjust=False, min_samples=n).alias(f"_ema_{n}")
+        for n in EMA_PERIODS
+    ])
+    bars = bars.with_columns([
+        pl.when(pl.col(f"_ema_{n}").abs() > _EPS)
+        .then(pl.col("close") / pl.col(f"_ema_{n}") - 1.0)
+        .otherwise(None)
         .alias(f"ema_ratio_{n}")
         for n in EMA_PERIODS
     ])
@@ -211,8 +223,14 @@ def compute_ohlcv_indicators(bars: pl.DataFrame) -> pl.DataFrame:
         ).alias("_smooth_tr"),
     ])
     bars = bars.with_columns([
-        (pl.col("_smooth_plus_dm") / (pl.col("_smooth_tr") + _EPS) * 100).alias("plus_di_14"),
-        (pl.col("_smooth_minus_dm") / (pl.col("_smooth_tr") + _EPS) * 100).alias("minus_di_14"),
+        pl.when(pl.col("_smooth_tr") > _EPS)
+        .then(pl.col("_smooth_plus_dm") / pl.col("_smooth_tr") * 100)
+        .otherwise(None)
+        .alias("plus_di_14"),
+        pl.when(pl.col("_smooth_tr") > _EPS)
+        .then(pl.col("_smooth_minus_dm") / pl.col("_smooth_tr") * 100)
+        .otherwise(None)
+        .alias("minus_di_14"),
     ])
     bars = bars.with_columns(
         ((pl.col("plus_di_14") - pl.col("minus_di_14")).abs()
@@ -237,9 +255,17 @@ def compute_ohlcv_indicators(bars: pl.DataFrame) -> pl.DataFrame:
     bars = bars.with_columns(
         pl.col("_signed_vol").cum_sum().alias("_obv")
     )
+    bars = bars.with_columns([
+        (pl.col("_obv") - pl.col("_obv").shift(OBV_SLOPE_PERIOD)).alias("_obv_delta"),
+        pl.col("_signed_vol")
+        .abs()
+        .rolling_sum(window_size=OBV_SLOPE_PERIOD, min_samples=OBV_SLOPE_PERIOD)
+        .alias("_obv_abs_flow"),
+    ])
     bars = bars.with_columns(
-        ((pl.col("_obv") - pl.col("_obv").shift(OBV_SLOPE_PERIOD))
-         / (pl.col("_obv").abs() + pl.col("_obv").shift(OBV_SLOPE_PERIOD).abs() + _EPS))
+        pl.when(pl.col("_obv_abs_flow") > _EPS)
+        .then(pl.col("_obv_delta") / pl.col("_obv_abs_flow"))
+        .otherwise(0.0)
         .alias("obv_slope_14")
     )
 

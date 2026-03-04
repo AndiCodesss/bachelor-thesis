@@ -7,6 +7,8 @@ Features designed for volume/tick bars where bar_duration varies:
 """
 import polars as pl
 
+from src.framework.data.constants import TICK_SIZE
+
 
 # Rolling windows for scalping features
 DIVERGENCE_WINDOW = 10
@@ -15,6 +17,7 @@ INTENSITY_SPIKE_THRESHOLD = 2.5
 ABSORPTION_VOL_QUANTILE = 0.90
 ABSORPTION_RANGE_QUANTILE = 0.20
 ABSORPTION_LOOKBACK = 24
+MIN_BAR_DURATION_SECONDS = 1.0
 
 
 def compute_scalping_features(bars: pl.DataFrame) -> pl.DataFrame:
@@ -69,8 +72,12 @@ def compute_scalping_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # --- Effort vs Result (absorption detection) ---
     # High volume trapped in small range = liquidity absorption
+    bar_range = (pl.col("high") - pl.col("low")).abs()
     result = result.with_columns(
-        (pl.col("volume").cast(pl.Float64) / (pl.col("high") - pl.col("low") + 1e-9))
+        (
+            pl.col("volume").cast(pl.Float64)
+            / pl.when(bar_range >= TICK_SIZE).then(bar_range).otherwise(TICK_SIZE)
+        )
         .alias("effort_vs_result"),
     )
 
@@ -112,8 +119,14 @@ def compute_scalping_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # --- Trade Intensity Z-Score (breakout trigger) ---
     # Intensity = trades per second (adapts to bar duration)
+    duration_seconds = pl.col("bar_duration_ns").cast(pl.Float64) / 1e9
     result = result.with_columns(
-        (pl.col("trade_count").cast(pl.Float64) / (pl.col("bar_duration_ns") / 1e9 + 1e-9))
+        (
+            pl.col("trade_count").cast(pl.Float64)
+            / pl.when(duration_seconds >= MIN_BAR_DURATION_SECONDS)
+            .then(duration_seconds)
+            .otherwise(MIN_BAR_DURATION_SECONDS)
+        )
         .alias("intensity"),
     )
 

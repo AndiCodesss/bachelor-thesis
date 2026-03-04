@@ -81,6 +81,8 @@ class TestVolumeProfileFeatures:
         highs = []
         lows = []
         volumes = []
+        vap_prices = []
+        vap_volumes = []
         base_price = 18000.0
 
         for bar in range(n_bars):
@@ -98,6 +100,8 @@ class TestVolumeProfileFeatures:
             highs.append(c + 1.0)
             lows.append(c - 1.0)
             volumes.append(max(1, int(10 + np.sin(bar) * 5)))
+            vap_prices.append([c - 0.25, c, c + 0.25])
+            vap_volumes.append([1, volumes[-1], 1])
 
         return pl.DataFrame({
             "ts_event": timestamps,
@@ -106,9 +110,13 @@ class TestVolumeProfileFeatures:
             "low": lows,
             "close": closes,
             "volume": volumes,
+            "vap_prices": vap_prices,
+            "vap_volumes": vap_volumes,
         }).with_columns(
             pl.col("ts_event").dt.replace_time_zone("UTC"),
             pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
         )
 
     def test_output_columns(self):
@@ -197,6 +205,49 @@ class TestVolumeProfileFeatures:
         pos = result["position_in_va"].to_numpy()
         assert not np.all(np.isnan(pos))
 
+    def test_position_in_va_defaults_to_half_when_value_area_unavailable(self):
+        bars = pl.DataFrame({
+            "ts_event": [
+                datetime(2024, 3, 15, 10, 0, 0),
+                datetime(2024, 3, 15, 10, 5, 0),
+            ],
+            "open": [100.0, 100.0],
+            "high": [101.0, 101.0],
+            "low": [99.0, 99.0],
+            "close": [100.0, 100.0],
+            "volume": [100, 100],
+            "vap_prices": [[], []],
+            "vap_volumes": [[], []],
+        }).with_columns(
+            pl.col("ts_event").dt.replace_time_zone("UTC"),
+            pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
+        )
+
+        result = compute_volume_profile_features(bars)
+        assert result["position_in_va"][0] == 0.5
+        assert result["position_in_va"][1] == 0.5
+
+    def test_bars_since_breakout_starts_at_zero(self):
+        bars = self._make_multi_bar_data(n_bars=30)
+        closes = [18000.0] * 12 + [18010.0 + i for i in range(18)]
+        bars = bars.with_columns([
+            pl.Series("close", closes),
+            pl.Series("open", [c - 0.5 for c in closes]),
+            pl.Series("high", [c + 1.0 for c in closes]),
+            pl.Series("low", [c - 1.0 for c in closes]),
+            pl.Series("vap_prices", [[c - 0.25, c, c + 0.25] for c in closes]),
+            pl.Series("vap_volumes", [[1, 100, 1] for _ in closes]),
+        ])
+
+        result = compute_volume_profile_features(bars)
+        bars_since = result["bars_since_breakout"].to_numpy()
+        valid = bars_since[~np.isnan(bars_since)]
+
+        assert len(valid) > 0
+        assert valid[0] == 0.0
+
     def test_poc_distance_sign(self):
         """POC distance positive when close > POC."""
         # Heavy volume at 18000, close at 18010
@@ -220,9 +271,13 @@ class TestVolumeProfileFeatures:
             "low": [c - 1.0 for c in closes],
             "close": closes,
             "volume": volumes,
+            "vap_prices": [[c] for c in closes],
+            "vap_volumes": [[v] for v in volumes],
         }).with_columns(
             pl.col("ts_event").dt.replace_time_zone("UTC"),
             pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
         )
 
         result = compute_volume_profile_features(bars)
@@ -262,9 +317,13 @@ class TestVolumeProfileFeatures:
             "low": [c - 1.0 for c in closes],
             "close": closes,
             "volume": volumes,
+            "vap_prices": [[c] for c in closes],
+            "vap_volumes": [[v] for v in volumes],
         }).with_columns(
             pl.col("ts_event").dt.replace_time_zone("UTC"),
             pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
         )
 
         result = compute_volume_profile_features(bars)
@@ -300,6 +359,27 @@ class TestVolumeProfileFeatures:
         assert result["poc_price"][0] == 101.0
         assert result["poc_price"][1] == 101.0
         assert result["rolling_poc"][1] == 101.0
+
+    def test_missing_vap_returns_nan_profile_features(self):
+        """Without VAP columns, profile features should remain undefined (NaN)."""
+        bars = pl.DataFrame({
+            "ts_event": [
+                datetime(2024, 3, 15, 10, 0, 0),
+                datetime(2024, 3, 15, 10, 5, 0),
+            ],
+            "open": [100.0, 100.5],
+            "high": [101.0, 101.5],
+            "low": [99.5, 100.0],
+            "close": [100.2, 100.8],
+            "volume": [100, 120],
+        }).with_columns(
+            pl.col("ts_event").dt.replace_time_zone("UTC"),
+            pl.col("volume").cast(pl.UInt32),
+        )
+        result = compute_volume_profile_features(bars)
+        assert np.isnan(result["poc_price"][0])
+        assert np.isnan(result["rolling_poc"][1])
+        assert np.isnan(result["poc_distance"][0])
 
     def test_bar_count_preserved(self):
         bars = self._make_multi_bar_data(n_bars=12)
@@ -375,6 +455,8 @@ class TestVolumeProfileLvnFeatures:
         highs = []
         lows = []
         volumes = []
+        vap_prices = []
+        vap_volumes = []
 
         for i in range(n_bars):
             ts = datetime(2024, 3, 15, 10 + i // 12, (i * 5) % 60, 0)
@@ -394,6 +476,8 @@ class TestVolumeProfileLvnFeatures:
             highs.append(c + 1.0)
             lows.append(c - 1.0)
             volumes.append(v)
+            vap_prices.append([c - 0.25, c, c + 0.25])
+            vap_volumes.append([1, v, 1])
 
         return pl.DataFrame({
             "ts_event": timestamps,
@@ -402,9 +486,13 @@ class TestVolumeProfileLvnFeatures:
             "low": lows,
             "close": closes,
             "volume": volumes,
+            "vap_prices": vap_prices,
+            "vap_volumes": vap_volumes,
         }).with_columns(
             pl.col("ts_event").dt.replace_time_zone("UTC"),
             pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
         )
 
     def test_rolling_lvn_count_column(self):

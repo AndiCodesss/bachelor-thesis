@@ -112,11 +112,13 @@ def _build_bar_vap_inputs(bars: pl.DataFrame) -> tuple[list[np.ndarray], list[np
     Prefers true traded VAP lists from bars.py footprint pass:
     - vap_prices: list of price levels traded in bar
     - vap_volumes: list of executed volume at each level
-
-    Falls back to bar close + volume (legacy approximation) if VAP lists
-    are not available.
     """
     has_vap = "vap_prices" in bars.columns and "vap_volumes" in bars.columns
+
+    if not has_vap:
+        empty_prices = [np.array([], dtype=np.float64) for _ in range(len(bars))]
+        empty_sizes = [np.array([], dtype=np.float64) for _ in range(len(bars))]
+        return empty_prices, empty_sizes
 
     if has_vap:
         raw_prices = bars["vap_prices"].to_list()
@@ -128,12 +130,6 @@ def _build_bar_vap_inputs(bars: pl.DataFrame) -> tuple[list[np.ndarray], list[np
             prices_per_bar.append(p_arr)
             sizes_per_bar.append(s_arr)
         return prices_per_bar, sizes_per_bar
-
-    closes = bars["close"].to_numpy().astype(np.float64)
-    volumes = bars["volume"].to_numpy().astype(np.float64)
-    prices_per_bar = [np.array([closes[i]], dtype=np.float64) for i in range(len(bars))]
-    sizes_per_bar = [np.array([max(volumes[i], 0.0)], dtype=np.float64) for i in range(len(bars))]
-    return prices_per_bar, sizes_per_bar
 
 
 def _concat_bar_vap_window(
@@ -197,45 +193,39 @@ def _compute_swing_vp_features(
                 breakout_start = i
                 bars_count = 0
 
-        if cur_dir != 0 and breakout_start >= 0:
-            bars_count += 1
-
         breakout_dir[i] = float(cur_dir)
 
         if cur_dir == 0 or breakout_start < 0:
             continue
 
         bars_since[i] = float(bars_count)
+        if bars_count <= max_swing_bars:
+            prices, sizes = _concat_bar_vap_window(
+                prices_per_bar, sizes_per_bar, breakout_start, i + 1,
+            )
+            if len(prices) > 0:
+                prof = _compute_profile(prices, sizes)
+                cur_close = close[i]
+                cur_atr = safe_atr[i]
 
-        if bars_count > max_swing_bars:
-            continue
+                if not np.isnan(prof["poc"]):
+                    swing_poc_dist[i] = (cur_close - prof["poc"]) / cur_atr
 
-        prices, sizes = _concat_bar_vap_window(
-            prices_per_bar, sizes_per_bar, breakout_start, i + 1,
-        )
-        if len(prices) == 0:
-            continue
+                lvn_prices = prof["lvn_prices"]
+                if len(lvn_prices) > 0:
+                    swing_lvn_dist[i] = np.abs(cur_close - lvn_prices).min() / cur_atr
 
-        prof = _compute_profile(prices, sizes)
-        cur_close = close[i]
-        cur_atr = safe_atr[i]
+                hvn_prices = prof["hvn_prices"]
+                if len(hvn_prices) > 0:
+                    swing_hvn_dist[i] = np.abs(cur_close - hvn_prices).min() / cur_atr
 
-        if not np.isnan(prof["poc"]):
-            swing_poc_dist[i] = (cur_close - prof["poc"]) / cur_atr
+                va_range = prof["va_high"] - prof["va_low"]
+                if va_range > 1e-9:
+                    swing_va_position[i] = (cur_close - prof["va_low"]) / va_range
+                elif not np.isnan(prof["va_low"]):
+                    swing_va_position[i] = 0.5
 
-        lvn_prices = prof["lvn_prices"]
-        if len(lvn_prices) > 0:
-            swing_lvn_dist[i] = np.abs(cur_close - lvn_prices).min() / cur_atr
-
-        hvn_prices = prof["hvn_prices"]
-        if len(hvn_prices) > 0:
-            swing_hvn_dist[i] = np.abs(cur_close - hvn_prices).min() / cur_atr
-
-        va_range = prof["va_high"] - prof["va_low"]
-        if va_range > 1e-9:
-            swing_va_position[i] = (cur_close - prof["va_low"]) / va_range
-        elif not np.isnan(prof["va_low"]):
-            swing_va_position[i] = 0.5
+        bars_count += 1
 
     return {
         "swing_poc_dist": swing_poc_dist,
@@ -253,15 +243,17 @@ def compute_volume_profile_features(bars: pl.DataFrame) -> pl.DataFrame:
     Expects bars with columns: ts_event, open, high, low, close, volume.
     If bars also include `vap_prices` and `vap_volumes` (from bars.py),
     profiles are built from true executed traded volume-at-price.
-    Otherwise falls back to bar close + bar volume approximation.
     """
     if len(bars) == 0:
         return _empty_result()
 
     select_cols = ["ts_event", "open", "high", "low", "close", "volume"]
-    if "vap_prices" in bars.columns and "vap_volumes" in bars.columns:
+    has_true_vap = "vap_prices" in bars.columns and "vap_volumes" in bars.columns
+    if has_true_vap:
         select_cols.extend(["vap_prices", "vap_volumes"])
     bars = bars.select(select_cols).sort("ts_event")
+    if not has_true_vap:
+        return _nan_result_missing_vap(bars["ts_event"])
 
     # True Range for ATR (14-bar rolling)
     bars = bars.with_columns([
@@ -328,9 +320,9 @@ def compute_volume_profile_features(bars: pl.DataFrame) -> pl.DataFrame:
     poc_distance = poc_distance_raw / safe_atr
     va_width = (session_va_high - session_va_low) / np.where(close == 0, 1e-9, close)
     va_range = session_va_high - session_va_low
-    safe_va_range = np.where(va_range < 1e-9, 1e-9, va_range)
+    safe_va_range = np.where(np.isnan(va_range) | (va_range < 1e-9), 1e-9, va_range)
     position_in_va = np.where(
-        va_range < 1e-9, 0.5,
+        np.isnan(va_range) | (va_range < 1e-9), 0.5,
         (close - session_va_low) / safe_va_range,
     )
 
@@ -495,3 +487,20 @@ def _empty_result() -> pl.DataFrame:
         "bars_since_breakout": pl.Float64,
     }
     return pl.DataFrame(schema=schema)
+
+
+def _nan_result_missing_vap(ts_event: pl.Series) -> pl.DataFrame:
+    """Return schema-correct NaN features when true VAP data is unavailable."""
+    template = _empty_result()
+    n_rows = len(ts_event)
+    data: dict[str, pl.Series | np.ndarray] = {"ts_event": ts_event}
+    for col, dtype in template.schema.items():
+        if col == "ts_event":
+            continue
+        if dtype == pl.Int32:
+            data[col] = np.zeros(n_rows, dtype=np.int32)
+        else:
+            data[col] = np.full(n_rows, np.nan, dtype=np.float64)
+
+    result = pl.DataFrame(data)
+    return result.with_columns(pl.col("ts_event").cast(pl.Datetime("ns", "UTC")))

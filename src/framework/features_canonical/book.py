@@ -14,7 +14,10 @@ def compute_book_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     bars = bars.with_columns([
         # Spread in basis points: normalized spread for cross-session comparison
-        (pl.col("spread") / pl.col("mid_price") * 10000.0).alias("spread_bps"),
+        pl.when(pl.col("mid_price").abs() > 1e-12)
+        .then(pl.col("spread") / pl.col("mid_price") * 10000.0)
+        .otherwise(None)
+        .alias("spread_bps"),
 
         # Book imbalance: bid-heavy book predicts upward pressure
         ((pl.col("bid_size").cast(pl.Int64) - pl.col("ask_size").cast(pl.Int64)) /
@@ -28,6 +31,7 @@ def compute_book_features(bars: pl.DataFrame) -> pl.DataFrame:
     bars = bars.sort("ts_event")
 
     # Add rolling features (look backward only)
+    prev_mid = pl.col("mid_price").shift(1)
     bars = bars.with_columns([
         # Smoothed directional pressure signal
         pl.col("book_imbalance").rolling_mean(window_size=5, min_samples=1).alias("book_imbalance_ma5"),
@@ -35,8 +39,11 @@ def compute_book_features(bars: pl.DataFrame) -> pl.DataFrame:
         # Increasing spread vol signals regime change
         pl.col("spread").rolling_std(window_size=5, min_samples=1).alias("spread_volatility"),
 
-        # Bar-to-bar return
-        pl.col("mid_price").pct_change().alias("mid_price_return"),
+        # Bar-to-bar return with explicit zero guard on prior mid-price.
+        pl.when(prev_mid > 0)
+        .then((pl.col("mid_price") - prev_mid) / prev_mid)
+        .otherwise(None)
+        .alias("mid_price_return"),
     ])
 
     # Short-term momentum: rolling 5-bar sum of returns

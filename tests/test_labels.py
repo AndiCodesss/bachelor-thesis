@@ -1,6 +1,7 @@
 """Tests for forward return label computation."""
 
 import polars as pl
+import pytest
 from datetime import datetime, timedelta
 from src.framework.features_canonical.labels import compute_labels
 
@@ -52,6 +53,17 @@ def test_forward_returns_known_values():
     assert abs(actual_fwd_1_bar5 - expected_fwd_1_bar5) < 0.0001
 
 
+def test_forward_returns_null_when_close_is_zero():
+    timestamps = [
+        datetime(2024, 7, 15, 14, 0, 0),
+        datetime(2024, 7, 15, 14, 5, 0),
+    ]
+    bars = _make_bars(timestamps, [0.0, 1.0])
+    result = compute_labels(bars)
+
+    assert result["fwd_return_1bar"][0] is None
+
+
 def test_classification_labels():
     """Test that classification labels match forward return sign."""
     timestamps = [datetime(2024, 7, 15, 14, i * 5, 0) for i in range(6)]
@@ -100,6 +112,7 @@ def test_last_bars_have_null_forward_returns():
     assert result["fwd_return_1bar"][0] is not None
 
 
+@pytest.mark.slow
 def test_real_data_not_empty():
     """Test labels computation on real data sample."""
     from src.framework.data.loader import get_parquet_files, filter_rth

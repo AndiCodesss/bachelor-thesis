@@ -2,6 +2,7 @@
 
 import numpy as np
 import polars as pl
+import pytest
 from datetime import datetime, timedelta
 from src.framework.features_canonical.statistical import (
     compute_statistical_features,
@@ -95,6 +96,18 @@ def test_apply_fracdiff_known_series():
     assert abs(valid[0] - expected) < 1e-10
 
 
+def test_fracdiff_close_uses_positive_price_guard():
+    """Non-positive close should null-out fracdiff windows that include it."""
+    n = 80
+    ts = _ts_seq(n, step_minutes=1)
+    closes = [100.0] * n
+    closes[55] = 0.0
+    bars = _make_bars(ts, closes)
+
+    result = compute_statistical_features(bars)
+    assert np.isnan(result["fracdiff_close"][55])
+
+
 # --------------- log_return ---------------
 
 def test_log_return_known_values():
@@ -111,6 +124,26 @@ def test_log_return_known_values():
     assert abs(result["log_return"][1] - expected_1) < 1e-6
     expected_2 = np.log(100.0 / 105.0)
     assert abs(result["log_return"][2] - expected_2) < 1e-6
+
+
+def test_log_return_handles_non_positive_prices():
+    """Non-positive prices should not raise and should yield null log features."""
+    ts = [
+        datetime(2024, 7, 15, 14, 0, 0),
+        datetime(2024, 7, 15, 14, 5, 0),
+        datetime(2024, 7, 15, 14, 10, 0),
+    ]
+    bars = _make_bars(
+        ts,
+        prices=[100.0, 0.0, 101.0],
+        opens=[100.0, 0.0, 101.0],
+        highs=[100.5, 0.1, 101.5],
+        lows=[99.5, 0.0, 100.5],
+    )
+    result = compute_statistical_features(bars)
+
+    assert result["log_return"][1] is None
+    assert result["log_return"][2] is None
 
 
 # --------------- Yang-Zhang volatility ---------------
@@ -214,6 +247,18 @@ def test_vwap_deviation_resets_daily():
     assert abs(result["vwap_deviation"][2]) < 0.01
 
 
+def test_vwap_deviation_null_when_cumulative_volume_is_zero():
+    ts = [
+        datetime(2024, 7, 15, 14, 0, 0),
+        datetime(2024, 7, 15, 14, 5, 0),
+    ]
+    bars = _make_bars(ts, [100.0, 110.0], volumes=[0, 10], vwaps=[100.0, 110.0])
+    result = compute_statistical_features(bars)
+
+    assert result["vwap_deviation"][0] is None
+    assert abs(result["vwap_deviation"][1]) < 1e-9
+
+
 # --------------- vwap_dev_zscore ---------------
 
 def test_vwap_dev_zscore_exists():
@@ -305,6 +350,7 @@ def test_row_count_preserved():
 
 # --------------- integration with real data ---------------
 
+@pytest.mark.slow
 def test_real_data_smoke():
     from src.framework.data.loader import get_parquet_files, filter_rth
     from src.framework.data.bars import aggregate_time_bars
@@ -324,6 +370,7 @@ def test_real_data_smoke():
     assert len(valid_fracdiff) > 0
 
 
+@pytest.mark.slow
 def test_real_data_sorted():
     from src.framework.data.loader import get_parquet_files, filter_rth
     from src.framework.data.bars import aggregate_time_bars

@@ -9,6 +9,7 @@ from src.framework.features_canonical.builder import build_feature_matrix, get_f
 from src.framework.data.loader import get_parquet_files
 
 
+@pytest.mark.slow
 def test_build_feature_matrix_columns():
     """Verify feature matrix contains expected columns from all modules."""
     # Load single file
@@ -50,7 +51,16 @@ def test_build_feature_matrix_columns():
     for col in LABEL_COLUMNS:
         assert col in result.columns, f"Missing label column: {col}"
 
+    # Value-sanity checks (not just schema checks)
+    assert result["spread"].min() >= 0.0, "Spread must be non-negative"
+    assert (result["volume_imbalance"].abs() <= 1.0).all(), "volume_imbalance must be within [-1, 1]"
+    assert (result["book_imbalance"].abs() <= 1.0).all(), "book_imbalance must be within [-1, 1]"
+    for col in LABEL_COLUMNS:
+        non_finite = result.filter(~pl.col(col).is_finite()).height
+        assert non_finite == 0, f"Label '{col}' contains non-finite values"
 
+
+@pytest.mark.slow
 def test_build_feature_matrix_no_label_nulls():
     """Verify no null values in label columns after build."""
     files = get_parquet_files("train")
@@ -64,6 +74,7 @@ def test_build_feature_matrix_no_label_nulls():
         assert null_count == 0, f"Label column '{label_col}' has {null_count} nulls"
 
 
+@pytest.mark.slow
 def test_build_feature_matrix_sorted():
     """Verify output is sorted by timestamp."""
     files = get_parquet_files("train")
@@ -75,6 +86,7 @@ def test_build_feature_matrix_sorted():
     assert timestamps == sorted(timestamps), "Feature matrix not sorted by ts_event"
 
 
+@pytest.mark.slow
 def test_get_feature_columns():
     """Verify get_feature_columns returns correct list."""
     files = get_parquet_files("train")
@@ -96,6 +108,7 @@ def test_get_feature_columns():
         assert col in feature_cols_df, f"Expected feature '{col}' not in list"
 
 
+@pytest.mark.slow
 def test_get_feature_columns_no_labels():
     """Verify labels are excluded from feature columns."""
     files = get_parquet_files("train")
@@ -248,6 +261,7 @@ def test_build_feature_matrix_include_bar_columns_synthetic():
 
 
 
+@pytest.mark.slow
 def test_build_feature_matrix_real_data_end_to_end():
     """End-to-end test with real data from train split."""
     files = get_parquet_files("train")
@@ -294,6 +308,7 @@ def test_build_feature_matrix_real_data_end_to_end():
     assert len(remaining) == 0, f"Unexpected remaining columns: {remaining}"
 
 
+@pytest.mark.slow
 def test_build_feature_matrix_no_feature_nulls():
     """Verify no null values in feature columns after warmup."""
     files = get_parquet_files("train")
@@ -341,6 +356,7 @@ def test_build_feature_matrix_no_feature_nulls():
         "stoch_k_14", "stoch_d_14",
         "adx_14", "plus_di_14", "minus_di_14",
         "obv_slope_14",
+        "vpin_zscore",
     }
     for col in feature_cols:
         if col in nullable_features:
@@ -352,6 +368,7 @@ def test_build_feature_matrix_no_feature_nulls():
         assert null_count == 0, f"Feature '{col}' has {null_count} nulls"
 
 
+@pytest.mark.slow
 def test_build_feature_matrix_no_infinities():
     """Verify no infinite values in any feature column."""
     files = get_parquet_files("train")
@@ -366,6 +383,7 @@ def test_build_feature_matrix_no_infinities():
             assert inf_count == 0, f"Feature '{col}' has {inf_count} infinite values"
 
 
+@pytest.mark.slow
 def test_raw_prices_excluded_from_features():
     """Verify raw non-stationary prices are not in feature columns."""
     files = get_parquet_files("train")
@@ -379,6 +397,7 @@ def test_raw_prices_excluded_from_features():
         assert col not in feature_cols, f"Raw price '{col}' should not be a feature"
 
 
+@pytest.mark.slow
 def test_session_vp_excluded_from_features():
     """Verify session-level VP features (lookahead) are excluded from feature columns."""
     files = get_parquet_files("train")
@@ -543,3 +562,48 @@ def test_load_cached_matrix_rebuilds_stale_cache_for_include_bar_columns(
     }
     missing = required - set(returned.columns)
     assert not missing, f"Rebuilt output missing required bar columns: {sorted(missing)}"
+
+
+def test_load_or_build_bars_returns_standardized_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Raw-build path must return same schema as cache-read path (_BAR_COLUMNS only)."""
+    raw_path = tmp_path / "nq_2024-01-15.parquet"
+    bars_cache_dir = tmp_path / "bars_cache"
+
+    row: dict[str, list] = {}
+    for col in builder_mod._BAR_COLUMNS:
+        if col in {"ts_event", "ts_close"}:
+            row[col] = [datetime(2024, 1, 15, 14, 0, 0)]
+        elif col in {"open", "high", "low", "close", "vwap", "bid_price", "ask_price", "latency_mean"}:
+            row[col] = [100.0]
+        elif col == "vap_prices":
+            row[col] = [[100.0]]
+        elif col == "vap_volumes":
+            row[col] = [[1]]
+        else:
+            row[col] = [1]
+
+    built = pl.DataFrame(row).with_columns([
+        pl.col("ts_event").dt.replace_time_zone("UTC"),
+        pl.col("ts_close").dt.replace_time_zone("UTC"),
+        pl.lit(999).alias("unexpected_col"),
+    ])
+
+    monkeypatch.setattr(builder_mod, "_build_bars_from_raw", lambda *args, **kwargs: built)
+
+    result = builder_mod._load_or_build_bars(
+        raw_path=raw_path,
+        bars_cache_dir=bars_cache_dir,
+        bar_size="5m",
+        bar_type="time",
+        bar_threshold=None,
+        session_fn=lambda lf: lf,
+    )
+
+    assert result.columns == builder_mod._BAR_COLUMNS
+    assert "unexpected_col" not in result.columns
+
+    cached = pl.read_parquet(bars_cache_dir / raw_path.name)
+    assert cached.columns == builder_mod._BAR_COLUMNS

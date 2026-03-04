@@ -1,6 +1,7 @@
 """Tests for orderflow feature computation."""
 
 import polars as pl
+import pytest
 from datetime import datetime
 from src.framework.features_canonical.orderflow import compute_orderflow_features
 from src.framework.data.bars import aggregate_time_bars
@@ -39,6 +40,7 @@ def _make_bars(rows):
     }).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
 
 
+@pytest.mark.slow
 def test_orderflow_features_shape():
     """Verify feature computation returns expected columns."""
     files = get_parquet_files("train")
@@ -66,6 +68,7 @@ def test_orderflow_features_shape():
         assert col in result.columns, f"Expected column '{col}' not found"
 
 
+@pytest.mark.slow
 def test_orderflow_no_nulls():
     """Verify no null values in computed features."""
     files = get_parquet_files("train")
@@ -132,6 +135,30 @@ def test_orderflow_synthetic_known_answer():
     assert bar2["order_flow_imbalance"] == 10
 
 
+def test_orderflow_resets_rolls_and_shifts_at_day_boundary():
+    """Rolling/shift features must not leak previous day values into next session."""
+    bars = _make_bars([
+        {"ts_event": datetime(2024, 7, 15, 13, 30, 0), "trade_count": 10,
+         "buy_volume": 0, "sell_volume": 100, "large_trade_count": 1, "volume": 100},
+        {"ts_event": datetime(2024, 7, 15, 13, 35, 0), "trade_count": 10,
+         "buy_volume": 0, "sell_volume": 100, "large_trade_count": 1, "volume": 100},
+        {"ts_event": datetime(2024, 7, 15, 13, 40, 0), "trade_count": 10,
+         "buy_volume": 0, "sell_volume": 100, "large_trade_count": 1, "volume": 100},
+        {"ts_event": datetime(2024, 7, 16, 13, 30, 0), "trade_count": 10,
+         "buy_volume": 100, "sell_volume": 0, "large_trade_count": 1, "volume": 100},
+    ]).with_columns([
+        pl.Series("close", [100.0, 99.0, 98.0, 101.0]),
+    ])
+
+    result = compute_orderflow_features(bars)
+
+    # First bar of day 2 should only use day-2 delta (no prior-day rolling bleed).
+    assert result["order_flow_imbalance"][3] == 100
+    # shift(3) should reset per day, so divergence lookback is unavailable on first bar.
+    assert result["cvd_price_divergence_3"][3] == 0.0
+
+
+@pytest.mark.slow
 def test_orderflow_volume_imbalance_range():
     """Verify volume_imbalance stays within [-1, 1] range."""
     files = get_parquet_files("train")
@@ -147,6 +174,7 @@ def test_orderflow_volume_imbalance_range():
     assert max_imb <= 1.0, f"volume_imbalance above 1: {max_imb}"
 
 
+@pytest.mark.slow
 def test_orderflow_features_sorted():
     """Verify output is sorted by timestamp."""
     files = get_parquet_files("train")
@@ -191,7 +219,7 @@ def test_cvd_price_divergence_known_answer():
 
 
 def test_absorption_factor_known_answer():
-    """Absorption factor = volume * abs(delta) / (range/TICK_SIZE + 1)."""
+    """Absorption factor = volume * abs(delta) / (rounded_ticks + 1)."""
     bars = _make_bars([{
         "ts_event": datetime(2024, 7, 15, 13, 30, 0),
         "trade_count": 10,
@@ -209,10 +237,31 @@ def test_absorption_factor_known_answer():
     result = compute_orderflow_features(bars)
     row = result.row(0, named=True)
 
-    # absorption_factor = 100 * 40 / (2.0 / 0.25 + 1) = 4000 / 9 = 444.44
-    expected = 100.0 * 40.0 / (2.0 / 0.25 + 1)
+    # range_ticks = round(2.0 / 0.25) = 8 -> 100 * 40 / (8 + 1) = 444.44
+    expected = 100.0 * 40.0 / 9.0
     assert abs(row["absorption_factor"] - expected) < 0.01, \
         f"absorption_factor {row['absorption_factor']} != {expected}"
+
+
+def test_absorption_factor_rounds_fractional_tick_range():
+    """Fractional bar range should be quantized to integer ticks before scaling."""
+    bars = _make_bars([{
+        "ts_event": datetime(2024, 7, 15, 13, 30, 0),
+        "trade_count": 10,
+        "buy_volume": 80,
+        "sell_volume": 20,
+        "large_trade_count": 1,
+        "volume": 100,
+    }]).with_columns([
+        # range = 2.13 => 2.13 / 0.25 = 8.52 ticks -> round => 9 ticks
+        pl.lit(101.13).alias("high"),
+        pl.lit(99.00).alias("low"),
+    ])
+
+    result = compute_orderflow_features(bars)
+    row = result.row(0, named=True)
+    expected = 100.0 * 60.0 / 10.0
+    assert abs(row["absorption_factor"] - expected) < 0.01
 
 
 def test_orderflow_ratio_known_answer():

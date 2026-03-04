@@ -512,7 +512,7 @@ def _load_or_build_bars(
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     bars.select(_BAR_COLUMNS).write_parquet(cache_path)
-    return bars
+    return bars.select(_BAR_COLUMNS)
 
 
 def _bar_cache_dir(

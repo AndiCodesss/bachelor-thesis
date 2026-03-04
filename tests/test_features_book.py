@@ -168,3 +168,27 @@ def test_compute_book_features_output_shape_preserved():
 
     result = compute_book_features(bars)
     assert len(result) == 6, f"Expected 6 bars, got {len(result)}"
+
+
+def test_mid_price_return_null_when_previous_mid_is_zero():
+    """pct_change guard: prior mid-price <= 0 should emit null, not inf."""
+    bars = _make_bars([
+        {"ts_event": datetime(2024, 1, 15, 10, 0, 0), "bid_price": 0.0, "ask_price": 0.0,
+         "bid_size": 10, "ask_size": 10, "bid_count": 2, "ask_count": 2},
+        {"ts_event": datetime(2024, 1, 15, 10, 5, 0), "bid_price": 100.0, "ask_price": 100.5,
+         "bid_size": 10, "ask_size": 10, "bid_count": 2, "ask_count": 2},
+        {"ts_event": datetime(2024, 1, 15, 10, 10, 0), "bid_price": 100.25, "ask_price": 100.75,
+         "bid_size": 10, "ask_size": 10, "bid_count": 2, "ask_count": 2},
+    ])
+    result = compute_book_features(bars)
+    assert result["mid_price_return"][1] is None
+    assert result["mid_price_return"][2] is not None
+
+
+def test_spread_bps_null_when_mid_price_is_zero():
+    bars = _make_bars([
+        {"ts_event": datetime(2024, 1, 15, 10, 0, 0), "bid_price": 0.0, "ask_price": 0.0,
+         "bid_size": 10, "ask_size": 10, "bid_count": 2, "ask_count": 2},
+    ])
+    result = compute_book_features(bars)
+    assert result["spread_bps"][0] is None

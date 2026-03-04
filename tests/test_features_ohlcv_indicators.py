@@ -148,6 +148,18 @@ def test_ema_ratio_constant_price():
             assert abs(last) < 1e-10, f"{col} should be 0 for constant price, got {last}"
 
 
+def test_sma_ema_ratios_null_when_moving_average_is_zero():
+    """Zero denominator in moving averages should emit null, not inf."""
+    n = 60
+    bars = _make_bars(_ts_seq(n), [0.0] * n)
+    result = compute_ohlcv_indicators(bars)
+
+    assert result["sma_ratio_8"][-1] is None
+    assert result["ema_ratio_8"][-1] is None
+    assert result.filter(pl.col("sma_ratio_8").is_infinite()).height == 0
+    assert result.filter(pl.col("ema_ratio_8").is_infinite()).height == 0
+
+
 def test_sma_ratio_uptrend():
     """In uptrend, close > SMA -> ratios positive."""
     n = 210
@@ -416,6 +428,20 @@ def test_adx_trending_market():
         assert last_adx > 25, f"ADX should be >25 in strong trend, got {last_adx}"
 
 
+def test_adx_flat_market_no_inf_or_nan():
+    """Flat OHLC should not emit non-finite DI/ADX values."""
+    n = 40
+    closes = [100.0] * n
+    bars = _make_bars(_ts_seq(n), closes, highs=closes, lows=closes)
+    result = compute_ohlcv_indicators(bars)
+
+    for col in ["adx_14", "plus_di_14", "minus_di_14"]:
+        valid = result.filter(pl.col(col).is_not_null())
+        if len(valid) > 0:
+            vals = valid[col]
+            assert vals.is_finite().all(), f"{col} contains non-finite values"
+
+
 # --------------- OBV ---------------
 
 def test_obv_slope_constant_price():
@@ -441,3 +467,16 @@ def test_obv_slope_uptrend():
     if len(valid) > 0:
         last = valid["obv_slope_14"][-1]
         assert last > 0, f"OBV slope should be positive in uptrend, got {last}"
+
+
+def test_obv_slope_scale_invariant_directional_flow():
+    """Sustained one-sided flow should stay near +1 regardless of OBV level."""
+    n = 60
+    closes = [100.0 + i for i in range(n)]
+    bars = _make_bars(_ts_seq(n), closes, volumes=[1000] * n)
+    result = compute_ohlcv_indicators(bars)
+
+    valid = result.filter(pl.col("obv_slope_14").is_not_null())
+    if len(valid) > 0:
+        tail = valid.tail(10)["obv_slope_14"]
+        assert (tail > 0.9).all(), "OBV slope should remain near +1 under persistent buy flow"

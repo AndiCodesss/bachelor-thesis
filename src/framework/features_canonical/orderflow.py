@@ -22,23 +22,26 @@ def compute_orderflow_features(bars: pl.DataFrame) -> pl.DataFrame:
         (pl.col("large_trade_count").cast(pl.Float64) / (pl.col("trade_count") + 1).cast(pl.Float64)).alias("large_trade_ratio"),
     ])
 
-    # Sort by timestamp for proper rolling operations
-    bars = bars.sort("ts_event")
+    # Sort by timestamp for proper rolling operations and derive session key
+    bars = bars.sort("ts_event").with_columns(
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
+    )
 
     # Rolling features
     bars = bars.with_columns([
         # Order flow imbalance: "Sustained one-sided flow indicates institutional activity"
         pl.col("volume_delta")
         .rolling_sum(window_size=5, min_samples=1)
+        .over("_date")
         .alias("order_flow_imbalance"),
     ])
 
     # --- CVD slope vs price slope divergence: "Flow-price disconnect signals exhaustion" ---
     bars = bars.with_columns([
-        pl.col("volume_delta").rolling_sum(window_size=3, min_samples=1).alias("_cvd_slope_3"),
-        pl.col("volume_delta").rolling_sum(window_size=6, min_samples=1).alias("_cvd_slope_6"),
-        (pl.col("close") - pl.col("close").shift(3)).alias("_price_slope_3"),
-        (pl.col("close") - pl.col("close").shift(6)).alias("_price_slope_6"),
+        pl.col("volume_delta").rolling_sum(window_size=3, min_samples=1).over("_date").alias("_cvd_slope_3"),
+        pl.col("volume_delta").rolling_sum(window_size=6, min_samples=1).over("_date").alias("_cvd_slope_6"),
+        (pl.col("close") - pl.col("close").shift(3).over("_date")).alias("_price_slope_3"),
+        (pl.col("close") - pl.col("close").shift(6).over("_date")).alias("_price_slope_6"),
     ])
 
     bars = bars.with_columns([
@@ -59,14 +62,23 @@ def compute_orderflow_features(bars: pl.DataFrame) -> pl.DataFrame:
     )
 
     bars = bars.with_columns(
-        (pl.col("volume").cast(pl.Float64) * pl.col("volume_delta").abs().cast(pl.Float64)
-         / (pl.col("_bar_range") / TICK_SIZE + 1)).alias("absorption_factor"),
+        (pl.col("_bar_range") / TICK_SIZE).round(0).clip(lower_bound=0.0).alias("_bar_range_ticks"),
+    )
+
+    bars = bars.with_columns(
+        (
+            pl.col("volume").cast(pl.Float64)
+            * pl.col("volume_delta").abs().cast(pl.Float64)
+            / (pl.col("_bar_range_ticks") + 1.0)
+        ).alias("absorption_factor"),
     )
 
     bars = bars.with_columns([
         pl.col("volume").cast(pl.Float64).rolling_quantile(0.9, window_size=12, min_samples=1)
+        .over("_date")
         .alias("_vol_90pct"),
         pl.col("_bar_range").rolling_quantile(0.2, window_size=12, min_samples=1)
+        .over("_date")
         .alias("_range_20pct"),
     ])
 

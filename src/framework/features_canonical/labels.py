@@ -26,15 +26,18 @@ def compute_labels(bars: pl.DataFrame) -> pl.DataFrame:
         })
 
     bars = bars.select(["ts_event", "close"]).sort("ts_event")
+    bars = bars.with_columns(
+        pl.when(pl.col("close").abs() > 1e-12).then(pl.col("close")).otherwise(None).alias("_close_safe"),
+    )
 
     # Compute forward returns by shifting close price backward (looking ahead)
     bars = bars.with_columns([
-        ((pl.col("close").shift(-1) - pl.col("close")) / pl.col("close")).alias("fwd_return_1bar"),
-        ((pl.col("close").shift(-3) - pl.col("close")) / pl.col("close")).alias("fwd_return_3bar"),
-        ((pl.col("close").shift(-5) - pl.col("close")) / pl.col("close")).alias("fwd_return_5bar"),
-        ((pl.col("close").shift(-6) - pl.col("close")) / pl.col("close")).alias("fwd_return_6bar"),
-        ((pl.col("close").shift(-10) - pl.col("close")) / pl.col("close")).alias("fwd_return_10bar"),
-        ((pl.col("close").shift(-12) - pl.col("close")) / pl.col("close")).alias("fwd_return_12bar"),
+        ((pl.col("close").shift(-1) - pl.col("close")) / pl.col("_close_safe")).alias("fwd_return_1bar"),
+        ((pl.col("close").shift(-3) - pl.col("close")) / pl.col("_close_safe")).alias("fwd_return_3bar"),
+        ((pl.col("close").shift(-5) - pl.col("close")) / pl.col("_close_safe")).alias("fwd_return_5bar"),
+        ((pl.col("close").shift(-6) - pl.col("close")) / pl.col("_close_safe")).alias("fwd_return_6bar"),
+        ((pl.col("close").shift(-10) - pl.col("close")) / pl.col("_close_safe")).alias("fwd_return_10bar"),
+        ((pl.col("close").shift(-12) - pl.col("close")) / pl.col("_close_safe")).alias("fwd_return_12bar"),
     ])
 
     # Null out forward returns that cross day boundaries (overnight gap poison)
@@ -58,7 +61,7 @@ def compute_labels(bars: pl.DataFrame) -> pl.DataFrame:
         pl.when(pl.col("_bars_remaining") >= 12).then(pl.col("fwd_return_12bar")).otherwise(None).alias("fwd_return_12bar"),
     ])
 
-    bars = bars.drop(["_date", "_day_len", "_day_pos", "_bars_remaining"])
+    bars = bars.drop(["_close_safe", "_date", "_day_len", "_day_pos", "_bars_remaining"])
 
     # Classification labels (binary: up=1, down=0)
     bars = bars.with_columns([

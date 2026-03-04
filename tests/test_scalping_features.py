@@ -1,7 +1,11 @@
 """Tests for scalping features."""
 import polars as pl
 from datetime import datetime
-from src.framework.features_canonical.scalping import compute_scalping_features
+from src.framework.features_canonical.scalping import (
+    compute_scalping_features,
+    MIN_BAR_DURATION_SECONDS,
+)
+from src.framework.data.constants import TICK_SIZE
 
 
 def _make_bars(n=20):
@@ -65,6 +69,24 @@ def test_effort_vs_result_known_answer():
     assert abs(evr - 2000.0) < 1.0
 
 
+def test_effort_vs_result_zero_range_uses_tick_floor():
+    bars = pl.DataFrame({
+        "ts_event": [datetime(2024, 7, 15, 13, 30, 0)],
+        "open": [15000.0],
+        "high": [15000.0],
+        "low": [15000.0],
+        "close": [15000.0],
+        "volume": [500],
+        "buy_volume": [300],
+        "sell_volume": [200],
+        "trade_count": [100],
+        "bar_duration_ns": [60_000_000_000],
+    }).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+
+    result = compute_scalping_features(bars)
+    assert abs(result["effort_vs_result"][0] - (500.0 / TICK_SIZE)) < 1e-9
+
+
 def test_intensity_known_answer():
     """100 trades in 60 seconds = 1.667 trades/sec."""
     bars = pl.DataFrame({
@@ -83,6 +105,24 @@ def test_intensity_known_answer():
     result = compute_scalping_features(bars)
     intensity = result["intensity"][0]
     assert abs(intensity - 100 / 60.0) < 0.01
+
+
+def test_intensity_zero_duration_is_capped():
+    bars = pl.DataFrame({
+        "ts_event": [datetime(2024, 7, 15, 13, 30, 0)],
+        "open": [15000.0],
+        "high": [15001.0],
+        "low": [14999.0],
+        "close": [15000.0],
+        "volume": [200],
+        "buy_volume": [100],
+        "sell_volume": [100],
+        "trade_count": [100],
+        "bar_duration_ns": [0],
+    }).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+
+    result = compute_scalping_features(bars)
+    assert result["intensity"][0] == 100.0 / MIN_BAR_DURATION_SECONDS
 
 
 def test_absorption_signal_detects_high_vol_low_range():

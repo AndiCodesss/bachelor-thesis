@@ -52,10 +52,12 @@ def compute_microstructure_v2_features(bars: pl.DataFrame) -> pl.DataFrame:
     ])
 
     # Feature: weighted_book_imbalance (Cao et al. 2009)
+    bid_weight = pl.col("bid_size").cast(pl.Float64) * pl.col("bid_count").cast(pl.Float64)
+    ask_weight = pl.col("ask_size").cast(pl.Float64) * pl.col("ask_count").cast(pl.Float64)
     bars = bars.with_columns([
         (
-            ((pl.col("bid_size") * pl.col("bid_count")) - (pl.col("ask_size") * pl.col("ask_count"))) /
-            ((pl.col("bid_size") * pl.col("bid_count")) + (pl.col("ask_size") * pl.col("ask_count")) + 1)
+            (bid_weight - ask_weight) /
+            (bid_weight + ask_weight + 1.0)
         ).alias("weighted_book_imbalance"),
     ])
 

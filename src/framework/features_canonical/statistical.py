@@ -61,23 +61,32 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
     # Use vwap from bars directly
     bars = bars.rename({"vwap": "_bar_vwap"})
 
+    # Guard logarithms from non-positive prices; keep downstream features null
+    # where log space is undefined.
+    bars = bars.with_columns([
+        pl.when(pl.col("open") > 0).then(pl.col("open")).otherwise(None).alias("_open_pos"),
+        pl.when(pl.col("high") > 0).then(pl.col("high")).otherwise(None).alias("_high_pos"),
+        pl.when(pl.col("low") > 0).then(pl.col("low")).otherwise(None).alias("_low_pos"),
+        pl.when(pl.col("close") > 0).then(pl.col("close")).otherwise(None).alias("_close_pos"),
+    ])
+
     # --- Log return ---
     bars = bars.with_columns(
-        (pl.col("close").log() - pl.col("close").shift(1).log()).alias("log_return"),
+        (pl.col("_close_pos").log() - pl.col("_close_pos").shift(1).log()).alias("log_return"),
     )
 
     # --- Yang-Zhang volatility components ---
     bars = bars.with_columns(
-        (pl.col("open").log() - pl.col("close").shift(1).log()).alias("_o_ret"),
+        (pl.col("_open_pos").log() - pl.col("_close_pos").shift(1).log()).alias("_o_ret"),
     )
     bars = bars.with_columns(
-        (pl.col("close").log() - pl.col("close").shift(1).log()).alias("_cc_ret"),
+        (pl.col("_close_pos").log() - pl.col("_close_pos").shift(1).log()).alias("_cc_ret"),
     )
 
     bars = bars.with_columns([
-        (pl.col("high").log() - pl.col("open").log()).alias("_h"),
-        (pl.col("low").log() - pl.col("open").log()).alias("_l"),
-        (pl.col("close").log() - pl.col("open").log()).alias("_c"),
+        (pl.col("_high_pos").log() - pl.col("_open_pos").log()).alias("_h"),
+        (pl.col("_low_pos").log() - pl.col("_open_pos").log()).alias("_l"),
+        (pl.col("_close_pos").log() - pl.col("_open_pos").log()).alias("_c"),
     ])
 
     bars = bars.with_columns(
@@ -136,7 +145,10 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
     ])
 
     bars = bars.with_columns(
-        (pl.col("_cum_pv") / pl.col("_cum_vol")).alias("_session_vwap"),
+        pl.when(pl.col("_cum_vol") > 0)
+        .then(pl.col("_cum_pv") / pl.col("_cum_vol"))
+        .otherwise(None)
+        .alias("_session_vwap"),
     )
 
     bars = bars.with_columns(
@@ -158,7 +170,7 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # --- Fracdiff (must collect for numpy convolution) ---
     weights = _fracdiff_weights(FRACDIFF_D, FRACDIFF_WINDOW)
-    close_arr = bars["close"].to_numpy().astype(np.float64)
+    close_arr = bars["_close_pos"].to_numpy().astype(np.float64)
     fracdiff_arr = _apply_fracdiff(close_arr, weights)
 
     bars = bars.with_columns(
