@@ -46,8 +46,8 @@ def test_ohlcv_columns_is_frozenset():
 
 
 def test_ohlcv_columns_count():
-    """Exactly 57 OHLCV feature columns."""
-    assert len(OHLCV_FEATURE_COLUMNS) == 57
+    """Exactly 56 OHLCV feature columns."""
+    assert len(OHLCV_FEATURE_COLUMNS) == 56
 
 
 def test_ohlcv_columns_no_overlap_with_non_features():
@@ -178,7 +178,7 @@ def test_ohlcv_columns_subset_of_real_features():
 
 
 def test_filter_ohlcv_real_data_column_count():
-    """Filtered real data should have exactly 57 OHLCV feature columns."""
+    """Filtered real data should have exactly 56 OHLCV feature columns."""
     from src.framework.api import get_split_files, load_cached_matrix
     from src.framework.features_canonical.builder import get_feature_columns
 
@@ -187,4 +187,4 @@ def test_filter_ohlcv_real_data_column_count():
     filtered = filter_feature_group(df, "ohlcv")
 
     feat_cols = get_feature_columns(filtered)
-    assert len(feat_cols) == 57, f"Expected 57 OHLCV features, got {len(feat_cols)}: {feat_cols}"
+    assert len(feat_cols) == 56, f"Expected 56 OHLCV features, got {len(feat_cols)}: {feat_cols}"

@@ -357,6 +357,29 @@ def test_drawdown_specific_sequence():
     assert metrics["max_drawdown_pct"] < 0.30
 
 
+def test_max_drawdown_pct_uses_local_peak_not_global_peak():
+    """Max drawdown % must use the peak that preceded the drawdown trough."""
+    base_time = datetime(2025, 2, 1, 10, 0, 0)
+    # Net PnL path: +10k, -30k, +140k
+    # Equity: 100k -> 110k -> 80k -> 220k
+    # Max drawdown: 30k from local peak 110k => 27.27%
+    trades = pl.DataFrame({
+        "entry_time": [base_time + timedelta(hours=i) for i in range(3)],
+        "exit_time": [base_time + timedelta(hours=i, minutes=30) for i in range(3)],
+        "entry_price": [18000.0, 18000.0, 18000.0],
+        "exit_price": [18500.0, 16500.0, 25000.0],  # +10k, -30k, +140k gross
+        "direction": [1, 1, 1],
+        "size": [1, 1, 1],
+    })
+
+    metrics = compute_metrics(trades, cost_override_col=None, initial_capital=100_000.0)
+
+    assert metrics["max_drawdown"] == pytest.approx(30_014.5, abs=1e-6)
+    local_peak = 100_000.0 + 10_000.0 - TOTAL_COST_RT
+    expected_pct = (30_014.5 / local_peak) * 100.0
+    assert metrics["max_drawdown_pct"] == pytest.approx(expected_pct, rel=1e-6)
+
+
 def test_identical_trades_sharpe():
     """Test with identical daily PnLs - std = 0, Sharpe should be NaN."""
     # Spread across 5 days, 1 identical trade per day → identical daily PnLs → std=0

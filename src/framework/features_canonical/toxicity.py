@@ -25,6 +25,9 @@ def compute_toxicity_features(bars: pl.DataFrame) -> pl.DataFrame:
         })
 
     result = bars.select(["ts_event", "buy_volume", "sell_volume"]).sort("ts_event")
+    result = result.with_columns(
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date")
+    )
 
     # Per-bar absolute imbalance normalized by total volume
     result = result.with_columns(
@@ -37,12 +40,13 @@ def compute_toxicity_features(bars: pl.DataFrame) -> pl.DataFrame:
     result = result.with_columns(
         pl.col("_abs_imbalance")
         .rolling_mean(window_size=VPIN_WINDOW, min_samples=1)
+        .over("_date")
         .alias("vpin")
     )
 
     # Z-score over lookback
     result = result.with_columns(
-        _zscore_expr("vpin", VPIN_ZSCORE_LOOKBACK).alias("vpin_zscore")
+        _zscore_expr("vpin", VPIN_ZSCORE_LOOKBACK, group_col="_date").alias("vpin_zscore")
     )
 
     # Risk-off flag
@@ -54,17 +58,20 @@ def compute_toxicity_features(bars: pl.DataFrame) -> pl.DataFrame:
         .alias("vpin_risk_off")
     )
 
-    result = result.drop(["buy_volume", "sell_volume", "_abs_imbalance"])
+    result = result.drop(["buy_volume", "sell_volume", "_abs_imbalance", "_date"])
 
     return result
 
 
-def _zscore_expr(col_name: str, lookback: int) -> pl.Expr:
+def _zscore_expr(col_name: str, lookback: int, group_col: str | None = None) -> pl.Expr:
     """Rolling z-score expression: (x - mean) / std over lookback window."""
     col = pl.col(col_name)
     min_samples = max(2, min(lookback, VPIN_ZSCORE_MIN_SAMPLES))
     mean = col.rolling_mean(window_size=lookback, min_samples=min_samples)
     std = col.rolling_std(window_size=lookback, min_samples=min_samples)
+    if group_col is not None:
+        mean = mean.over(group_col)
+        std = std.over(group_col)
     return (
         pl.when(std.is_null())
         .then(None)

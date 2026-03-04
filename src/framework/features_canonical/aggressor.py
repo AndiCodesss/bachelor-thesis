@@ -156,9 +156,11 @@ def compute_aggressor_features(bars: pl.DataFrame) -> pl.DataFrame:
     )
 
     # Relative intensity: current vs 24-bar average -- surges precede breakouts
+    intensity_ma = pl.col("trade_intensity").rolling_mean(window_size=24, min_samples=1).over("_date")
     bars = bars.with_columns(
-        (pl.col("trade_intensity")
-         / pl.col("trade_intensity").rolling_mean(window_size=24, min_samples=1))
+        pl.when(intensity_ma > 1e-12)
+        .then(pl.col("trade_intensity") / intensity_ma)
+        .otherwise(0.0)
         .alias("relative_intensity"),
     )
 

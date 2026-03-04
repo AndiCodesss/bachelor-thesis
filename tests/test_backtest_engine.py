@@ -183,7 +183,10 @@ def test_max_daily_loss_intrabar_enforced_with_hilo():
     start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
     timestamps = [start + timedelta(minutes=5 * i) for i in range(6)]
 
-    # Entry at 18100. Daily loss limit = $1000 -> 50 points -> stop level 18050.
+    # Entry at 18100. Daily loss limit = $1000 net.
+    # Engine reserves TOTAL_COST_RT for the closing trade:
+    # gross-loss budget = 1000 - 14.5 = 985.5 -> 197 ticks -> 49.25 points.
+    # stop level = 18100 - 49.25 = 18050.75
     closes = [18100.0, 18090.0, 18120.0, 18130.0, 18140.0, 18150.0]
     opens = [18100.0, 18100.0, 18110.0, 18120.0, 18130.0, 18140.0]
     highs = [18105.0, 18110.0, 18125.0, 18135.0, 18145.0, 18155.0]
@@ -198,7 +201,7 @@ def test_max_daily_loss_intrabar_enforced_with_hilo():
     assert trade["entry_time"] == timestamps[0]
     assert trade["exit_time"] == timestamps[1]
     assert trade["entry_price"] == 18100.0
-    assert trade["exit_price"] == 18050.0, "Exit should occur at daily loss guard price"
+    assert trade["exit_price"] == 18050.75, "Exit should reserve close-cost in loss guard"
 
 
 def test_max_daily_loss_close_fallback_without_hilo():
@@ -219,6 +222,25 @@ def test_max_daily_loss_close_fallback_without_hilo():
     assert trade["exit_time"] == timestamps[1]
     assert trade["entry_price"] == 18100.0
     assert trade["exit_price"] == 18040.0
+
+
+def test_max_daily_loss_close_fallback_reserves_closing_cost():
+    """Close-based daily-loss guard should include close-cost in threshold check."""
+    start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(4)]
+    # Bar 1 unrealized gross loss = -990 dollars (49.5 points).
+    # Net after close-cost would be -1004.5, which must trigger the guard.
+    closes = [18100.0, 18050.50, 18080.0, 18090.0]
+    signals = [1, 1, 1, 0]
+
+    df = create_test_df(timestamps, closes, signals)  # no high/low
+    trades = run_backtest(df, max_daily_loss=1000.0)
+
+    assert len(trades) == 1
+    trade = trades.row(0, named=True)
+    assert trade["entry_time"] == timestamps[0]
+    assert trade["exit_time"] == timestamps[1]
+    assert trade["exit_price"] == 18050.50
 
 
 def test_single_bar_trade():
@@ -828,3 +850,26 @@ def test_entry_on_next_open_pending_signal_expires_without_next_bar():
     df = create_test_df(timestamps, closes, signals, highs=highs, lows=lows, opens=opens)
     trades = run_backtest(df, entry_on_next_open=True)
     assert len(trades) == 0
+
+
+def test_default_mode_does_not_open_new_position_on_session_last_bar():
+    """entry_on_next_open=False must not open on the terminal bar and carry overnight."""
+    day1_start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+    day2_start = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+    timestamps = [
+        day1_start + timedelta(minutes=0),
+        day1_start + timedelta(minutes=5),
+        day1_start + timedelta(minutes=10),  # session last bar
+        day2_start + timedelta(minutes=0),
+        day2_start + timedelta(minutes=5),
+    ]
+    closes = [18000.0, 18005.0, 18010.0, 18100.0, 18105.0]
+    signals = [0, 0, 1, 1, 0]
+
+    df = create_test_df(timestamps, closes, signals)
+    trades = run_backtest(df, entry_on_next_open=False)
+
+    assert len(trades) == 1
+    trade = trades.row(0, named=True)
+    assert trade["entry_time"] == timestamps[3]
+    assert trade["entry_price"] == closes[3]

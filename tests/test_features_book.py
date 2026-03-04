@@ -80,8 +80,8 @@ def test_compute_book_features_synthetic():
     # depth_ratio = 4 / (3 + 1) = 1.0
     assert result["depth_ratio"][0] == 1.0
 
-    # mid_price_return: null for first bar
-    assert result["mid_price_return"][0] is None
+    # mid_price_return resets at session start
+    assert result["mid_price_return"][0] == 0.0
 
     # mid_price_return for bar 2: (101.75 - 100.75) / 100.75
     expected_return = (101.75 - 100.75) / 100.75
@@ -154,8 +154,8 @@ def test_compute_book_features_rolling_features_have_expected_nulls():
 
     assert result["book_imbalance_ma5"].null_count() == 0
     assert result["spread_volatility"].null_count() <= 1
-    assert result["mid_price_return"].null_count() == 1
-    assert result["mid_price_return_5"].null_count() == 1
+    assert result["mid_price_return"].null_count() == 0
+    assert result["mid_price_return_5"].null_count() == 0
 
 
 def test_compute_book_features_output_shape_preserved():
@@ -192,3 +192,20 @@ def test_spread_bps_null_when_mid_price_is_zero():
     ])
     result = compute_book_features(bars)
     assert result["spread_bps"][0] is None
+
+
+def test_mid_price_return_resets_at_day_boundary():
+    bars = _make_bars([
+        {"ts_event": datetime(2024, 1, 15, 15, 55, 0), "bid_price": 100.0, "ask_price": 100.5,
+         "bid_size": 10, "ask_size": 10, "bid_count": 2, "ask_count": 2},
+        {"ts_event": datetime(2024, 1, 15, 16, 0, 0), "bid_price": 101.0, "ask_price": 101.5,
+         "bid_size": 10, "ask_size": 10, "bid_count": 2, "ask_count": 2},
+        {"ts_event": datetime(2024, 1, 16, 9, 30, 0), "bid_price": 110.0, "ask_price": 110.5,
+         "bid_size": 10, "ask_size": 10, "bid_count": 2, "ask_count": 2},
+    ])
+    result = compute_book_features(bars)
+
+    assert result["mid_price_return"][0] == 0.0
+    assert result["mid_price_return"][1] != 0.0
+    # First bar of day 2 must reset to 0 instead of using prior-day mid.
+    assert result["mid_price_return"][2] == 0.0

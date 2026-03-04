@@ -320,6 +320,22 @@ class TestMTFEdgeCases:
         slope_cols = [c for c in result.columns if c.endswith("__slope")]
         assert len(slope_cols) > 0
 
+    def test_slope_single_row_group_returns_zero(self):
+        """Single-row aggregation windows should not emit inf/NaN slope."""
+        lf = _build_synthetic_lf(6)
+        result = compute_multi_timeframe_features(
+            lf,
+            bar_size="5m",
+            source_bar_size="1m",
+            agg_ops=["slope"],
+        )
+        slope_cols = [c for c in result.columns if c.endswith("__slope")]
+        assert slope_cols
+        for col in slope_cols:
+            vals = result[col].drop_nulls()
+            if len(vals) > 0:
+                assert vals.is_finite().all(), f"Non-finite slope in {col}"
+
     def test_output_sorted_by_timestamp(self):
         """Output bars should be sorted by ts_event."""
         lf = _build_synthetic_lf(12)

@@ -343,10 +343,12 @@ def test_build_feature_matrix_no_feature_nulls():
         # LVN/HVN distance: NaN when no HVN/LVN exists in rolling window
         "dist_nearest_hvn", "dist_nearest_lvn",
         # Swing VP: NaN when no breakout or no LVN/HVN in swing profile
-        "swing_poc_dist", "swing_lvn_dist", "swing_hvn_dist",
-        "swing_va_position", "bars_since_breakout",
-        # Accumulation: rolling_std warmup nulls
-        "range_compression", "range_compression_z",
+            "swing_poc_dist", "swing_lvn_dist", "swing_hvn_dist",
+            "swing_va_position", "bars_since_breakout",
+            # Footprint unfinished markers: null until first unfinished flag in session
+            "bars_since_unfinished_high", "bars_since_unfinished_low",
+            # Accumulation: rolling_std warmup nulls
+            "range_compression", "range_compression_z",
         # OHLCV indicators: rolling/ewm warmup nulls (SMA-200 needs 200 bars, etc.)
         "sma_ratio_8", "sma_ratio_21", "sma_ratio_50", "sma_ratio_200",
         "ema_ratio_8", "ema_ratio_21", "ema_ratio_50",
@@ -410,6 +412,19 @@ def test_session_vp_excluded_from_features():
     for col in SESSION_VP_COLUMNS:
         if col in result.columns:
             assert col not in feature_cols, f"Session VP '{col}' should not be a feature"
+
+
+@pytest.mark.slow
+def test_vwap_deviation_stat_excluded_from_features():
+    """Raw price-unit VWAP deviation must be excluded from ML feature columns."""
+    files = get_parquet_files("train")
+    lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
+
+    result = build_feature_matrix(lf, bar_size="5m")
+    feature_cols = get_feature_columns(result)
+
+    if "vwap_deviation_stat" in result.columns:
+        assert "vwap_deviation_stat" not in feature_cols
 
 
 def test_build_feature_matrix_tick_bars_synthetic():

@@ -29,18 +29,24 @@ def compute_book_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # Sort by timestamp to ensure proper rolling window calculations
     bars = bars.sort("ts_event")
+    bars = bars.with_columns(
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
+    )
 
     # Add rolling features (look backward only)
-    prev_mid = pl.col("mid_price").shift(1)
+    prev_mid = pl.col("mid_price").shift(1).over("_date")
+    idx = pl.int_range(pl.len()).over("_date")
     bars = bars.with_columns([
         # Smoothed directional pressure signal
-        pl.col("book_imbalance").rolling_mean(window_size=5, min_samples=1).alias("book_imbalance_ma5"),
+        pl.col("book_imbalance").rolling_mean(window_size=5, min_samples=1).over("_date").alias("book_imbalance_ma5"),
 
         # Increasing spread vol signals regime change
-        pl.col("spread").rolling_std(window_size=5, min_samples=1).alias("spread_volatility"),
+        pl.col("spread").rolling_std(window_size=5, min_samples=1).over("_date").fill_null(0.0).alias("spread_volatility"),
 
         # Bar-to-bar return with explicit zero guard on prior mid-price.
-        pl.when(prev_mid > 0)
+        pl.when(idx == 0)
+        .then(0.0)
+        .when(prev_mid > 0)
         .then((pl.col("mid_price") - prev_mid) / prev_mid)
         .otherwise(None)
         .alias("mid_price_return"),
@@ -48,7 +54,7 @@ def compute_book_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # Short-term momentum: rolling 5-bar sum of returns
     bars = bars.with_columns([
-        pl.col("mid_price_return").rolling_sum(window_size=5, min_samples=1).alias("mid_price_return_5"),
+        pl.col("mid_price_return").rolling_sum(window_size=5, min_samples=1).over("_date").alias("mid_price_return_5"),
     ])
 
     # Select final columns in logical order

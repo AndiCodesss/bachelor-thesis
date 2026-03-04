@@ -159,3 +159,23 @@ def test_no_intermediate_columns():
     forbidden = ["buy_volume", "sell_volume", "_abs_imbalance"]
     for col in forbidden:
         assert col not in result.columns, f"Intermediate column leaked: {col}"
+
+
+def test_vpin_resets_each_day():
+    day1 = _make_bars(
+        3,
+        buy_volumes=[1000, 1000, 1000],
+        sell_volumes=[0, 0, 0],
+        base_ts=datetime(2024, 7, 15, 15, 45, 0),
+    )
+    day2 = _make_bars(
+        1,
+        buy_volumes=[500],
+        sell_volumes=[500],
+        base_ts=datetime(2024, 7, 16, 9, 30, 0),
+    )
+    bars = pl.concat([day1, day2]).sort("ts_event")
+    result = compute_toxicity_features(bars)
+
+    # First bar of day 2 should be based only on day-2 imbalance (balanced -> ~0).
+    assert abs(result["vpin"][-1]) < 0.02

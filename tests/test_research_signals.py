@@ -81,6 +81,16 @@ def test_strategy_id_stable_with_no_env() -> None:
     assert len(id_bare.split("_")) == 5
 
 
+def test_strategy_id_distinguishes_bar_config_from_session_filter() -> None:
+    """bar_config/session_filter placement must not collide for asymmetric inputs."""
+    signals = discover_signals()
+    fn = signals["example_ema_turn"]
+    params = {"x": 1}
+    id_cfg = compute_strategy_id("example_ema_turn", params, fn, bar_config="eth", session_filter="")
+    id_session = compute_strategy_id("example_ema_turn", params, fn, bar_config="", session_filter="eth")
+    assert id_cfg != id_session
+
+
 def _causal_signal(df: pl.DataFrame, _params: dict) -> np.ndarray:
     close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
     prev = np.roll(close, 1)
@@ -135,3 +145,24 @@ def test_signal_causality_check_sign_mode_rejects_future_peek_continuous() -> No
     )
     assert errors
     assert "non-causal signal" in errors[0]
+
+
+def test_signal_causality_stateful_strategies_receive_fresh_state_per_invocation() -> None:
+    """Causality check should not reuse mutable state across full/prefix calls."""
+
+    def _stateful_signal(df: pl.DataFrame, _params: dict, model_state: dict) -> np.ndarray:
+        model_state["calls"] = int(model_state.get("calls", 0)) + 1
+        if model_state["calls"] != 1:
+            raise RuntimeError("state reused across causality invocations")
+        return np.zeros(len(df), dtype=np.int8)
+
+    errors = check_signal_causality(
+        generate_fn=_stateful_signal,
+        df=_df(96),
+        params={},
+        accepts_state=True,
+        model_state={},
+        mode="strict",
+        min_prefix_bars=8,
+    )
+    assert errors == []

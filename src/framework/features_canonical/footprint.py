@@ -26,6 +26,9 @@ def compute_footprint_features(bars: pl.DataFrame) -> pl.DataFrame:
         "buy_vol_at_high", "sell_vol_at_high",
         "buy_vol_at_low", "sell_vol_at_low",
     ]).sort("ts_event")
+    df = df.with_columns(
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
+    )
 
     # --- Stacked imbalance features ---
     # Signed strength: count * direction
@@ -39,6 +42,7 @@ def compute_footprint_features(bars: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(
         pl.col("stacked_imb_strength")
         .rolling_mean(window_size=3, min_samples=1)
+        .over("_date")
         .alias("stacked_imb_ma3"),
     )
 
@@ -47,15 +51,15 @@ def compute_footprint_features(bars: pl.DataFrame) -> pl.DataFrame:
     sign = pl.when(pl.col("stacked_imb_strength") > 0).then(1) \
              .when(pl.col("stacked_imb_strength") < 0).then(-1) \
              .otherwise(0)
-    prev_sign = sign.shift(1).fill_null(0)
+    prev_sign = sign.shift(1).over("_date").fill_null(0)
     # Reset group_id when sign changes
     df = df.with_columns(
-        (sign != prev_sign).cum_sum().alias("_streak_group"),
+        (sign != prev_sign).cum_sum().over("_date").alias("_streak_group"),
         sign.alias("_sign"),
     )
     df = df.with_columns(
         pl.when(pl.col("_sign") != 0)
-        .then(pl.int_range(pl.len()).over("_streak_group") + 1)
+        .then(pl.int_range(pl.len()).over(["_date", "_streak_group"]) + 1)
         .otherwise(0)
         .cast(pl.Float64)
         .alias("stacked_imb_streak"),
@@ -66,6 +70,7 @@ def compute_footprint_features(bars: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(
         pl.col("zero_print_count").cast(pl.Float64)
         .rolling_quantile(quantile=0.75, window_size=ZERO_PRINT_LOOKBACK, min_samples=1)
+        .over("_date")
         .alias("_zp_p75"),
     )
     df = df.with_columns(
@@ -91,8 +96,8 @@ def compute_footprint_features(bars: pl.DataFrame) -> pl.DataFrame:
     # --- Unfinished business features ---
     # Bars since last unfinished high/low (NaN before first occurrence)
     df = df.with_columns([
-        _bars_since_flag("unfinished_high").alias("bars_since_unfinished_high"),
-        _bars_since_flag("unfinished_low").alias("bars_since_unfinished_low"),
+        _bars_since_flag("unfinished_high", group_col="_date").alias("bars_since_unfinished_high"),
+        _bars_since_flag("unfinished_low", group_col="_date").alias("bars_since_unfinished_low"),
     ])
 
     # --- Delta intensity (heat) ---
@@ -111,7 +116,7 @@ def compute_footprint_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # Z-score of delta_per_second
     df = df.with_columns(
-        _zscore_expr("delta_per_second", DELTA_Z_LOOKBACK)
+        _zscore_expr("delta_per_second", DELTA_Z_LOOKBACK, group_col="_date")
         .alias("delta_intensity_z"),
     )
 
@@ -195,15 +200,18 @@ def compute_footprint_features(bars: pl.DataFrame) -> pl.DataFrame:
     return df.select(output_cols)
 
 
-def _zscore_expr(col_name: str, lookback: int) -> pl.Expr:
+def _zscore_expr(col_name: str, lookback: int, group_col: str | None = None) -> pl.Expr:
     """Rolling z-score: (x - mean) / std over lookback window."""
     col = pl.col(col_name)
     mean = col.rolling_mean(window_size=lookback, min_samples=2)
     std = col.rolling_std(window_size=lookback, min_samples=2)
+    if group_col is not None:
+        mean = mean.over(group_col)
+        std = std.over(group_col)
     return pl.when(std > 0).then((col - mean) / std).otherwise(0.0)
 
 
-def _bars_since_flag(col_name: str) -> pl.Expr:
+def _bars_since_flag(col_name: str, group_col: str | None = None) -> pl.Expr:
     """Count bars since the last time col_name was 1.
 
     Uses cumulative sum as group marker: each time the flag is 1, a new group
@@ -211,10 +219,21 @@ def _bars_since_flag(col_name: str) -> pl.Expr:
     Returns null for bars before the first flag ever fires.
     """
     flag = pl.col(col_name).cast(pl.UInt32)
-    group = flag.cum_sum()
-    count = pl.int_range(pl.len()).over(group)
+    idx = pl.int_range(pl.len())
+    if group_col is not None:
+        idx = idx.over(group_col)
+    last_flag_idx = (
+        pl.when(flag == 1).then(idx).otherwise(None)
+        .forward_fill()
+    )
+    if group_col is not None:
+        last_flag_idx = last_flag_idx.over(group_col)
     # Group 0 = before any flag fired -> null (consistent missing-value semantics)
-    return pl.when(group > 0).then(count.cast(pl.Float64)).otherwise(None)
+    return (
+        pl.when(last_flag_idx.is_not_null())
+        .then((idx - last_flag_idx).cast(pl.Float64))
+        .otherwise(None)
+    )
 
 
 def _empty_result() -> pl.DataFrame:

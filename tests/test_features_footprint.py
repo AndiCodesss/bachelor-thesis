@@ -418,6 +418,38 @@ def test_extreme_buy_ratio_high():
     assert abs(result["extreme_buy_ratio_high"][0] - expected) < 1e-6
 
 
+def test_stacked_imb_streak_resets_each_day():
+    rows = [
+        _make_bar(datetime(2024, 7, 15, 15, 50), stacked_count=1, stacked_dir=1),
+        _make_bar(datetime(2024, 7, 15, 15, 55), stacked_count=2, stacked_dir=1),
+        _make_bar(datetime(2024, 7, 16, 9, 30), stacked_count=3, stacked_dir=1),
+    ]
+    df = _make_bars_df(rows)
+    result = compute_footprint_features(df)
+
+    streak = result["stacked_imb_streak"].to_list()
+    assert streak[0] == 1.0
+    assert streak[1] == 2.0
+    assert streak[2] == 1.0
+
+
+def test_bars_since_unfinished_resets_each_day():
+    rows = [
+        _make_bar(datetime(2024, 7, 15, 15, 50), unfinished_high=1),
+        _make_bar(datetime(2024, 7, 15, 15, 55), unfinished_high=0),
+        _make_bar(datetime(2024, 7, 16, 9, 30), unfinished_high=0),
+        _make_bar(datetime(2024, 7, 16, 9, 35), unfinished_high=1),
+    ]
+    df = _make_bars_df(rows)
+    result = compute_footprint_features(df)
+
+    vals = result["bars_since_unfinished_high"].to_list()
+    assert vals[0] == 0.0
+    assert vals[1] == 1.0
+    assert vals[2] is None
+    assert vals[3] == 0.0
+
+
 def test_extreme_buy_ratio_low():
     """extreme_buy_ratio_low = buy_vol_at_low / (buy + sell + 1)."""
     rows = [

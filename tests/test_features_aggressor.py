@@ -418,3 +418,16 @@ def test_cvd_day_boundary_after_warmup_drop():
         assert result_filtered["cvd_slope_3"][i] is None, (
             f"Post-warmup bar {i} should have null cvd_slope_3, got {result_filtered['cvd_slope_3'][i]}"
         )
+
+
+def test_relative_intensity_resets_at_day_boundary():
+    rows = [
+        _make_bar(datetime(2024, 7, 15, 15, 50, 0), buy_vol=10, sell_vol=0, trade_count=1),
+        _make_bar(datetime(2024, 7, 15, 15, 55, 0), buy_vol=10, sell_vol=0, trade_count=100),
+        _make_bar(datetime(2024, 7, 16, 9, 30, 0), buy_vol=10, sell_vol=0, trade_count=1),
+    ]
+    df = _make_bars_df(rows)
+    result = compute_aggressor_features(df)
+
+    # First bar of a new day should use that day's MA only -> 1 / 1 = 1.
+    assert result["relative_intensity"][2] == 1.0

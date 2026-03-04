@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import inspect
@@ -15,6 +16,17 @@ import polars as pl
 
 SignalFn = Callable[..., np.ndarray]
 CAUSALITY_MIN_PREFIX_BARS = 32
+
+
+def _clone_model_state(model_state: Any | None) -> Any | None:
+    if model_state is None:
+        return None
+    try:
+        return copy.deepcopy(model_state)
+    except Exception:
+        # Fallback for non-deepcopyable objects; callers should pass immutable
+        # or dict-like state for deterministic causality checks.
+        return model_state
 
 
 def _invoke_generate_signal(
@@ -74,7 +86,7 @@ def check_signal_causality(
             df=df,
             params=params,
             accepts_state=accepts_state,
-            model_state=model_state,
+            model_state=_clone_model_state(model_state),
         )
     else:
         full_raw = np.asarray(full_signal, dtype=np.float64).reshape(-1)
@@ -107,7 +119,7 @@ def check_signal_causality(
             df=prefix_df,
             params=params,
             accepts_state=accepts_state,
-            model_state=model_state,
+            model_state=_clone_model_state(model_state),
         )
         if len(prefix_raw) != cut:
             return [f"prefix signal length {len(prefix_raw)} != expected {cut}"]
@@ -178,12 +190,16 @@ def compute_strategy_id(
 ) -> str:
     """Stable strategy id from name + params + source + bar config + session."""
     params_blob = json.dumps(params, sort_keys=True, separators=(",", ":"))
-    params_hash = hashlib.sha256(params_blob.encode("utf-8")).hexdigest()[:8]
+    params_hash = hashlib.sha256(params_blob.encode("utf-8")).hexdigest()[:16]
     source = inspect.getsource(strategy_function)
-    code_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
-    env_key = f"{bar_config}|{session_filter}".strip("|")
-    if env_key:
-        env_hash = hashlib.sha256(env_key.encode("utf-8")).hexdigest()[:6]
+    code_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    if bar_config or session_filter:
+        env_blob = json.dumps(
+            {"bar_config": str(bar_config), "session_filter": str(session_filter)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        env_hash = hashlib.sha256(env_blob.encode("utf-8")).hexdigest()[:12]
         return f"{strategy_name}_{params_hash}_{code_hash}_{env_hash}"
     return f"{strategy_name}_{params_hash}_{code_hash}"
 

@@ -169,8 +169,12 @@ def compute_multi_timeframe_features(
                 agg_exprs.append(pl.col(feat).max().alias(col_name))
             elif op == "slope":
                 agg_exprs.append(
-                    ((pl.col(feat).last() - pl.col(feat).first())
-                     / (pl.len() - 1).cast(pl.Float64))
+                    pl.when(pl.len() > 1)
+                    .then(
+                        (pl.col(feat).last() - pl.col(feat).first())
+                        / (pl.len() - 1).cast(pl.Float64)
+                    )
+                    .otherwise(0.0)
                     .alias(col_name)
                 )
 

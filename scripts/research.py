@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 import numpy as np
 import polars as pl
+import portalocker
 import yaml
 
 if __package__ is None or __package__ == "":
@@ -92,6 +93,15 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"Expected JSON object at {path}")
     return payload
+
+
+def _read_json_locked(path: Path, lock_path: Path, default_payload: dict[str, Any]) -> dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with portalocker.Lock(lock_path, mode="a", timeout=30):
+        if not path.exists():
+            atomic_json_write(path, default_payload)
+        return _read_json(path)
 
 
 def _sha256_file(path: Path) -> str:
@@ -171,9 +181,12 @@ def _ensure_runtime_state(root: Path, *, resume: bool, mission_name: str) -> dic
     return paths
 
 
-def _queue_counts(queue_path: Path) -> dict[str, int]:
-    with open(queue_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+def _queue_counts(queue_path: Path, lock_path: Path) -> dict[str, int]:
+    payload = _read_json_locked(
+        queue_path,
+        lock_path,
+        default_payload={"schema_version": "1.0", "tasks": []},
+    )
     tasks = list(payload.get("tasks", []))
     return {
         "pending": sum(1 for t in tasks if t.get("state") == "pending"),
@@ -183,9 +196,16 @@ def _queue_counts(queue_path: Path) -> dict[str, int]:
     }
 
 
-def _collect_new_terminal_task_verdicts(queue_path: Path, seen_task_ids: set[str]) -> list[str]:
-    with open(queue_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+def _collect_new_terminal_task_verdicts(
+    queue_path: Path,
+    lock_path: Path,
+    seen_task_ids: set[str],
+) -> list[str]:
+    payload = _read_json_locked(
+        queue_path,
+        lock_path,
+        default_payload={"schema_version": "1.0", "tasks": []},
+    )
     verdicts: list[str] = []
     for task in payload.get("tasks", []):
         state = task.get("state")
@@ -199,14 +219,18 @@ def _collect_new_terminal_task_verdicts(queue_path: Path, seen_task_ids: set[str
     return verdicts
 
 
-def _seed_seen_terminal_task_ids(queue_path: Path, already_counted: int) -> set[str]:
+def _seed_seen_terminal_task_ids(queue_path: Path, lock_path: Path, already_counted: int) -> set[str]:
     """Seed seen terminal task ids from queue for resume-safe budget accounting.
 
     We assume the first N terminal tasks (ordered by completed_at/created_at)
     are already reflected in MissionBudget.experiments_run, and only unseen
     terminal tasks should increment budget after resume.
     """
-    payload = _read_json(queue_path)
+    payload = _read_json_locked(
+        queue_path,
+        lock_path,
+        default_payload={"schema_version": "1.0", "tasks": []},
+    )
     terminal_tasks = [
         task for task in payload.get("tasks", [])
         if task.get("state") in {"completed", "failed"} and str(task.get("task_id", "")).strip()
@@ -637,7 +661,7 @@ def _execute_claimed_task(
                     df=causality_df,
                     params=params,
                     accepts_state=strategy_accepts_state,
-                    model_state=None,
+                    model_state={} if strategy_accepts_state else None,
                     mode="strict",
                     min_prefix_bars=CAUSALITY_MIN_PREFIX_BARS,
                 )
@@ -872,7 +896,11 @@ def main() -> None:
         reset_on_mission_change=True,
     )
     seen_terminal_tasks: set[str] = (
-        _seed_seen_terminal_task_ids(state_paths["queue"], budget.experiments_run)
+        _seed_seen_terminal_task_ids(
+            state_paths["queue"],
+            state_paths["queue_lock"],
+            budget.experiments_run,
+        )
         if args.resume else set()
     )
 
@@ -939,7 +967,11 @@ def main() -> None:
     reason = "single_pass"
     try:
         while True:
-            for verdict in _collect_new_terminal_task_verdicts(state_paths["queue"], seen_terminal_tasks):
+            for verdict in _collect_new_terminal_task_verdicts(
+                state_paths["queue"],
+                state_paths["queue_lock"],
+                seen_terminal_tasks,
+            ):
                 budget.record_experiment(verdict)
 
             can_continue, reason = budget.check_budget()
@@ -952,7 +984,7 @@ def main() -> None:
                     reason = "max_runtime_reached"
                     break
 
-            counts = _queue_counts(state_paths["queue"])
+            counts = _queue_counts(state_paths["queue"], state_paths["queue_lock"])
             if not args.auto_mode:
                 reason = "manual_single_pass"
                 break
@@ -967,7 +999,7 @@ def main() -> None:
                 )
                 if created > 0:
                     print(f"Bootstrapped tasks: {created}")
-                    counts = _queue_counts(state_paths["queue"])
+                    counts = _queue_counts(state_paths["queue"], state_paths["queue_lock"])
 
             claimed = _claim_next_task(
                 state_paths["queue"],
@@ -1072,7 +1104,14 @@ def main() -> None:
         "python_version": sys.version.split()[0],
     }
     atomic_json_write(run_dir / "provenance.json", provenance)
-    atomic_json_write(run_dir / "queue_final.json", _read_json(state_paths["queue"]))
+    atomic_json_write(
+        run_dir / "queue_final.json",
+        _read_json_locked(
+            state_paths["queue"],
+            state_paths["queue_lock"],
+            default_payload={"schema_version": "1.0", "tasks": []},
+        ),
+    )
     atomic_json_write(run_dir / "handoffs_final.json", _read_json(state_paths["handoffs"]))
     atomic_json_write(run_dir / "mission_budget_final.json", _read_json(state_paths["budget"]))
 
@@ -1086,7 +1125,7 @@ def main() -> None:
         "framework_lock": lock_result,
         "provenance": provenance,
         "budget": budget.snapshot(),
-        "queue_counts": _queue_counts(state_paths["queue"]),
+        "queue_counts": _queue_counts(state_paths["queue"], state_paths["queue_lock"]),
         "stop_reason": reason,
     }
     atomic_json_write(run_dir / "summary.json", summary)

@@ -53,6 +53,8 @@ LABEL_COLUMNS = [
 # Raw non-stationary price columns — not valid ML features (absolute levels change over time)
 RAW_PRICE_COLUMNS = [
     "open", "high", "low", "close", "vwap", "bid_price", "ask_price", "mid_price",
+    # Raw price-unit (close - session VWAP) from statistical module.
+    "vwap_deviation_stat",
     "poc_price", "va_high", "va_low", "rolling_poc", "rolling_va_high", "rolling_va_low",
     "prev_day_high", "prev_day_low", "prev_day_close",
     "prev_day_poc", "prev_day_vah", "prev_day_val",

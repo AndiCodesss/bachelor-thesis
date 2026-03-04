@@ -36,19 +36,24 @@ def compute_microstructure_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # Sort by timestamp for proper rolling operations
     bars = bars.sort("ts_event")
+    bars = bars.with_columns(
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
+    )
 
     # Add rolling features (computed after bar aggregation, looking backward only)
+    prev_cancel = pl.col("cancel_count").shift(1).over("_date")
     bars = bars.with_columns([
         # Message intensity MA: "Smoothed activity level"
         pl.col("message_count")
         .rolling_mean(window_size=5, min_samples=1)
+        .over("_date")
         .alias("message_intensity_ma5"),
 
         # Cancel rate change: "Sudden increase in cancels precedes volatility"
-        pl.when(pl.col("cancel_count").shift(1) > 0)
+        pl.when(prev_cancel > 0)
         .then(
-            (pl.col("cancel_count") - pl.col("cancel_count").shift(1))
-            / pl.col("cancel_count").shift(1)
+            (pl.col("cancel_count") - prev_cancel)
+            / prev_cancel
         )
         .otherwise(None)
         .alias("cancel_rate_change"),
@@ -60,8 +65,8 @@ def compute_microstructure_features(bars: pl.DataFrame) -> pl.DataFrame:
          / (pl.col("bar_duration_ns") / 1e6 + 1e-9)).alias("tape_speed"),
     )
 
-    _ts_mean = pl.col("tape_speed").rolling_mean(window_size=24, min_samples=2)
-    _ts_std = pl.col("tape_speed").rolling_std(window_size=24, min_samples=2)
+    _ts_mean = pl.col("tape_speed").rolling_mean(window_size=24, min_samples=2).over("_date")
+    _ts_std = pl.col("tape_speed").rolling_std(window_size=24, min_samples=2).over("_date")
     bars = bars.with_columns(
         pl.when(_ts_std > 0)
         .then((pl.col("tape_speed") - _ts_mean) / _ts_std)
@@ -80,8 +85,8 @@ def compute_microstructure_features(bars: pl.DataFrame) -> pl.DataFrame:
          / (pl.col("bar_duration_ns") / 1e9 + 1e-9)).alias("price_velocity"),
     )
 
-    _pv_mean = pl.col("price_velocity").rolling_mean(window_size=24, min_samples=2)
-    _pv_std = pl.col("price_velocity").rolling_std(window_size=24, min_samples=2)
+    _pv_mean = pl.col("price_velocity").rolling_mean(window_size=24, min_samples=2).over("_date")
+    _pv_std = pl.col("price_velocity").rolling_std(window_size=24, min_samples=2).over("_date")
     bars = bars.with_columns(
         pl.when(_pv_std > 0)
         .then((pl.col("price_velocity") - _pv_mean) / _pv_std)
@@ -96,14 +101,14 @@ def compute_microstructure_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # --- Recoil: "How much price retraces after a whip bar" ---
     bars = bars.with_columns([
-        pl.col("is_whip").shift(1).fill_null(0.0).alias("_prev_is_whip"),
-        (pl.col("close").shift(1) - pl.col("open").shift(1)).abs().alias("_prev_range"),
+        pl.col("is_whip").shift(1).over("_date").fill_null(0.0).alias("_prev_is_whip"),
+        (pl.col("close").shift(1).over("_date") - pl.col("open").shift(1).over("_date")).abs().alias("_prev_range"),
     ])
 
     bars = bars.with_columns(
         pl.when(pl.col("_prev_is_whip") == 1.0)
         .then(
-            (pl.col("close").shift(1) - pl.col("close")).abs()
+            (pl.col("close").shift(1).over("_date") - pl.col("close")).abs()
             / (pl.col("_prev_range") + 1e-9)
         )
         .otherwise(0.0)

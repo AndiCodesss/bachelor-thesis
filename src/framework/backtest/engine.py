@@ -147,32 +147,41 @@ def run_backtest(
         if position != 0:
             bars_held += 1
 
-            # Daily loss guard: force close if current open trade breaches limit.
+            # Daily loss guard: reserve closing cost so net daily loss stays
+            # within max_daily_loss after this trade is closed.
             remaining_loss_dollars = max_daily_loss + daily_pnl
-            if remaining_loss_dollars <= 0:
+            loss_budget_before_close_cost = remaining_loss_dollars - TOTAL_COST_RT
+            if loss_budget_before_close_cost <= 0:
                 force_exit = True
                 daily_limit_exit = True
             elif has_hilo:
-                # Convert remaining loss budget to points from entry.
-                loss_points_limit = (remaining_loss_dollars / TICK_VALUE) * TICK_SIZE
-                if position == 1:
-                    limit_price = entry_price - loss_points_limit
-                    if lows[i] <= limit_price:
-                        force_exit = True
-                        daily_limit_exit = True
-                        if has_open and opens[i] <= limit_price:
-                            intrabar_exit_price = opens[i]
-                        else:
-                            intrabar_exit_price = limit_price
+                # Convert gross-loss budget into whole ticks to avoid rounding
+                # through _points_to_dollars breaching the configured limit.
+                loss_ticks_limit = int(math.floor(loss_budget_before_close_cost / TICK_VALUE))
+                if loss_ticks_limit <= 0:
+                    force_exit = True
+                    daily_limit_exit = True
+                    intrabar_exit_price = opens[i] if has_open else closes[i]
                 else:
-                    limit_price = entry_price + loss_points_limit
-                    if highs[i] >= limit_price:
-                        force_exit = True
-                        daily_limit_exit = True
-                        if has_open and opens[i] >= limit_price:
-                            intrabar_exit_price = opens[i]
-                        else:
-                            intrabar_exit_price = limit_price
+                    loss_points_limit = loss_ticks_limit * TICK_SIZE
+                    if position == 1:
+                        limit_price = entry_price - loss_points_limit
+                        if lows[i] <= limit_price:
+                            force_exit = True
+                            daily_limit_exit = True
+                            if has_open and opens[i] <= limit_price:
+                                intrabar_exit_price = opens[i]
+                            else:
+                                intrabar_exit_price = limit_price
+                    else:
+                        limit_price = entry_price + loss_points_limit
+                        if highs[i] >= limit_price:
+                            force_exit = True
+                            daily_limit_exit = True
+                            if has_open and opens[i] >= limit_price:
+                                intrabar_exit_price = opens[i]
+                            else:
+                                intrabar_exit_price = limit_price
 
             # Intra-bar PT/SL checking (higher priority than close-based)
             if (
@@ -250,7 +259,7 @@ def run_backtest(
                 # Daily loss limit check (close fallback when no hi/low available).
                 if not has_hilo:
                     unrealized_pnl_dollars = _points_to_dollars(unrealized_pnl_points)
-                    if daily_pnl + unrealized_pnl_dollars <= -max_daily_loss:
+                    if daily_pnl + unrealized_pnl_dollars - TOTAL_COST_RT <= -max_daily_loss:
                         force_exit = True
                         daily_limit_exit = True
 
@@ -313,22 +322,27 @@ def run_backtest(
                     daily_stopped = True
                     continue
 
-            # Open new position if signal is not flat, not stopped, has a next bar
-            # to execute against, and not in mandatory re-entry cooldown after force exit
-            if sig != 0 and not daily_stopped and has_next_bar and not skip_reentry:
+            # Open new position if signal is not flat, not stopped, and not in
+            # mandatory re-entry cooldown after force exit.
+            if sig != 0 and not daily_stopped and not skip_reentry:
                 if entry_on_next_open:
-                    # Defer entry to next bar's open
-                    pending_direction = sig
+                    # Defer entry to next bar's open. A pending signal may carry
+                    # across day boundary when a next bar exists.
+                    if has_next_bar:
+                        pending_direction = sig
                 else:
-                    position = sig
-                    entry_price = closes[i]
-                    entry_time = timestamps[i]
-                    bars_held = 0
-                    # Compute per-trade PT/SL from return-space thresholds
-                    if profit_target_return is not None:
-                        active_profit_target = entry_price * profit_target_return
-                    if stop_loss_return is not None:
-                        active_stop_loss = entry_price * stop_loss_return
+                    # Same-bar close entry mode must not open on the session's
+                    # terminal bar (would leak overnight before next EOD check).
+                    if not is_last_bar:
+                        position = sig
+                        entry_price = closes[i]
+                        entry_time = timestamps[i]
+                        bars_held = 0
+                        # Compute per-trade PT/SL from return-space thresholds
+                        if profit_target_return is not None:
+                            active_profit_target = entry_price * profit_target_return
+                        if stop_loss_return is not None:
+                            active_stop_loss = entry_price * stop_loss_return
 
         # Clear skip_reentry at end of bar (gap enforced for this bar)
         skip_reentry = False

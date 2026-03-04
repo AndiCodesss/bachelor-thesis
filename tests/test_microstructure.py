@@ -314,3 +314,44 @@ def test_microstructure_intermediates_dropped():
     intermediates = ["_prev_is_whip", "_prev_range"]
     for col in intermediates:
         assert col not in result.columns, f"Intermediate column '{col}' leaked into output"
+
+
+def test_recoil_does_not_leak_across_day_boundary():
+    """First bar of a new day must not use prior-day whip state."""
+    base_row = {
+        "msg_count": 20, "add_count": 10, "cancel_count": 5,
+        "modify_count": 2, "trade_count": 10,
+        "bar_duration_ns": 300_000_000_000,
+    }
+    rows = []
+    opens = []
+    closes = []
+
+    day1_base = datetime(2024, 7, 15, 10, 0, 0)
+    for i in range(24):
+        r = dict(base_row)
+        r["ts_event"] = day1_base + timedelta(minutes=5 * i)
+        rows.append(r)
+        opens.append(100.0)
+        closes.append(100.25)
+
+    whip = dict(base_row)
+    whip["ts_event"] = day1_base + timedelta(minutes=5 * 24)
+    rows.append(whip)
+    opens.append(100.0)
+    closes.append(120.0)
+
+    day2_bar = dict(base_row)
+    day2_bar["ts_event"] = datetime(2024, 7, 16, 10, 0, 0)
+    rows.append(day2_bar)
+    opens.append(120.0)
+    closes.append(110.0)
+
+    bars = _make_bars(rows).with_columns([
+        pl.Series("open", opens),
+        pl.Series("close", closes),
+    ])
+    result = compute_microstructure_features(bars)
+
+    # New session: recoil must reset and not reference prior day's whip.
+    assert result["recoil_pct"][-1] == 0.0

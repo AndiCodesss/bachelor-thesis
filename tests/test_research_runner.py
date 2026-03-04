@@ -234,11 +234,11 @@ def test_seed_seen_terminal_task_ids_prevents_resume_double_count(tmp_path: Path
     }
     queue_path.write_text(json.dumps(queue), encoding="utf-8")
 
-    seen = mod._seed_seen_terminal_task_ids(queue_path, already_counted=2)
+    seen = mod._seed_seen_terminal_task_ids(queue_path, queue_path.with_suffix(".lock"), already_counted=2)
     assert seen == {"t1", "t2"}
 
     # After seeding, only truly new terminal tasks should be counted.
-    new_verdicts = mod._collect_new_terminal_task_verdicts(queue_path, seen)
+    new_verdicts = mod._collect_new_terminal_task_verdicts(queue_path, queue_path.with_suffix(".lock"), seen)
     assert new_verdicts == ["PASS"]
 
 
@@ -597,7 +597,7 @@ def test_execute_claimed_task_supports_stateful_signal_signature(
     monkeypatch: pytest.MonkeyPatch,
 ):
     mod = _load_runner_module()
-    captures: dict[str, Any] = {"accepts_state": None, "last_state_calls": 0}
+    captures: dict[str, Any] = {"accepts_state": None, "model_state_type": None, "last_state_calls": 0}
 
     def _stateful_signal(df, _params, model_state):
         assert isinstance(model_state, dict)
@@ -615,6 +615,7 @@ def test_execute_claimed_task_supports_stateful_signal_signature(
 
     def _fake_causality(**kwargs):
         captures["accepts_state"] = kwargs.get("accepts_state")
+        captures["model_state_type"] = type(kwargs.get("model_state")).__name__
         return []
 
     monkeypatch.setattr(mod, "check_signal_causality", _fake_causality)
@@ -664,4 +665,5 @@ def test_execute_claimed_task_supports_stateful_signal_signature(
 
     assert verdict in {"PASS", "FAIL"}
     assert captures["accepts_state"] is True
+    assert captures["model_state_type"] == "dict"
     assert captures["last_state_calls"] == 2

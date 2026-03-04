@@ -16,7 +16,7 @@ import polars as pl
 # Valid feature group names for mission config
 VALID_FEATURE_GROUPS = frozenset({"ohlcv", "all"})
 
-# ── Group A: OHLCV-only features (57 columns) ───────────────────────────────
+# ── Group A: OHLCV-only features (56 columns) ───────────────────────────────
 # These features are derivable purely from OHLCV bars + timestamps.
 # Sources: momentum, ohlcv_indicators, statistical, opening_range,
 #          and the OHLCV-derived subset of pipeline features.
@@ -61,13 +61,12 @@ OHLCV_FEATURE_COLUMNS = frozenset({
     "minus_di_14",
     "obv_slope_14",
 
-    # --- Statistical module (6 features) ---
+    # --- Statistical module (5 features) ---
     "log_return",
     "fracdiff_close",
     "yz_volatility",
     "vol_zscore",
     "vwap_dev_zscore",
-    "vwap_deviation_stat",
 
     # --- Opening range module (4 features) ---
     "or_width",
