@@ -136,15 +136,10 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
     drawdowns = running_max - (initial_capital + equity_with_start)
     max_drawdown = np.max(drawdowns)
 
-    # Max drawdown percentage: normalize by the local peak that preceded
-    # the max-drawdown trough, not by the global peak reached later.
-    max_dd_idx = int(np.argmax(drawdowns))
-    peak_equity_at_max_dd = float(running_max[max_dd_idx])
-    max_drawdown_pct = (
-        (max_drawdown / peak_equity_at_max_dd) * 100.0
-        if peak_equity_at_max_dd > 0
-        else 0.0
-    )
+    # Max drawdown percentage: compute percentage drawdown at each point and
+    # take the maximum. This can differ from drawdown% at max dollar drawdown.
+    drawdown_pct = np.where(running_max > 0, (drawdowns / running_max) * 100.0, 0.0)
+    max_drawdown_pct = float(np.max(drawdown_pct)) if len(drawdown_pct) > 0 else 0.0
 
     # Holding time stats
     avg_holding_time_min = df["holding_time_min"].mean()

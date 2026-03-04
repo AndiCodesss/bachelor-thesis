@@ -380,6 +380,36 @@ def test_max_drawdown_pct_uses_local_peak_not_global_peak():
     assert metrics["max_drawdown_pct"] == pytest.approx(expected_pct, rel=1e-6)
 
 
+def test_max_drawdown_pct_is_max_of_pointwise_percent_drawdowns():
+    """Max percentage drawdown can occur at a different point than max dollar drawdown."""
+    base_time = datetime(2025, 2, 1, 10, 0, 0)
+
+    # Net PnL path (with zero override costs): +1000, -900, +100000, -1000
+    # Equity: 100000 -> 101000 -> 100100 -> 200100 -> 199100
+    # Dollar drawdowns: 0, 900, 0, 1000  -> max $ DD = 1000 at final point.
+    # Pct drawdowns:    0, 900/101000, 0, 1000/200100
+    # => max pct DD is 900/101000 (~0.8911%), not 1000/200100 (~0.4998%).
+    trades = pl.DataFrame({
+        "entry_time": [base_time + timedelta(hours=i) for i in range(4)],
+        "exit_time": [base_time + timedelta(hours=i, minutes=30) for i in range(4)],
+        "entry_price": [18000.0, 18000.0, 18000.0, 18000.0],
+        "exit_price": [18050.0, 17955.0, 23000.0, 17950.0],  # +50, -45, +5000, -50 points
+        "direction": [1, 1, 1, 1],
+        "size": [1, 1, 1, 1],
+        "cost_override": [0.0, 0.0, 0.0, 0.0],
+    })
+
+    metrics = compute_metrics(
+        trades,
+        cost_override_col="cost_override",
+        initial_capital=100_000.0,
+    )
+
+    assert metrics["max_drawdown"] == pytest.approx(1000.0, abs=1e-9)
+    expected_pct = (900.0 / 101_000.0) * 100.0
+    assert metrics["max_drawdown_pct"] == pytest.approx(expected_pct, rel=1e-9)
+
+
 def test_identical_trades_sharpe():
     """Test with identical daily PnLs - std = 0, Sharpe should be NaN."""
     # Spread across 5 days, 1 identical trade per day → identical daily PnLs → std=0
