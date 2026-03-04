@@ -663,6 +663,81 @@ def _load_sample_strategy_df(
     raise RuntimeError(f"Could not load sample feature frame for bar_config={bar_config}")
 
 
+FEATURE_COMPUTATION_NOTES = [
+    "Use precomputed canonical feature columns whenever available; avoid recomputing them in signal code.",
+    "sma_ratio_N = close / SMA(close, N) - 1 (rolling mean, min_samples=N).",
+    "ema_ratio_N = close / EWM(close, span=N, adjust=False, min_samples=N) - 1.",
+    "RSI uses Wilder smoothing (alpha=1/N) from close-to-close gains/losses.",
+    "ATR uses true range with Wilder smoothing; session-aware bars and timestamps are already canonicalized.",
+    "VWAP-style cumulative metrics reset at session/day boundaries in canonical builders.",
+    "Opening-range fields are session-aware; OR-dependent fields are null before OR is ready.",
+    "Orderflow/toxicity/footprint features are bar-causal and derived only from events up to each bar close.",
+]
+
+
+def _build_feature_knowledge(
+    *,
+    mission_bar_configs: list[str],
+    split: str,
+    session_filter: str,
+    feature_group: str,
+    sample_cache: dict[str, pl.DataFrame],
+) -> dict[str, Any]:
+    columns_by_cfg: dict[str, list[str]] = {}
+    errors: dict[str, str] = {}
+
+    for bar_config in mission_bar_configs:
+        try:
+            if bar_config not in sample_cache:
+                sample_cache[bar_config] = _load_sample_strategy_df(
+                    split=split,
+                    bar_config=bar_config,
+                    session_filter=session_filter,
+                    feature_group=feature_group,
+                )
+            cols = sorted(str(c) for c in sample_cache[bar_config].columns)
+            columns_by_cfg[bar_config] = cols
+        except Exception as exc:
+            errors[bar_config] = f"{type(exc).__name__}: {exc}"
+
+    if not columns_by_cfg:
+        return {
+            "schema_version": "1.0",
+            "bar_configs": {},
+            "common_columns": [],
+            "per_bar_extra_columns": {},
+            "computation_notes": list(FEATURE_COMPUTATION_NOTES),
+            "errors": errors,
+        }
+
+    cfg_names = list(columns_by_cfg.keys())
+    common = set(columns_by_cfg[cfg_names[0]])
+    for cfg in cfg_names[1:]:
+        common &= set(columns_by_cfg[cfg])
+    common_columns = sorted(common)
+
+    extras: dict[str, list[str]] = {}
+    for cfg, cols in columns_by_cfg.items():
+        extras[cfg] = [c for c in cols if c not in common]
+
+    counts = {
+        cfg: {
+            "total_columns": len(cols),
+            "extra_columns": len(extras.get(cfg, [])),
+        }
+        for cfg, cols in columns_by_cfg.items()
+    }
+
+    return {
+        "schema_version": "1.0",
+        "bar_configs": counts,
+        "common_columns": common_columns,
+        "per_bar_extra_columns": extras,
+        "computation_notes": list(FEATURE_COMPUTATION_NOTES),
+        "errors": errors,
+    }
+
+
 def _validate_generated_strategy(
     *,
     strategy_name: str,
@@ -734,7 +809,9 @@ def _build_thinker_system_prompt() -> str:
         "- risk_controls: list[str]\n"
         "- anti_lookahead_checks: list[str]\n"
         "- validation_focus: list[str]\n"
-        "Do not write code. Focus on falsifiable, causal hypotheses."
+        "Do not write code. Focus on falsifiable, causal hypotheses.\n"
+        "Before producing the final JSON, internally brainstorm at least three distinct hypotheses,\n"
+        "then select the strongest one. Output only the final selected hypothesis JSON."
     )
 
 
@@ -743,6 +820,7 @@ def _build_thinker_user_prompt(
     mission: dict[str, Any],
     existing_strategies: list[str],
     feedback_digest: dict[str, list[str]],
+    feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
     bar_configs = mission.get("bar_configs", ["tick_610"])
     current_focus = mission.get("current_focus", [])
@@ -751,7 +829,7 @@ def _build_thinker_user_prompt(
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
-    return (
+    prompt = (
         f"Mission objective:\n{objective}\n\n"
         f"Allowed bar_configs: {bar_configs}\n"
         f"Preferred session filter: {mission.get('session_filter', 'eth')}\n"
@@ -761,6 +839,14 @@ def _build_thinker_user_prompt(
         f"Structured feedback digest:\n{json.dumps(feedback_digest, indent=2)}\n\n"
         "Design exactly one hypothesis that is implementable by a separate coding model."
     )
+    if feature_knowledge:
+        prompt += (
+            "\n\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
+            f"{json.dumps(feature_knowledge, indent=2, sort_keys=True, default=str)}\n"
+            "AVAILABLE_PRECOMPUTED_FEATURES_JSON_END\n"
+            "Use these precomputed feature columns as the primary building blocks."
+        )
+    return prompt
 
 
 def _build_coder_system_prompt() -> str:
@@ -852,14 +938,23 @@ def _build_coder_handoff(
 def _build_coder_user_prompt(
     *,
     thinker_handoff: dict[str, Any],
+    feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
-    return (
+    prompt = (
         "Implement exactly the handoff below as a signal module.\n"
         "Use only this handoff JSON as source of truth.\n\n"
         "THINKER_HANDOFF_JSON_BEGIN\n"
         f"{json.dumps(thinker_handoff, indent=2, sort_keys=True, default=str)}\n"
         "THINKER_HANDOFF_JSON_END\n"
     )
+    if feature_knowledge:
+        prompt += (
+            "\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
+            f"{json.dumps(feature_knowledge, indent=2, sort_keys=True, default=str)}\n"
+            "AVAILABLE_PRECOMPUTED_FEATURES_JSON_END\n"
+            "Prefer these precomputed features directly; only compute local fallbacks when a column is missing."
+        )
+    return prompt
 
 
 def _task_id(strategy_name: str, bar_config: str, params: dict[str, Any], code_hash: str) -> str:
@@ -1115,6 +1210,21 @@ def main() -> int:
 
     set_execution_mode(ExecutionMode.RESEARCH)
     sample_cache: dict[str, pl.DataFrame] = {}
+    feature_knowledge = _build_feature_knowledge(
+        mission_bar_configs=mission_bar_configs,
+        split=split,
+        session_filter=session_filter,
+        feature_group=feature_group,
+        sample_cache=sample_cache,
+    )
+    feature_knowledge_hash = _sha256_text(
+        json.dumps(feature_knowledge, sort_keys=True, separators=(",", ":"), default=str),
+    )[:16]
+    if feature_knowledge.get("errors"):
+        print(f"Feature knowledge build warnings: {feature_knowledge['errors']}")
+    else:
+        common_count = len(feature_knowledge.get("common_columns", []))
+        print(f"Feature knowledge ready: common_columns={common_count} bar_configs={mission_bar_configs}")
 
     print(
         "LLM orchestrator run_id="
@@ -1187,6 +1297,7 @@ def main() -> int:
                 mission=mission,
                 existing_strategies=existing,
                 feedback_digest=feedback_digest,
+                feature_knowledge=feature_knowledge,
             )
             thinker_generation = _call_stage_json(
                 stage_name="quant_thinker",
@@ -1239,6 +1350,7 @@ def main() -> int:
 
             coder_user_prompt = _build_coder_user_prompt(
                 thinker_handoff=thinker_handoff,
+                feature_knowledge=feature_knowledge,
             )
             coder_generation = _call_stage_json(
                 stage_name="coder",
@@ -1430,6 +1542,7 @@ def main() -> int:
                             "repaired": bool(coder_generation.repaired),
                             "payload_hash": _sha256_text(coder_generation.raw_text),
                         },
+                        "feature_knowledge_hash": feature_knowledge_hash,
                         "code_hash": code_hash,
                         "dry_run": bool(args.dry_run),
                     },

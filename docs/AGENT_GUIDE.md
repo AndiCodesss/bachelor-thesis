@@ -75,6 +75,9 @@ Run both processes:
 set -a && source .env && set +a
 claude auth login  # one-time setup for Claude Max subscription
 
+# Recommended: launch both in tmux with one command + live dashboard
+uv run python scripts/launch_autonomy.py
+
 # Process 1: LLM generator (writes research/signals + enqueues tasks)
 uv run python scripts/llm_orchestrator.py \
   --mission configs/missions/alpha-discovery.yaml \

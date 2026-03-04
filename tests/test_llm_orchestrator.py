@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import polars as pl
 import pytest
 
 
@@ -222,6 +223,64 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
     assert "THINKER_HANDOFF_JSON_BEGIN" in prompt
     assert '"hypothesis_id": "h_01"' in prompt
     assert "THINKER_HANDOFF_JSON_END" in prompt
+
+
+def test_build_feature_knowledge_from_cached_samples():
+    mod = _load_module()
+    sample_cache = {
+        "tick_610": pl.DataFrame({"close": [1.0], "ema_ratio_8": [0.01], "delta": [2.0]}),
+        "volume_2000": pl.DataFrame({"close": [1.0], "ema_ratio_8": [0.02], "atr_14": [3.0]}),
+    }
+    out = mod._build_feature_knowledge(
+        mission_bar_configs=["tick_610", "volume_2000"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        sample_cache=sample_cache,
+    )
+    assert out["common_columns"] == ["close", "ema_ratio_8"]
+    assert out["per_bar_extra_columns"]["tick_610"] == ["delta"]
+    assert out["per_bar_extra_columns"]["volume_2000"] == ["atr_14"]
+    assert out["errors"] == {}
+
+
+def test_prompts_include_feature_knowledge_markers():
+    mod = _load_module()
+    feature_knowledge = {
+        "schema_version": "1.0",
+        "common_columns": ["close", "ema_ratio_8"],
+        "bar_configs": {"tick_610": {"total_columns": 2, "extra_columns": 0}},
+        "per_bar_extra_columns": {"tick_610": []},
+        "computation_notes": ["ema_ratio_N = close / EMA - 1"],
+        "errors": {},
+    }
+    thinker_prompt = mod._build_thinker_user_prompt(
+        mission={"objective": "x", "bar_configs": ["tick_610"], "session_filter": "eth", "feature_group": "all"},
+        existing_strategies=[],
+        feedback_digest={"strengths": [], "weaknesses": [], "error_patterns": [], "guardrails": [], "next_focus": []},
+        feature_knowledge=feature_knowledge,
+    )
+    assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in thinker_prompt
+    assert '"common_columns"' in thinker_prompt
+
+    coder_prompt = mod._build_coder_user_prompt(
+        thinker_handoff={
+            "handoff_version": "1.0",
+            "source_role": "quant_thinker",
+            "payload_hash": "h1",
+            "mission_constraints": {},
+            "hypothesis": {"hypothesis_id": "h1", "strategy_name_hint": "s1"},
+        },
+        feature_knowledge=feature_knowledge,
+    )
+    assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in coder_prompt
+    assert "Prefer these precomputed features directly" in coder_prompt
+
+
+def test_thinker_system_prompt_requires_internal_brainstorm():
+    mod = _load_module()
+    prompt = mod._build_thinker_system_prompt()
+    assert "internally brainstorm" in prompt
 
 
 def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):
