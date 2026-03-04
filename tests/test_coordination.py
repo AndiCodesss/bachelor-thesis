@@ -93,6 +93,46 @@ def test_claim_and_complete_task(tmp_path: Path):
     assert payload["tasks"][0]["verdict"] == "PASS"
 
 
+def test_complete_task_needs_work_requeues_task(tmp_path: Path):
+    queue = tmp_path / "queue.json"
+    lock = tmp_path / "queue.lock"
+    queue.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "t1",
+                        "state": "in_progress",
+                        "assigned_to": "validator",
+                        "retries": 0,
+                        "max_retries": 2,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    out = complete_task(
+        queue_path=queue,
+        lock_path=lock,
+        agent_name="validator",
+        task_id="t1",
+        verdict="NEEDS_WORK",
+    )
+    assert out["state"] == "pending"
+    assert out["assigned_to"] is None
+    assert out["retries"] == 1
+    assert out["verdict"] == "NEEDS_WORK"
+
+    payload = _read(queue)
+    task = payload["tasks"][0]
+    assert task["state"] == "pending"
+    assert task["assigned_to"] is None
+    assert task["retries"] == 1
+
+
 def test_watchdog_requeues_then_fails_on_max_retries(tmp_path: Path):
     queue = tmp_path / "queue.json"
     lock = tmp_path / "queue.lock"

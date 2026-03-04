@@ -92,6 +92,30 @@ def test_choose_module_path_versions_when_content_differs(tmp_path: Path):
     assert is_new2 is False
 
 
+def test_choose_module_path_whitespace_only_difference_versions_file(tmp_path: Path):
+    mod = _load_module()
+    signals_dir = tmp_path
+    (signals_dir / "alpha_x.py").write_text("print('same')\n", encoding="utf-8")
+
+    path, is_new = mod._choose_module_path(
+        signals_dir,
+        strategy_name="alpha_x",
+        module_code="print('same') \n",
+    )
+    assert path.name == "alpha_x_02.py"
+    assert is_new is True
+
+
+def test_maybe_write_can_block_unexpected_overwrite(tmp_path: Path):
+    mod = _load_module()
+    path = tmp_path / "alpha.py"
+    path.write_text("old\n", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        mod._maybe_write(path, "new\n", allow_overwrite=False)
+    assert path.read_text(encoding="utf-8") == "old\n"
+
+
 def test_task_id_is_stable_for_same_inputs():
     mod = _load_module()
     params = {"a": 1, "b": 2}

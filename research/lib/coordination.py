@@ -187,7 +187,7 @@ def complete_task(
     verdict: str,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Complete claimed task (in_progress -> completed/failed)."""
+    """Complete claimed task (in_progress -> completed/failed or requeued)."""
     if verdict not in VALID_VERDICTS:
         raise ValueError(f"Invalid verdict: {verdict}")
 
@@ -203,9 +203,31 @@ def complete_task(
                 raise ValueError(f"Task {task_id} is not in progress")
             if task.get("assigned_to") != agent_name:
                 raise PermissionError(f"Task {task_id} not assigned to {agent_name}")
-            task["state"] = "completed" if verdict == "PASS" else "failed"
+            now = _utc_now().isoformat()
+            if verdict == "PASS":
+                task["state"] = "completed"
+                task["completed_at"] = now
+            elif verdict == "NEEDS_WORK":
+                retries = int(task.get("retries", 0))
+                max_retries = int(task.get("max_retries", 2))
+                if retries < max_retries:
+                    task["state"] = "pending"
+                    task["assigned_to"] = None
+                    task["retries"] = retries + 1
+                    task["last_requeued_at"] = now
+                    task.pop("claimed_at", None)
+                    task.pop("last_heartbeat", None)
+                    task.pop("lease_expires_at", None)
+                else:
+                    task["state"] = "failed"
+                    task["completed_at"] = now
+                    task["failure_reason"] = (
+                        f"NEEDS_WORK retries exhausted ({max_retries})"
+                    )
+            else:
+                task["state"] = "failed"
+                task["completed_at"] = now
             task["verdict"] = verdict
-            task["completed_at"] = _utc_now().isoformat()
             if details:
                 task["details"] = details
             completed = dict(task)

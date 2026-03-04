@@ -87,6 +87,9 @@ def test_signal_contract(module_name: str):
         result = fn(bars)
 
     arr = np.asarray(result)
+    assert arr.dtype == np.int8, (
+        f"{module_name}: expected dtype int8, got {arr.dtype}"
+    )
     assert arr.shape == (len(bars),), (
         f"{module_name}: expected shape ({len(bars)},), got {arr.shape}"
     )

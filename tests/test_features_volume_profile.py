@@ -181,6 +181,32 @@ class TestVolumeProfileFeatures:
         unique_pocs = set([v for v in rolling_pocs if v is not None and not np.isnan(v)])
         assert len(unique_pocs) > 1
 
+    def test_rolling_profile_resets_at_day_boundary(self):
+        timestamps = [
+            datetime(2024, 3, 15, 15, 55, 0),
+            datetime(2024, 3, 15, 16, 0, 0),
+            datetime(2024, 3, 16, 9, 30, 0),
+        ]
+        closes = [100.0, 100.0, 200.0]
+        bars = pl.DataFrame({
+            "ts_event": timestamps,
+            "open": closes,
+            "high": [c + 1.0 for c in closes],
+            "low": [c - 1.0 for c in closes],
+            "close": closes,
+            "volume": [100, 100, 100],
+            "vap_prices": [[100.0], [100.0], [200.0]],
+            "vap_volumes": [[100], [100], [100]],
+        }).with_columns(
+            pl.col("ts_event").dt.replace_time_zone("UTC"),
+            pl.col("volume").cast(pl.UInt32),
+            pl.col("vap_prices").cast(pl.List(pl.Float64)),
+            pl.col("vap_volumes").cast(pl.List(pl.UInt64)),
+        )
+
+        result = compute_volume_profile_features(bars)
+        assert result["rolling_poc"][2] == 200.0
+
     def test_poc_slope_null_for_first_6(self):
         bars = self._make_multi_bar_data(n_bars=10)
         result = compute_volume_profile_features(bars)

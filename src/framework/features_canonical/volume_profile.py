@@ -342,7 +342,8 @@ def compute_volume_profile_features(bars: pl.DataFrame) -> pl.DataFrame:
     hvn_lvn_ratio_arr = np.full(n, np.nan)
 
     for i in range(n):
-        start = max(0, i - rolling_window + 1)
+        session_start = day_start_idx.get(date_list[i], i)
+        start = max(session_start, i - rolling_window + 1)
         window_prices, window_sizes = _concat_bar_vap_window(
             prices_per_bar,
             sizes_per_bar,

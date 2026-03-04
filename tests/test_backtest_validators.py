@@ -2,7 +2,9 @@
 
 import polars as pl
 import numpy as np
+import pytest
 from datetime import datetime, timedelta
+import src.framework.backtest.validators as validators_mod
 from src.framework.backtest.validators import (
     shuffle_test,
     walk_forward_test,
@@ -113,6 +115,29 @@ def test_shuffle_test_random_signal():
     assert "shuffle_std" in result
 
 
+def test_shuffle_test_handles_nan_sharpe_values(monkeypatch: pytest.MonkeyPatch):
+    df = create_synthetic_data(n_bars=20, n_days=2, perfect_signal=False)
+    calls = {"n": 0}
+
+    def _fake_run_backtest(*args, **kwargs):
+        return pl.DataFrame()
+
+    def _fake_compute_metrics(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"sharpe_ratio": 1.0}
+        return {"sharpe_ratio": float("nan")}
+
+    monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
+
+    result = validators_mod.shuffle_test(df, signal_col="signal", n_iterations=5)
+    assert np.isfinite(result["shuffle_mean"])
+    assert np.isfinite(result["shuffle_std"])
+    assert np.isfinite(result["percentile"])
+    assert result["verdict"] in {"PASS", "FAIL"}
+
+
 def test_shuffle_preserves_block_structure():
     """Block-bootstrap shuffle should preserve signal length and value distribution."""
     rng = np.random.default_rng(SEED)
@@ -162,6 +187,55 @@ def test_regime_test_perfect_signal():
     assert isinstance(result["low_vol_sharpe"], float)
 
 
+def test_regime_test_excludes_sparse_days_from_regime_buckets(monkeypatch: pytest.MonkeyPatch):
+    sparse_day = datetime(2025, 1, 1, 9, 30, 0)
+    dense_start = datetime(2025, 1, 2, 9, 30, 0)
+    df = pl.DataFrame({
+        "ts_event": [sparse_day] + [dense_start + timedelta(minutes=5 * i) for i in range(5)],
+        "close": [100.0, 100.5, 100.2, 100.6, 100.4, 100.7],
+        "signal": [0, 1, 0, -1, 0, 1],
+    }).with_columns(
+        pl.col("ts_event").cast(pl.Datetime("ns", "UTC")),
+        pl.col("close").cast(pl.Float64),
+        pl.col("signal").cast(pl.Int8),
+    )
+
+    fake_trades = pl.DataFrame({
+        "entry_time": [
+            sparse_day.replace(tzinfo=None),
+            dense_start.replace(tzinfo=None),
+        ],
+        "exit_time": [
+            sparse_day.replace(tzinfo=None),
+            dense_start.replace(tzinfo=None),
+        ],
+        "entry_price": [100.0, 100.0],
+        "exit_price": [101.0, 101.0],
+        "direction": [1, 1],
+        "size": [1, 1],
+    }).with_columns(
+        pl.col("entry_time").dt.replace_time_zone("UTC"),
+        pl.col("exit_time").dt.replace_time_zone("UTC"),
+    )
+    seen_entry_dates: list[set] = []
+
+    def _fake_run_backtest(*args, **kwargs):
+        return fake_trades
+
+    def _fake_compute_metrics(trades: pl.DataFrame, *args, **kwargs):
+        seen_entry_dates.append(set(trades["entry_time"].dt.date().to_list()) if len(trades) > 0 else set())
+        return {"net_pnl": 1.0, "sharpe_ratio": 0.0}
+
+    monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
+
+    validators_mod.regime_test(df, signal_col="signal")
+    sparse_date = sparse_day.date()
+    # Skip first call (full all_trades metrics); bucket calls must exclude sparse day.
+    for bucket_dates in seen_entry_dates[1:]:
+        assert sparse_date not in bucket_dates
+
+
 def test_param_sensitivity_test_perfect_signal():
     """Perfect signal should PASS param sensitivity test."""
     df = create_synthetic_data(n_bars=500, n_days=3, perfect_signal=True)
@@ -171,6 +245,28 @@ def test_param_sensitivity_test_perfect_signal():
     assert result["perturbed_mean"] >= 0.5 * result["baseline_sharpe"], "Perturbed mean should be >= 50% of baseline"
     assert isinstance(result["degradation_pct"], float)
     assert isinstance(result["perturbed_std"], float)
+
+
+def test_param_sensitivity_handles_nan_sharpe_values(monkeypatch: pytest.MonkeyPatch):
+    df = create_synthetic_data(n_bars=20, n_days=2, perfect_signal=False)
+    calls = {"n": 0}
+
+    def _fake_run_backtest(*args, **kwargs):
+        return pl.DataFrame()
+
+    def _fake_compute_metrics(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"sharpe_ratio": 1.0}
+        return {"sharpe_ratio": float("nan")}
+
+    monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
+
+    result = validators_mod.param_sensitivity_test(df, signal_col="signal", perturbation=0.1)
+    assert np.isfinite(result["perturbed_mean"])
+    assert np.isfinite(result["perturbed_std"])
+    assert np.isfinite(result["degradation_pct"])
 
 
 def test_cost_sensitivity_test_perfect_signal():
@@ -217,6 +313,25 @@ def test_decay_test_perfect_signal():
     assert not result["is_declining"], "Sharpe should not be monotonically declining"
     assert len(result["chunk_sharpes"]) == 4
     assert all(isinstance(s, float) for s in result["chunk_sharpes"])
+
+
+def test_decay_test_uses_same_last_chunk_for_profitability_check(monkeypatch: pytest.MonkeyPatch):
+    df = create_synthetic_data(n_bars=103, n_days=1, perfect_signal=False)
+    seen_lengths = []
+
+    def _fake_run_backtest(chunk_df: pl.DataFrame, *args, **kwargs):
+        seen_lengths.append(len(chunk_df))
+        return pl.DataFrame()
+
+    def _fake_compute_metrics(*args, **kwargs):
+        return {"sharpe_ratio": 0.5, "net_pnl": 1.0}
+
+    monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
+
+    validators_mod.decay_test(df, signal_col="signal", n_chunks=4)
+    # n=103, n_chunks=4 => chunk sizes: 25,25,25,28. Last call should use 28-row last chunk.
+    assert seen_lengths[-1] == 28
 
 
 def test_trade_count_test_pass():

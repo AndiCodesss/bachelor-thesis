@@ -119,11 +119,25 @@ def test_log_return_known_values():
     bars = _make_bars(ts, [100.0, 105.0, 100.0])
     result = compute_statistical_features(bars)
 
-    assert result["log_return"][0] is None
+    assert result["log_return"][0] == 0.0
     expected_1 = np.log(105.0 / 100.0)
     assert abs(result["log_return"][1] - expected_1) < 1e-6
     expected_2 = np.log(100.0 / 105.0)
     assert abs(result["log_return"][2] - expected_2) < 1e-6
+
+
+def test_log_return_resets_at_day_boundary():
+    ts = [
+        datetime(2024, 7, 15, 15, 55, 0),
+        datetime(2024, 7, 15, 16, 0, 0),
+        datetime(2024, 7, 16, 9, 30, 0),
+    ]
+    bars = _make_bars(ts, [100.0, 101.0, 150.0])
+    result = compute_statistical_features(bars)
+
+    assert result["log_return"][0] == 0.0
+    assert result["log_return"][1] is not None
+    assert result["log_return"][2] == 0.0
 
 
 def test_log_return_handles_non_positive_prices():
@@ -269,6 +283,24 @@ def test_vwap_dev_zscore_exists():
     assert "vwap_dev_zscore" in result.columns
 
 
+def test_vwap_dev_zscore_resets_at_session_boundary():
+    ts = [
+        datetime(2024, 7, 15, 15, 55, 0),
+        datetime(2024, 7, 15, 16, 0, 0),
+        datetime(2024, 7, 16, 9, 30, 0),
+    ]
+    bars = _make_bars(
+        ts,
+        prices=[100.0, 140.0, 140.0],
+        volumes=[100, 100, 100],
+        vwaps=[100.0, 100.0, 140.0],
+    )
+    result = compute_statistical_features(bars)
+
+    # First bar of new session has no in-session dispersion yet -> zscore defaults to 0.
+    assert result["vwap_dev_zscore"][2] == 0.0
+
+
 # --------------- output columns ---------------
 
 def test_output_columns_exist():
@@ -337,7 +369,7 @@ def test_single_bar():
     bars = _make_bars(ts, [100.0])
     result = compute_statistical_features(bars)
     assert len(result) == 1
-    assert result["log_return"][0] is None
+    assert result["log_return"][0] == 0.0
 
 
 def test_row_count_preserved():

@@ -211,6 +211,9 @@ def test_build_feature_matrix_multiple_bars_synthetic():
     # Verify we can extract features
     feature_cols = get_feature_columns(result)
     assert len(feature_cols) > 20, "Should have many features from all modules"
+    assert "spread" not in feature_cols, "Absolute spread should be excluded from ML features"
+    if "trade_intensity_aggressor" in result.columns:
+        assert "trade_intensity_aggressor" not in feature_cols
 
 
 def test_build_feature_matrix_include_bar_columns_synthetic():
@@ -300,10 +303,21 @@ def test_build_feature_matrix_real_data_end_to_end():
     assert len(set(X_cols) & set(y_cols)) == 0, "Features and labels should not overlap"
 
     # Together they should account for most columns (except ts_event + raw prices + session VP)
-    from src.framework.features_canonical.builder import RAW_PRICE_COLUMNS, SESSION_VP_COLUMNS, BAR_META_COLUMNS
+    from src.framework.features_canonical.builder import (
+        RAW_PRICE_COLUMNS,
+        RAW_FLOW_COLUMNS,
+        SESSION_VP_COLUMNS,
+        BAR_META_COLUMNS,
+    )
     all_cols = set(result.columns)
     feature_label_cols = set(X_cols) | set(y_cols)
-    excluded = {"ts_event"} | set(RAW_PRICE_COLUMNS) | set(SESSION_VP_COLUMNS) | set(BAR_META_COLUMNS)
+    excluded = (
+        {"ts_event"}
+        | set(RAW_PRICE_COLUMNS)
+        | set(RAW_FLOW_COLUMNS)
+        | set(SESSION_VP_COLUMNS)
+        | set(BAR_META_COLUMNS)
+    )
     remaining = all_cols - feature_label_cols - excluded
     assert len(remaining) == 0, f"Unexpected remaining columns: {remaining}"
 
@@ -577,6 +591,43 @@ def test_load_cached_matrix_rebuilds_stale_cache_for_include_bar_columns(
     }
     missing = required - set(returned.columns)
     assert not missing, f"Rebuilt output missing required bar columns: {sorted(missing)}"
+
+
+def test_load_cached_matrix_rebuilds_when_cache_signature_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    files = get_parquet_files("train")
+    file_path = files[1]
+
+    monkeypatch.setattr(builder_mod, "CACHE_DIR", tmp_path)
+
+    baseline = builder_mod.load_cached_matrix(
+        file_path,
+        bar_size="5m",
+        bar_type="time",
+        session_filter="eth",
+        include_bar_columns=False,
+    )
+    assert len(baseline) > 1
+
+    cache_path = builder_mod._feature_cache_dir("5m", "time", None, "eth") / file_path.name
+    meta_path = builder_mod._cache_meta_path(cache_path)
+    assert meta_path.exists(), "Feature cache metadata sidecar must be written"
+
+    # Simulate stale cache payload from older code: truncate cached frame to 1 row.
+    pl.read_parquet(cache_path).head(1).write_parquet(cache_path)
+
+    old_sig = builder_mod.FEATURE_CACHE_SIGNATURE
+    monkeypatch.setattr(builder_mod, "FEATURE_CACHE_SIGNATURE", old_sig + "_changed")
+    rebuilt = builder_mod.load_cached_matrix(
+        file_path,
+        bar_size="5m",
+        bar_type="time",
+        session_filter="eth",
+        include_bar_columns=False,
+    )
+    assert len(rebuilt) > 1, "Signature mismatch should force cache rebuild"
 
 
 def test_load_or_build_bars_returns_standardized_schema(

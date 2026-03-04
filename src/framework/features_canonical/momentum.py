@@ -3,13 +3,25 @@ import polars as pl
 
 
 def compute_momentum_features(bars: pl.DataFrame) -> pl.DataFrame:
-    # Sort by timestamp for proper rolling operations
-    bars = bars.sort("ts_event")
+    # Sort by timestamp and derive per-session partition key for lag/rolling ops.
+    bars = bars.sort("ts_event").with_columns(
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
+    )
+    bars = bars.with_columns(
+        pl.int_range(pl.len()).over("_date").alias("_bar_idx_in_day"),
+    )
+    prev_close = pl.col("close").shift(1).over("_date")
+    idx = pl.col("_bar_idx_in_day")
 
     # Compute return and momentum features
     bars = bars.with_columns([
         # return_1bar: "Single-bar return"
-        ((pl.col("close") - pl.col("close").shift(1)) / (pl.col("close").shift(1) + 0.0001)).alias("return_1bar"),
+        pl.when(idx == 0)
+        .then(0.0)
+        .when(prev_close.abs() > 1e-12)
+        .then((pl.col("close") - prev_close) / prev_close)
+        .otherwise(None)
+        .alias("return_1bar"),
 
         # vwap_deviation: "Price above VWAP suggests bullish sentiment"
         ((pl.col("close") - pl.col("vwap")) / (pl.col("vwap") + 0.0001)).alias("vwap_deviation"),
@@ -21,19 +33,19 @@ def compute_momentum_features(bars: pl.DataFrame) -> pl.DataFrame:
     # Add rolling features
     bars = bars.with_columns([
         # return_5bar: "Short-term momentum"
-        pl.col("return_1bar").rolling_sum(window_size=5, min_samples=1).alias("return_5bar"),
+        pl.col("return_1bar").rolling_sum(window_size=5, min_samples=1).over("_date").alias("return_5bar"),
 
         # return_12bar: "Medium-term momentum (1hr at 5m bars)"
-        pl.col("return_1bar").rolling_sum(window_size=12, min_samples=1).alias("return_12bar"),
+        pl.col("return_1bar").rolling_sum(window_size=12, min_samples=1).over("_date").alias("return_12bar"),
 
         # vwap_deviation_ma5: "Persistent VWAP deviation signals trend"
-        pl.col("vwap_deviation").rolling_mean(window_size=5, min_samples=1).alias("vwap_deviation_ma5"),
+        pl.col("vwap_deviation").rolling_mean(window_size=5, min_samples=1).over("_date").alias("vwap_deviation_ma5"),
 
         # range_ma5: "Smoothed volatility"
-        pl.col("high_low_range").rolling_mean(window_size=5, min_samples=1).alias("range_ma5"),
+        pl.col("high_low_range").rolling_mean(window_size=5, min_samples=1).over("_date").alias("range_ma5"),
 
         # volume_ma5: "Average volume baseline"
-        pl.col("volume").rolling_mean(window_size=5, min_samples=1).alias("volume_ma5"),
+        pl.col("volume").rolling_mean(window_size=5, min_samples=1).over("_date").alias("volume_ma5"),
     ])
 
     # Add volume-based features

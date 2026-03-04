@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import time
 import traceback
 from typing import Any, Callable
@@ -601,7 +602,7 @@ def _choose_module_path(signals_dir: Path, *, strategy_name: str, module_code: s
         existing = candidate.read_text(encoding="utf-8")
     except Exception:
         existing = ""
-    if existing.strip() == module_code.strip():
+    if existing == module_code:
         return candidate, False
 
     suffix = 2
@@ -613,7 +614,7 @@ def _choose_module_path(signals_dir: Path, *, strategy_name: str, module_code: s
             existing_alt = alt.read_text(encoding="utf-8")
         except Exception:
             existing_alt = ""
-        if existing_alt.strip() == module_code.strip():
+        if existing_alt == module_code:
             return alt, False
         suffix += 1
 
@@ -1011,7 +1012,26 @@ def _build_task(
     }
 
 
-def _maybe_write(path: Path, content: str) -> None:
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def _maybe_write(path: Path, content: str, *, allow_overwrite: bool = True) -> None:
     if path.exists():
         try:
             current = path.read_text(encoding="utf-8")
@@ -1019,8 +1039,9 @@ def _maybe_write(path: Path, content: str) -> None:
             current = None
         if current == content:
             return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+        if not allow_overwrite:
+            raise FileExistsError(f"Refusing to overwrite existing module path: {path}")
+    _atomic_write_text(path, content)
 
 
 def _cfg_dict(value: Any) -> dict[str, Any]:
@@ -1415,7 +1436,21 @@ def main() -> int:
             if args.dry_run:
                 validation_errors = []
             else:
-                _maybe_write(module_path, code)
+                for _ in range(8):
+                    try:
+                        _maybe_write(module_path, code, allow_overwrite=not is_new_path)
+                        break
+                    except FileExistsError:
+                        module_path, is_new_path = _choose_module_path(
+                            signals_dir,
+                            strategy_name=strategy_name,
+                            module_code=code,
+                        )
+                        module_name = module_path.stem
+                else:
+                    raise RuntimeError(
+                        f"Could not reserve unique module path for strategy {strategy_name}",
+                    )
                 validation_errors = _validate_generated_strategy(
                     strategy_name=module_name,
                     signals_dir=signals_dir,

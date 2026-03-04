@@ -116,14 +116,28 @@ def test_return_calculation():
 
     result = compute_momentum_features(bars)
 
-    # Bar 1: return_1bar should be null (no previous bar)
-    assert result["return_1bar"][0] is None or pl.Series([result["return_1bar"][0]]).is_null()[0]
+    # Bar 1: session boundary baseline
+    assert result["return_1bar"][0] == 0.0
 
     # Bar 2: return = (105-100)/100 = 0.05
     assert abs(result["return_1bar"][1] - 0.05) < 0.001
 
     # Bar 3: return = (100-105)/105 ~ -0.0476
     assert abs(result["return_1bar"][2] - (-0.047619)) < 0.001
+
+
+def test_returns_and_rolling_features_reset_at_day_boundary():
+    bars = _make_bars([
+        (datetime(2024, 7, 15, 15, 55, 0), 100.0, 100.0, 100.0, 100.0, 10, 100.0),
+        (datetime(2024, 7, 15, 16, 0, 0), 101.0, 101.0, 101.0, 101.0, 10, 101.0),
+        (datetime(2024, 7, 16, 9, 30, 0), 150.0, 150.0, 150.0, 150.0, 10, 150.0),
+        (datetime(2024, 7, 16, 9, 35, 0), 151.0, 151.0, 151.0, 151.0, 10, 151.0),
+    ])
+
+    result = compute_momentum_features(bars)
+    assert result["return_1bar"][2] == 0.0, "First bar of session must not use prior-day close"
+    assert result["return_5bar"][2] == 0.0, "Rolling window should reset at session boundary"
+    assert result["return_1bar"][3] is not None
 
 
 def test_close_position_edge_cases():

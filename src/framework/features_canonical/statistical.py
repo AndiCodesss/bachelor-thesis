@@ -57,6 +57,12 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
         })
 
     bars = bars.select(["ts_event", "open", "high", "low", "close", "volume", "vwap"]).sort("ts_event")
+    bars = bars.with_columns(
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
+    )
+    bars = bars.with_columns(
+        pl.int_range(pl.len()).over("_date").alias("_bar_idx_in_day"),
+    )
 
     # Use vwap from bars directly
     bars = bars.rename({"vwap": "_bar_vwap"})
@@ -71,16 +77,22 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
     ])
 
     # --- Log return ---
+    prev_close = pl.col("_close_pos").shift(1).over("_date")
     bars = bars.with_columns(
-        (pl.col("_close_pos").log() - pl.col("_close_pos").shift(1).log()).alias("log_return"),
+        pl.when(pl.col("_bar_idx_in_day") == 0)
+        .then(0.0)
+        .when(prev_close.is_not_null())
+        .then(pl.col("_close_pos").log() - prev_close.log())
+        .otherwise(None)
+        .alias("log_return"),
     )
 
     # --- Yang-Zhang volatility components ---
     bars = bars.with_columns(
-        (pl.col("_open_pos").log() - pl.col("_close_pos").shift(1).log()).alias("_o_ret"),
+        (pl.col("_open_pos").log() - pl.col("_close_pos").shift(1).over("_date").log()).alias("_o_ret"),
     )
     bars = bars.with_columns(
-        (pl.col("_close_pos").log() - pl.col("_close_pos").shift(1).log()).alias("_cc_ret"),
+        (pl.col("_close_pos").log() - pl.col("_close_pos").shift(1).over("_date").log()).alias("_cc_ret"),
     )
 
     bars = bars.with_columns([
@@ -98,9 +110,9 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
     k = 0.34 / (1.34 + (n + 1) / (n - 1))
 
     bars = bars.with_columns([
-        pl.col("_o_ret").rolling_var(window_size=n, min_samples=n).alias("_var_overnight"),
-        pl.col("_cc_ret").rolling_var(window_size=n, min_samples=n).alias("_var_cc"),
-        pl.col("_rs_bar").rolling_mean(window_size=n, min_samples=n).alias("_mean_rs"),
+        pl.col("_o_ret").rolling_var(window_size=n, min_samples=n).over("_date").alias("_var_overnight"),
+        pl.col("_cc_ret").rolling_var(window_size=n, min_samples=n).over("_date").alias("_var_cc"),
+        pl.col("_rs_bar").rolling_mean(window_size=n, min_samples=n).over("_date").alias("_mean_rs"),
     ])
 
     bars = bars.with_columns(
@@ -129,10 +141,6 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
     )
 
     # --- Session VWAP deviation ---
-    bars = bars.with_columns(
-        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_date"),
-    )
-
     bars = bars.with_columns([
         (pl.col("_bar_vwap") * pl.col("volume").cast(pl.Float64))
         .cum_sum()
@@ -157,8 +165,8 @@ def compute_statistical_features(bars: pl.DataFrame) -> pl.DataFrame:
 
     # vwap_dev_zscore
     bars = bars.with_columns([
-        pl.col("vwap_deviation").rolling_mean(window_size=VWAP_ZSCORE_WINDOW, min_samples=1).alias("_vdev_mean"),
-        pl.col("vwap_deviation").rolling_std(window_size=VWAP_ZSCORE_WINDOW, min_samples=2).alias("_vdev_std"),
+        pl.col("vwap_deviation").rolling_mean(window_size=VWAP_ZSCORE_WINDOW, min_samples=1).over("_date").alias("_vdev_mean"),
+        pl.col("vwap_deviation").rolling_std(window_size=VWAP_ZSCORE_WINDOW, min_samples=2).over("_date").alias("_vdev_std"),
     ])
 
     bars = bars.with_columns(

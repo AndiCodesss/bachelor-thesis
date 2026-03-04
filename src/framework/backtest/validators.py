@@ -7,6 +7,15 @@ from src.framework.backtest.metrics import compute_metrics
 from src.framework.data.constants import SEED, TOTAL_COST_RT
 
 
+def _sanitize_sharpe(value: float | int | None) -> float:
+    """Convert non-finite Sharpe values to 0.0 for robust aggregate comparisons."""
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return val if np.isfinite(val) else 0.0
+
+
 def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int = 100, **backtest_kwargs) -> dict:
     """Randomize signal assignment to test if performance is due to chance.
 
@@ -22,7 +31,7 @@ def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int
     # Run backtest on real signal
     real_trades = run_backtest(df, signal_col=signal_col, **backtest_kwargs)
     real_metrics = compute_metrics(real_trades)
-    real_sharpe = real_metrics["sharpe_ratio"]
+    real_sharpe = _sanitize_sharpe(real_metrics["sharpe_ratio"])
 
     # Run backtest on shuffled signals (block permutation)
     shuffle_sharpes = []
@@ -44,15 +53,23 @@ def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int
 
         shuffle_trades = run_backtest(df_shuffled, signal_col="_shuffled_signal", **backtest_kwargs)
         shuffle_metrics = compute_metrics(shuffle_trades)
-        shuffle_sharpes.append(shuffle_metrics["sharpe_ratio"])
+        shuffle_sharpes.append(_sanitize_sharpe(shuffle_metrics["sharpe_ratio"]))
 
     # Compute statistics
-    shuffle_mean = float(np.mean(shuffle_sharpes))
-    shuffle_std = float(np.std(shuffle_sharpes, ddof=1)) if len(shuffle_sharpes) > 1 else 0.0
-    percentile_95 = float(np.percentile(shuffle_sharpes, 95))
+    if len(shuffle_sharpes) == 0:
+        shuffle_mean = 0.0
+        shuffle_std = 0.0
+        percentile_95 = 0.0
+    else:
+        shuffle_mean = float(np.mean(shuffle_sharpes))
+        shuffle_std = float(np.std(shuffle_sharpes, ddof=1)) if len(shuffle_sharpes) > 1 else 0.0
+        percentile_95 = float(np.percentile(shuffle_sharpes, 95))
 
     # Compute where real_sharpe ranks
-    percentile = float(np.sum(np.array(shuffle_sharpes) < real_sharpe) / len(shuffle_sharpes) * 100)
+    if len(shuffle_sharpes) == 0:
+        percentile = 0.0
+    else:
+        percentile = float(np.sum(np.array(shuffle_sharpes) < real_sharpe) / len(shuffle_sharpes) * 100)
 
     verdict = "PASS" if real_sharpe > percentile_95 else "FAIL"
 
@@ -148,16 +165,35 @@ def regime_test(df: pl.DataFrame, signal_col: str = "signal", **backtest_kwargs)
         df_with_date
         .group_by("_date")
         .agg(pl.col("close").pct_change().std().alias("_daily_vol"))
+        .filter(pl.col("_daily_vol").is_not_null())
     )
+    if len(daily_vol) == 0:
+        return {
+            "verdict": "FAIL",
+            "high_vol_sharpe": 0.0,
+            "low_vol_sharpe": 0.0,
+            "high_vol_pnl": 0.0,
+            "low_vol_pnl": 0.0,
+        }
     median_vol = daily_vol["_daily_vol"].median()
+    valid_days = set(daily_vol["_date"].to_list())
     high_vol_days = set(daily_vol.filter(pl.col("_daily_vol") > median_vol)["_date"].to_list())
 
     # Partition trades by regime of entry date
     trades_with_date = all_trades.with_columns(
         pl.col("entry_time").dt.date().alias("_entry_date")
     )
-    high_vol_trades = trades_with_date.filter(pl.col("_entry_date").is_in(high_vol_days)).drop("_entry_date")
-    low_vol_trades = trades_with_date.filter(~pl.col("_entry_date").is_in(high_vol_days)).drop("_entry_date")
+    trades_with_regime = trades_with_date.filter(pl.col("_entry_date").is_in(valid_days))
+    if len(trades_with_regime) == 0:
+        return {
+            "verdict": "FAIL",
+            "high_vol_sharpe": 0.0,
+            "low_vol_sharpe": 0.0,
+            "high_vol_pnl": 0.0,
+            "low_vol_pnl": 0.0,
+        }
+    high_vol_trades = trades_with_regime.filter(pl.col("_entry_date").is_in(high_vol_days)).drop("_entry_date")
+    low_vol_trades = trades_with_regime.filter(~pl.col("_entry_date").is_in(high_vol_days)).drop("_entry_date")
 
     high_vol_metrics = compute_metrics(high_vol_trades)
     low_vol_metrics = compute_metrics(low_vol_trades)
@@ -192,7 +228,7 @@ def param_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", perturb
     # Run baseline backtest
     baseline_trades = run_backtest(df, signal_col=signal_col, **backtest_kwargs)
     baseline_metrics = compute_metrics(baseline_trades)
-    baseline_sharpe = baseline_metrics["sharpe_ratio"]
+    baseline_sharpe = _sanitize_sharpe(baseline_metrics["sharpe_ratio"])
 
     # Run backtest with perturbed signals
     n_iterations = 20
@@ -220,7 +256,7 @@ def param_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", perturb
 
         perturbed_trades = run_backtest(df_perturbed, signal_col="_perturbed_signal", **backtest_kwargs)
         perturbed_metrics = compute_metrics(perturbed_trades)
-        perturbed_sharpes.append(perturbed_metrics["sharpe_ratio"])
+        perturbed_sharpes.append(_sanitize_sharpe(perturbed_metrics["sharpe_ratio"]))
 
     # Compute statistics
     perturbed_mean = float(np.mean(perturbed_sharpes))
@@ -303,6 +339,7 @@ def decay_test(df: pl.DataFrame, signal_col: str = "signal", n_chunks: int = 4, 
     chunk_size = total_rows // n_chunks
 
     chunk_sharpes = []
+    last_chunk_df = pl.DataFrame()
 
     for i in range(n_chunks):
         start_idx = i * chunk_size
@@ -315,13 +352,19 @@ def decay_test(df: pl.DataFrame, signal_col: str = "signal", n_chunks: int = 4, 
 
         chunk_trades = run_backtest(chunk_df, signal_col=signal_col, **backtest_kwargs)
         chunk_metrics = compute_metrics(chunk_trades)
-        chunk_sharpes.append(chunk_metrics["sharpe_ratio"])
+        chunk_sharpes.append(_sanitize_sharpe(chunk_metrics["sharpe_ratio"]))
+        last_chunk_df = chunk_df
 
     # Check if monotonically declining
     is_declining = all(chunk_sharpes[i] >= chunk_sharpes[i+1] for i in range(len(chunk_sharpes) - 1))
 
     # Check if last chunk is profitable
-    last_chunk_df = df[-(total_rows // n_chunks):]
+    if len(last_chunk_df) == 0:
+        return {
+            "verdict": "FAIL",
+            "chunk_sharpes": chunk_sharpes,
+            "is_declining": is_declining,
+        }
     last_chunk_trades = run_backtest(last_chunk_df, signal_col=signal_col, **backtest_kwargs)
     last_chunk_metrics = compute_metrics(last_chunk_trades)
     last_chunk_profitable = last_chunk_metrics["net_pnl"] > 0

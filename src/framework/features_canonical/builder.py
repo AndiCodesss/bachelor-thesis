@@ -5,6 +5,8 @@ warmup bars from a dedicated bar cache (untrimmed), then computes features.
 This keeps peak memory to 1 raw file at a time.
 """
 import gc
+import hashlib
+import json
 import re
 from datetime import date as _date_cls
 from pathlib import Path
@@ -36,6 +38,34 @@ CACHE_DIR = RESULTS_DIR / "cache"
 WARMUP_CONTEXT_DAYS = 4
 
 _DATE_RE = re.compile(r"nq_(\d{4})-(\d{2})-(\d{2})\.parquet$")
+_FEATURE_CACHE_SIGNATURE_VERSION = 1
+
+
+def _cache_signature_sources() -> list[Path]:
+    """Source files that define cached feature values."""
+    feature_dir = Path(__file__).resolve().parent
+    sources = list(feature_dir.glob("*.py"))
+    data_constants = feature_dir.parent / "data" / "constants.py"
+    if data_constants.exists():
+        sources.append(data_constants)
+    deduped = {p.resolve() for p in sources}
+    return sorted(deduped, key=lambda p: str(p))
+
+
+def _compute_feature_cache_signature() -> str:
+    """Hash feature code so logic changes invalidate stale parquet caches."""
+    hasher = hashlib.sha256()
+    hasher.update(f"feature-cache-v{_FEATURE_CACHE_SIGNATURE_VERSION}".encode("utf-8"))
+    for path in _cache_signature_sources():
+        hasher.update(str(path).encode("utf-8"))
+        try:
+            hasher.update(path.read_bytes())
+        except OSError:
+            hasher.update(b"<missing>")
+    return hasher.hexdigest()
+
+
+FEATURE_CACHE_SIGNATURE = _compute_feature_cache_signature()
 
 # Define which columns are labels (not features)
 LABEL_COLUMNS = [
@@ -53,6 +83,7 @@ LABEL_COLUMNS = [
 # Raw non-stationary price columns — not valid ML features (absolute levels change over time)
 RAW_PRICE_COLUMNS = [
     "open", "high", "low", "close", "vwap", "bid_price", "ask_price", "mid_price",
+    "spread",
     # Raw price-unit (close - session VWAP) from statistical module.
     "vwap_deviation_stat",
     "poc_price", "va_high", "va_low", "rolling_poc", "rolling_va_high", "rolling_va_low",
@@ -75,6 +106,8 @@ BAR_META_COLUMNS = [
 # Raw flow columns optionally passed through for strategy logic; not ML features
 RAW_FLOW_COLUMNS = [
     "trade_count",
+    # Aggressor module's raw count variant (kept for strategy introspection only).
+    "trade_intensity_aggressor",
     "buy_volume",
     "sell_volume",
     "large_trade_count",
@@ -317,7 +350,7 @@ def load_cached_matrix(
 
     cache_required = _required_cache_columns(include_bar_columns, required_columns)
 
-    if cache_path.exists():
+    if cache_path.exists() and _cache_metadata_matches(cache_path):
         cached = pl.read_parquet(cache_path)
         if len(cached) == 0:
             return cached
@@ -373,6 +406,7 @@ def load_cached_matrix(
     if len(df) > 0:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         df.write_parquet(cache_path)
+        _write_cache_metadata(cache_path)
 
     return _apply_output_filters(df)
 
@@ -401,6 +435,30 @@ def _required_cache_columns(
     if include_bar_columns:
         required.update(_BAR_COLUMNS)
     return sorted(required)
+
+
+def _cache_meta_path(cache_path: Path) -> Path:
+    return cache_path.with_suffix(cache_path.suffix + ".meta.json")
+
+
+def _cache_metadata_matches(cache_path: Path) -> bool:
+    """Accept cache only when metadata signature matches current feature code."""
+    meta_path = _cache_meta_path(cache_path)
+    if not meta_path.exists():
+        return False
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return str(payload.get("feature_cache_signature", "")) == FEATURE_CACHE_SIGNATURE
+
+
+def _write_cache_metadata(cache_path: Path) -> None:
+    meta_path = _cache_meta_path(cache_path)
+    payload = {
+        "feature_cache_signature": FEATURE_CACHE_SIGNATURE,
+    }
+    meta_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
 def _apply_output_filters(df: pl.DataFrame) -> pl.DataFrame:
