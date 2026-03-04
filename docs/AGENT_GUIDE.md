@@ -77,6 +77,7 @@ claude auth login  # one-time setup for Claude Max subscription
 
 # Recommended: launch both in tmux with one command + live dashboard
 uv run python scripts/launch_autonomy.py
+# By default Ctrl+C shuts down both workers gracefully (use --keep-running to detach).
 
 # Process 1: LLM generator (writes research/signals + enqueues tasks)
 uv run python scripts/llm_orchestrator.py \

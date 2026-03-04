@@ -74,6 +74,44 @@ def _tmux_new_session(name: str, shell_command: str) -> None:
     )
 
 
+def _tmux_interrupt_session(name: str) -> None:
+    """Send Ctrl+C to the first pane of a session."""
+    if not _tmux_has_session(name):
+        return
+    subprocess.run(["tmux", "send-keys", "-t", name, "C-c"], check=False)
+
+
+def _shutdown_sessions_gracefully(
+    sessions: list[str],
+    *,
+    wait_seconds: float = 3.0,
+    poll_seconds: float = 0.2,
+) -> list[str]:
+    """Attempt graceful session shutdown; force kill leftovers."""
+    targets = [s for s in sessions if _tmux_has_session(s)]
+    if not targets:
+        return []
+
+    for session in targets:
+        _tmux_interrupt_session(session)
+
+    deadline = time.monotonic() + max(0.5, float(wait_seconds))
+    try:
+        while time.monotonic() < deadline:
+            remaining = [s for s in targets if _tmux_has_session(s)]
+            if not remaining:
+                return []
+            time.sleep(max(0.1, float(poll_seconds)))
+    except KeyboardInterrupt:
+        # If another Ctrl+C arrives during shutdown wait, continue with force-kill path.
+        pass
+
+    remaining = [s for s in targets if _tmux_has_session(s)]
+    for session in remaining:
+        _tmux_kill_session(session)
+    return remaining
+
+
 def _read_json(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -490,6 +528,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Do not kill existing tmux sessions with the same names before launch.",
     )
     parser.add_argument("--no-resume", action="store_true", help="Start workers without --resume.")
+    parser.add_argument(
+        "--keep-running",
+        action="store_true",
+        help="On Ctrl+C, stop monitoring but leave tmux workers running.",
+    )
     parser.add_argument("--validator-only", action="store_true", help="Launch only validator worker.")
     parser.add_argument("--orchestrator-only", action="store_true", help="Launch only LLM orchestrator worker.")
     return parser
@@ -605,7 +648,22 @@ def main() -> int:
             time.sleep(poll_seconds)
     except KeyboardInterrupt:
         print("")
-        print("Monitor stopped (Ctrl+C). Workers keep running in tmux.")
+        if args.keep_running:
+            print("Monitor stopped (Ctrl+C). Workers keep running in tmux.")
+            return 0
+
+        sessions_to_stop: list[str] = []
+        if launch_orchestrator:
+            sessions_to_stop.append(orch_session)
+        if launch_validator:
+            sessions_to_stop.append(val_session)
+
+        print("Monitor stopped (Ctrl+C). Shutting down workers gracefully...")
+        forced = _shutdown_sessions_gracefully(sessions_to_stop)
+        if forced:
+            print(f"{YELLOW}Forced session shutdown: {', '.join(forced)}{RESET}")
+        else:
+            print(f"{GREEN}Workers stopped cleanly.{RESET}")
         return 0
 
 
