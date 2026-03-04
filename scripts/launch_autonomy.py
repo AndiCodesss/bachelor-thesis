@@ -16,6 +16,8 @@ import time
 from statistics import mean
 from typing import Any
 
+import yaml
+
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -115,6 +117,13 @@ def _shutdown_sessions_gracefully(
 def _read_json(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _read_yaml(path: Path, default: Any) -> Any:
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return default
 
@@ -274,6 +283,7 @@ def _render_dashboard(
     val_session: str,
     mission: Path,
     agent_config: Path,
+    mission_max_experiments: int | None,
     validator_enabled: bool,
     orchestrator_enabled: bool,
 ) -> None:
@@ -303,7 +313,11 @@ def _render_dashboard(
         },
     )
     experiments_run = budget.get("experiments_run", 0)
-    max_experiments = budget.get("max_experiments", "n/a")
+    max_experiments = (
+        int(mission_max_experiments)
+        if isinstance(mission_max_experiments, int)
+        else budget.get("max_experiments", "n/a")
+    )
     failures = budget.get("failures_by_type", {})
     if not isinstance(failures, dict):
         failures = {}
@@ -533,6 +547,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="On Ctrl+C, stop monitoring but leave tmux workers running.",
     )
+    parser.add_argument(
+        "--allow-bootstrap",
+        action="store_true",
+        help="Allow validator to auto-bootstrap tasks from research/signals when queue is empty.",
+    )
     parser.add_argument("--validator-only", action="store_true", help="Launch only validator worker.")
     parser.add_argument("--orchestrator-only", action="store_true", help="Launch only LLM orchestrator worker.")
     return parser
@@ -575,6 +594,15 @@ def main() -> int:
     if not Path(nq_path).exists():
         raise RuntimeError(f"NQ_DATA_PATH does not exist: {nq_path}")
 
+    mission_payload = _read_yaml(mission, default={})
+    mission_max_experiments: int | None = None
+    if isinstance(mission_payload, dict):
+        raw = mission_payload.get("max_experiments")
+        try:
+            mission_max_experiments = int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            mission_max_experiments = None
+
     logs_dir = root / "results" / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -588,6 +616,7 @@ def main() -> int:
             _tmux_kill_session(val_session)
 
     resume_flag = "" if args.no_resume else " --resume"
+    bootstrap_flag = "" if args.allow_bootstrap else " --no-bootstrap"
     mission_q = shlex.quote(str(mission))
     agent_q = shlex.quote(str(agent_cfg))
     root_q = shlex.quote(str(root))
@@ -597,7 +626,7 @@ def main() -> int:
             f"cd {root_q}; "
             "set -a; source .env; set +a; "
             f"uv run python -u scripts/research.py --mission {mission_q} --auto-mode "
-            f"--worker-agent validator{resume_flag} 2>&1 | tee -a results/logs/research_worker.out"
+            f"--worker-agent validator{resume_flag}{bootstrap_flag} 2>&1 | tee -a results/logs/research_worker.out"
         )
         _tmux_new_session(val_session, validator_cmd)
 
@@ -631,6 +660,7 @@ def main() -> int:
                 val_session=val_session,
                 mission=mission,
                 agent_config=agent_cfg,
+                mission_max_experiments=mission_max_experiments,
                 validator_enabled=launch_validator,
                 orchestrator_enabled=launch_orchestrator,
             )
