@@ -129,3 +129,13 @@ def test_parse_thinker_events_ignores_bad_lines(tmp_path):
     f.write_text("not json\n{\"type\": \"other\"}\n")
     events = _parse_thinker_events(f)
     assert events == []
+
+
+def test_summarize_write():
+    result = _summarize_tool_input("Write", {"file_path": "/some/path/output.py"})
+    assert "output.py" in result
+
+
+def test_summarize_edit():
+    result = _summarize_tool_input("Edit", {"file_path": "/some/path/main.py"})
+    assert "main.py" in result

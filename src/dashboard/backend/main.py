@@ -89,7 +89,22 @@ def _recent_json_events(path: Path, event_names: set[str], limit: int, scan_line
 
 # --- Thinker Session Helpers ---
 
-SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-mnt-c-Users-Andreas-Oberd-rfer-Downloads-bachelor"
+def _get_sessions_dir() -> Path:
+    """Find the Claude sessions directory for this project."""
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        return projects_dir / "unknown"
+    # Claude slugifies the project path by replacing / and special chars with -
+    # Find the directory that contains "bachelor" (our project name)
+    candidates = [d for d in projects_dir.iterdir() if d.is_dir() and "bachelor" in d.name]
+    if candidates:
+        # Pick the one with the longest name match (most specific)
+        return max(candidates, key=lambda d: len(d.name))
+    # Fallback: compute slug by replacing / with - and spaces with -
+    slug = str(project_root).replace("/", "-").replace(" ", "-").lstrip("-")
+    return projects_dir / slug
+
+SESSIONS_DIR = _get_sessions_dir()
 
 
 def _summarize_tool_input(tool_name: str, input_data: dict) -> str:
@@ -117,7 +132,7 @@ def _parse_thinker_events(jsonl_path: Path, max_events: int = 40) -> list[dict]:
     events: list[dict] = []
     pending_tools: dict[str, str] = {}  # tool_use id -> tool name
 
-    lines = _tail_lines(jsonl_path, max_lines=200)
+    lines = _tail_lines(jsonl_path, max_lines=max(200, max_events * 5))
     for raw in lines:
         line = raw.strip()
         if not line:
