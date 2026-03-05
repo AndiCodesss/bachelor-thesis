@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "LLM-driven alpha discovery platform with A/B experiment comparing OHLCV and MBP1 microstructure features on NQ futures"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.115.0,<1.0.0",
     "lightgbm>=4.6.0,<5.0.0",
     "notebooklm-py[browser]>=0.3.3",
     "numpy>=2.0.0,<3.0.0",
