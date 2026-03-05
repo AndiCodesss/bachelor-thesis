@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-03T15:26:40.208238+00:00",
+  "generated_at": "2026-03-05T09:16:58.850057+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 28,
   "files": [
@@ -11,23 +11,23 @@
     },
     {
       "path": "src/framework/backtest/costs.py",
-      "sha256": "e31df15117cb37e3b16f30eab24aa9e7be01712ce0588f5eba2a231767e645c6",
-      "size_bytes": 8071
+      "sha256": "70256996b91f1419c131895d2430cea448be757d1c9323730f8442debe5f59fa",
+      "size_bytes": 8272
     },
     {
       "path": "src/framework/backtest/engine.py",
-      "sha256": "565b7cc67a660c6ff69ac740a40a028b9ca47b4eeaa28c9149e3991e4f78c4f3",
-      "size_bytes": 14412
+      "sha256": "4a532b408fd14a14e4640d49e55f22f3f93d8b2b447739c78495b0f316e6d23b",
+      "size_bytes": 15480
     },
     {
       "path": "src/framework/backtest/metrics.py",
-      "sha256": "6697516962c215e9488de5556a04185a36ae61ab01de6b6dc4addcea95d66899",
-      "size_bytes": 6651
+      "sha256": "dfec9a2b1b4c5d07af4089c5506663d8215264440bd2575c813998e7016c3255",
+      "size_bytes": 6572
     },
     {
       "path": "src/framework/backtest/validators.py",
-      "sha256": "521d242924e36691f483d687c91e5f0d4b911f4f4a13e3307c2c6e0e83bc4287",
-      "size_bytes": 14733
+      "sha256": "a2d70361b3e58a27dc2e8949ca5b94268b0b33ad89e0253c29e594ba96f79ce3",
+      "size_bytes": 16155
     },
     {
       "path": "src/framework/data/bars.py",
@@ -51,58 +51,58 @@
     },
     {
       "path": "src/framework/features_canonical/aggressor.py",
-      "sha256": "41e7900abb3f48e4d373efe5a33f1777646eeedab5c9913bfe8e4851d5cd1003",
-      "size_bytes": 7046
+      "sha256": "4cba94a04cb2099f319fd11404b0c9be132b28aa55a2faecf5f4f5b2e621f08c",
+      "size_bytes": 7125
     },
     {
       "path": "src/framework/features_canonical/book.py",
-      "sha256": "79063fc9021c05138b929d4213d6325aea0731e66d53042aa762bc658c729048",
-      "size_bytes": 2278
+      "sha256": "2066e01b3a243d48669a8ce73cb4a9558d6b663415c814c5b67e8cd67c8cddc9",
+      "size_bytes": 2824
     },
     {
       "path": "src/framework/features_canonical/builder.py",
-      "sha256": "29d3e8308c4172b0aff3af71bebce2a8fe7a0edfc38387dfa5e347b6310cea30",
-      "size_bytes": 24791
+      "sha256": "d5a5253b990c637ed6ea74bfe29bd036ee9df5581749417a7ca7c903123b44f2",
+      "size_bytes": 27030
     },
     {
       "path": "src/framework/features_canonical/footprint.py",
-      "sha256": "98147bf26c9ec7978d816cebf126656604dbb042ac8b965dc438b020e4c907f4",
-      "size_bytes": 9457
+      "sha256": "5e8ce6975ea1c1cdbf2626424eec45cee033077718c897fe7e99605b8b5f7ae0",
+      "size_bytes": 10128
     },
     {
       "path": "src/framework/features_canonical/labels.py",
-      "sha256": "3a4c83588e6144a9748e6aefd78f468b0ca451584f15c924e33df6f62213660b",
-      "size_bytes": 3394
+      "sha256": "23cc8ef1d6313e555a08bafc676837a20ade26fd28a8d584aa15af8c62583ea9",
+      "size_bytes": 3588
     },
     {
       "path": "src/framework/features_canonical/microstructure.py",
-      "sha256": "7500b66cdea72e995004906554daf41b8046e8eacc74494db6f493925628a296",
-      "size_bytes": 4905
+      "sha256": "2cbcbd9fdd567f4bd44e0cfb8962e34d22652ebdf58b35dc368bee20e6bd8e2e",
+      "size_bytes": 5168
     },
     {
       "path": "src/framework/features_canonical/microstructure_v2.py",
-      "sha256": "4be6d8ee2806e3e65da8ae8c9ab02584ed5e30a90e4957e04097cacbff731e6e",
-      "size_bytes": 3317
+      "sha256": "3bfbaeaf7486caea4753ef98a6e8cc3c529d79847ea9eac8fb3f8941350def93",
+      "size_bytes": 3375
     },
     {
       "path": "src/framework/features_canonical/momentum.py",
-      "sha256": "b1f3365a5e6cb40b37294e216b8fae19196686a61328cac99e08399e24e5179f",
-      "size_bytes": 4029
+      "sha256": "2f85ea6e60fdee8fb7cf0f7bd7dc78335c3ae6d876a62c0c22ecf2d3bf8cda9b",
+      "size_bytes": 4519
     },
     {
       "path": "src/framework/features_canonical/ohlcv_indicators.py",
-      "sha256": "65cc51fa86d0091131e0223ac98961e42ca2e4cae45eaf9e3b1db80f332c995f",
-      "size_bytes": 8921
+      "sha256": "0a11e4994e728825e85115856da201700b0d79e72408870e5f9449785bd29e71",
+      "size_bytes": 9985
     },
     {
       "path": "src/framework/features_canonical/opening_range.py",
-      "sha256": "c6bf418eee6f86aa4545c33474ec1849e1ebda9ed3de3508f6f327ff804d90b5",
-      "size_bytes": 3865
+      "sha256": "234616dac94079b4801525fd7bd072bad58dcbbe93f4268114bbb1da7b274b13",
+      "size_bytes": 4254
     },
     {
       "path": "src/framework/features_canonical/orderflow.py",
-      "sha256": "fa0efd60ae960fdf7887091e8a49e856cfe3b8b1b08cd1298ce1a381279ee309",
-      "size_bytes": 4077
+      "sha256": "48603cefdeba7d3b35333c577abc67329d2be67f239fca3471f1133819d72122",
+      "size_bytes": 4504
     },
     {
       "path": "src/framework/features_canonical/pipeline.py",
@@ -111,18 +111,18 @@
     },
     {
       "path": "src/framework/features_canonical/statistical.py",
-      "sha256": "c1be0039811f41cb6800db6ddc7b29611a27a61fd4f0b792230b5d031a607daf",
-      "size_bytes": 5813
+      "sha256": "4654cc50b40feaee0ab6c80cf2d18777fdbc475bd132c5f70fe677cae5bf8c37",
+      "size_bytes": 6903
     },
     {
       "path": "src/framework/features_canonical/toxicity.py",
-      "sha256": "6f788a3b91adb8bdaa37e4c0450b7253a6c252a6b148c591db7a693637fa5a42",
-      "size_bytes": 2290
+      "sha256": "ab266594d37702eda1c8eb1ea8e7c7659fec406f1501e6b3e167504069619fea",
+      "size_bytes": 2827
     },
     {
       "path": "src/framework/features_canonical/volume_profile.py",
-      "sha256": "3373fb18bdee5db99587be47b601fddfe42be79a3598a68bd8b78191b4130d49",
-      "size_bytes": 18643
+      "sha256": "5f7e90b6f3cf8747d400d2dea9a686b93ce8af285ffb5585be50c21a4ecb4208",
+      "size_bytes": 19817
     },
     {
       "path": "src/framework/security/framework_lock.py",
