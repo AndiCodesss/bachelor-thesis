@@ -465,6 +465,7 @@ def _collect_feedback_items_from_handoffs(
 
 def _collect_orchestrator_feedback_items(
     log_path: Path,
+    *,
     limit: int = 4000,
     max_items: int = 16,
 ) -> list[dict[str, Any]]:
@@ -484,12 +485,17 @@ def _collect_orchestrator_feedback_items(
         event = str(row.get("event", ""))
         if event == "generation_rejected":
             errors = row.get("errors", [])
-            error_str = str(errors[0]) if isinstance(errors, list) and errors else ""
+            if isinstance(errors, list) and errors:
+                error_str = str(errors[0])[:300]
+            elif isinstance(errors, str) and errors:
+                error_str = errors[:300]
+            else:
+                error_str = ""
             items.append({
                 "event": "generation_rejected",
                 "strategy_name": str(row.get("strategy_name", "")),
                 "hypothesis_id": str(row.get("hypothesis_id", "")),
-                "error": error_str[:300],
+                "error": error_str,
             })
         elif event == "generation_error":
             items.append({
