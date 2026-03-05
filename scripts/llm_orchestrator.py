@@ -416,6 +416,53 @@ def _collect_feedback_items(log_path: Path, limit: int = 6000, max_items: int = 
     return items
 
 
+def _collect_feedback_items_from_handoffs(
+    handoffs_path: Path,
+    *,
+    max_items: int = 24,
+) -> list[dict[str, Any]]:
+    if not handoffs_path.exists():
+        return []
+    try:
+        payload = _read_json(handoffs_path)
+    except Exception:
+        return []
+
+    completed = payload.get("completed", [])
+    if not isinstance(completed, list):
+        return []
+
+    items: list[dict[str, Any]] = []
+    for row in reversed(completed):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("handoff_type", "")) != "validation_request":
+            continue
+        result = row.get("result")
+        payload_row = row.get("payload")
+        if not isinstance(result, dict) or not isinstance(payload_row, dict):
+            continue
+
+        items.append(
+            {
+                "event": "validation_result",
+                "strategy_name": str(payload_row.get("strategy_name", "")),
+                "hypothesis_id": str(payload_row.get("hypothesis_id", "")),
+                "overall_verdict": str(result.get("overall_verdict", "")),
+                "task_count": result.get("task_count"),
+                "pass_count": result.get("pass_count"),
+                "fail_count": result.get("fail_count"),
+                "error_count": result.get("error_count"),
+                "avg_sharpe_ratio": result.get("avg_sharpe_ratio"),
+                "avg_trade_count": result.get("avg_trade_count"),
+            },
+        )
+        if len(items) >= max_items:
+            break
+
+    return items
+
+
 def _as_str_list(value: Any, max_items: int = 8, max_len: int = 220) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -1245,6 +1292,7 @@ def main() -> int:
     )
 
     signals_dir = root / "research" / "signals"
+    handoffs_path = state_paths["handoffs"]
     research_log_path = root / "results" / "logs" / "research_experiments.jsonl"
     orchestrator_log_path = root / "results" / "logs" / "llm_orchestrator.jsonl"
     orchestrator_log_lock = root / "results" / "logs" / "llm_orchestrator.lock"
@@ -1297,7 +1345,11 @@ def main() -> int:
             continue
 
         existing = _existing_signal_names(signals_dir)
-        feedback_items = _collect_feedback_items(research_log_path)
+        feedback_items = _collect_feedback_items_from_handoffs(handoffs_path)
+        if not feedback_items:
+            # Backward-compatible fallback while older runs may not publish
+            # structured handoff results yet.
+            feedback_items = _collect_feedback_items(research_log_path)
 
         iteration_no = iterations_done + 1
         print(f"[iteration {iteration_no}/{max_iterations}] running feedback->thinker->coder pipeline")
@@ -1545,13 +1597,25 @@ def main() -> int:
                         enqueued_task_ids.append(task["task_id"])
 
                 if enqueued_task_ids and not args.dry_run:
+                    handoff_material = {
+                        "run_id": run_id,
+                        "strategy_name": module_name,
+                        "hypothesis_id": hypothesis_id,
+                        "task_ids": sorted(enqueued_task_ids),
+                    }
+                    handoff_id = _sha256_text(
+                        json.dumps(handoff_material, sort_keys=True, separators=(",", ":")),
+                    )
                     append_handoff(
                         handoffs_path=state_paths["handoffs"],
                         lock_path=state_paths["handoffs_lock"],
                         handoff={
+                            "handoff_id": handoff_id,
                             "handoff_type": "validation_request",
                             "from_agent": "llm_orchestrator",
                             "to_agent": "validator",
+                            "run_id": run_id,
+                            "state": "pending",
                             "payload": {
                                 "strategy_name": module_name,
                                 "task_ids": enqueued_task_ids,

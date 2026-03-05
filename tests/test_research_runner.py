@@ -283,6 +283,154 @@ def test_prune_terminal_tasks_keeps_recent_terminal_entries(
     assert "c3" in remaining_ids
 
 
+def test_finalize_ready_validation_handoffs_moves_terminal_request(
+    tmp_path: Path,
+):
+    mod = _load_runner_module()
+    queue_path = tmp_path / "queue.json"
+    queue_lock = tmp_path / "queue.lock"
+    handoffs_path = tmp_path / "handoffs.json"
+    handoffs_lock = tmp_path / "handoffs.lock"
+
+    queue_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "t1",
+                        "state": "failed",
+                        "verdict": "FAIL",
+                        "strategy_name": "alpha_x",
+                        "bar_config": "tick_610",
+                        "completed_at": "2026-01-01T00:01:00+00:00",
+                        "details": {
+                            "metrics": {
+                                "sharpe_ratio": -0.5,
+                                "trade_count": 10,
+                                "net_pnl": -120.0,
+                            }
+                        },
+                    },
+                    {
+                        "task_id": "t2",
+                        "state": "failed",
+                        "verdict": "FAIL",
+                        "strategy_name": "alpha_x",
+                        "bar_config": "volume_2000",
+                        "completed_at": "2026-01-01T00:02:00+00:00",
+                        "details": {
+                            "metrics": {
+                                "sharpe_ratio": -0.2,
+                                "trade_count": 14,
+                                "net_pnl": -80.0,
+                            }
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handoffs_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "pending": [
+                    {
+                        "handoff_id": "h1",
+                        "handoff_type": "validation_request",
+                        "from_agent": "llm_orchestrator",
+                        "to_agent": "validator",
+                        "state": "pending",
+                        "payload": {
+                            "strategy_name": "alpha_x",
+                            "hypothesis_id": "h_001",
+                            "task_ids": ["t1", "t2"],
+                        },
+                    }
+                ],
+                "completed": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = mod._finalize_ready_validation_handoffs(
+        queue_path=queue_path,
+        queue_lock=queue_lock,
+        handoffs_path=handoffs_path,
+        handoffs_lock=handoffs_lock,
+    )
+    assert len(resolved) == 1
+    assert resolved[0]["state"] == "completed"
+    assert resolved[0]["result"]["overall_verdict"] == "FAIL"
+    assert resolved[0]["result"]["task_count"] == 2
+    assert resolved[0]["result"]["fail_count"] == 2
+
+    payload = json.loads(handoffs_path.read_text(encoding="utf-8"))
+    assert payload["pending"] == []
+    assert len(payload["completed"]) == 1
+
+
+def test_finalize_ready_validation_handoffs_keeps_active_request_pending(
+    tmp_path: Path,
+):
+    mod = _load_runner_module()
+    queue_path = tmp_path / "queue.json"
+    queue_lock = tmp_path / "queue.lock"
+    handoffs_path = tmp_path / "handoffs.json"
+    handoffs_lock = tmp_path / "handoffs.lock"
+
+    queue_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "t1",
+                        "state": "in_progress",
+                        "strategy_name": "alpha_x",
+                        "bar_config": "tick_610",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handoffs_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "pending": [
+                    {
+                        "handoff_id": "h2",
+                        "handoff_type": "validation_request",
+                        "payload": {
+                            "strategy_name": "alpha_x",
+                            "hypothesis_id": "h_002",
+                            "task_ids": ["t1"],
+                        },
+                    }
+                ],
+                "completed": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = mod._finalize_ready_validation_handoffs(
+        queue_path=queue_path,
+        queue_lock=queue_lock,
+        handoffs_path=handoffs_path,
+        handoffs_lock=handoffs_lock,
+    )
+    assert resolved == []
+    payload = json.loads(handoffs_path.read_text(encoding="utf-8"))
+    assert len(payload["pending"]) == 1
+    assert payload["completed"] == []
+
+
 def test_execute_claimed_task_gauntlet_respects_metric_thresholds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

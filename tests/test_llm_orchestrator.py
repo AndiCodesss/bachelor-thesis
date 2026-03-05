@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,6 +75,44 @@ def test_should_wait_for_validation_requires_no_active_queue_work():
     assert mod._should_wait_for_validation({"pending": 0, "in_progress": 0}) is False
     assert mod._should_wait_for_validation({"pending": 1, "in_progress": 0}) is True
     assert mod._should_wait_for_validation({"pending": 0, "in_progress": 1}) is True
+
+
+def test_collect_feedback_items_from_handoffs_reads_completed_results(tmp_path: Path):
+    mod = _load_module()
+    handoffs = tmp_path / "handoffs.json"
+    handoffs.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "pending": [],
+                "completed": [
+                    {
+                        "handoff_type": "validation_request",
+                        "payload": {
+                            "strategy_name": "alpha_x",
+                            "hypothesis_id": "h_001",
+                        },
+                        "result": {
+                            "overall_verdict": "FAIL",
+                            "task_count": 2,
+                            "pass_count": 0,
+                            "fail_count": 2,
+                            "error_count": 0,
+                            "avg_sharpe_ratio": -0.6,
+                            "avg_trade_count": 42,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = mod._collect_feedback_items_from_handoffs(handoffs, max_items=4)
+    assert len(out) == 1
+    assert out[0]["event"] == "validation_result"
+    assert out[0]["strategy_name"] == "alpha_x"
+    assert out[0]["overall_verdict"] == "FAIL"
 
 
 def test_choose_module_path_versions_when_content_differs(tmp_path: Path):

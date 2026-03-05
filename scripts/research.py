@@ -290,6 +290,156 @@ def _prune_terminal_tasks(
     return int(out["pruned"])
 
 
+def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
+    details = task.get("details")
+    metrics = details.get("metrics") if isinstance(details, dict) else None
+    out: dict[str, Any] = {
+        "task_id": str(task.get("task_id", "")),
+        "strategy_name": str(task.get("strategy_name", "")),
+        "bar_config": str(task.get("bar_config", "")),
+        "state": str(task.get("state", "")),
+        "verdict": str(task.get("verdict", "")),
+        "completed_at": str(task.get("completed_at", "")),
+    }
+    if isinstance(metrics, dict):
+        out["sharpe_ratio"] = metrics.get("sharpe_ratio")
+        out["trade_count"] = metrics.get("trade_count")
+        out["net_pnl"] = metrics.get("net_pnl")
+    error = details.get("error") if isinstance(details, dict) else None
+    if error:
+        out["error"] = str(error)
+    return out
+
+
+def _summarize_validation_request(task_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    pass_count = 0
+    fail_count = 0
+    error_count = 0
+    sharpe_vals: list[float] = []
+    trade_counts: list[int] = []
+
+    for row in task_rows:
+        verdict = str(row.get("verdict", "")).upper()
+        if verdict == "PASS":
+            pass_count += 1
+        elif verdict == "ERROR":
+            error_count += 1
+        else:
+            fail_count += 1
+
+        sharpe = row.get("sharpe_ratio")
+        if isinstance(sharpe, (int, float)):
+            sharpe_vals.append(float(sharpe))
+        trades = row.get("trade_count")
+        if isinstance(trades, int):
+            trade_counts.append(int(trades))
+        elif isinstance(trades, float):
+            trade_counts.append(int(trades))
+
+    if error_count > 0:
+        overall = "ERROR"
+    elif pass_count > 0:
+        overall = "PASS"
+    else:
+        overall = "FAIL"
+
+    avg_sharpe = (sum(sharpe_vals) / len(sharpe_vals)) if sharpe_vals else None
+    avg_trades = (sum(trade_counts) / len(trade_counts)) if trade_counts else None
+
+    return {
+        "overall_verdict": overall,
+        "task_count": len(task_rows),
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "error_count": error_count,
+        "avg_sharpe_ratio": avg_sharpe,
+        "avg_trade_count": avg_trades,
+        "tasks": task_rows,
+    }
+
+
+def _finalize_ready_validation_handoffs(
+    *,
+    queue_path: Path,
+    queue_lock: Path,
+    handoffs_path: Path,
+    handoffs_lock: Path,
+) -> list[dict[str, Any]]:
+    queue_payload = _read_json_locked(
+        queue_path,
+        queue_lock,
+        default_payload={"schema_version": "1.0", "tasks": []},
+    )
+    tasks_by_id = {
+        str(task.get("task_id", "")): task
+        for task in queue_payload.get("tasks", [])
+        if isinstance(task, dict) and str(task.get("task_id", "")).strip()
+    }
+    completed_results: list[dict[str, Any]] = []
+    now_iso = _utc_now()
+
+    def _update(handoffs: dict[str, Any]) -> dict[str, Any]:
+        pending = list(handoffs.get("pending", []))
+        completed = handoffs.setdefault("completed", [])
+        next_pending: list[dict[str, Any]] = []
+
+        for row in pending:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("handoff_type", "")) != "validation_request":
+                next_pending.append(row)
+                continue
+
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                next_pending.append(row)
+                continue
+            raw_task_ids = payload.get("task_ids")
+            if not isinstance(raw_task_ids, list) or not raw_task_ids:
+                next_pending.append(row)
+                continue
+            task_ids = [str(tid).strip() for tid in raw_task_ids if str(tid).strip()]
+            if not task_ids:
+                next_pending.append(row)
+                continue
+
+            task_rows: list[dict[str, Any]] = []
+            unresolved = False
+            for tid in task_ids:
+                task = tasks_by_id.get(tid)
+                if task is None:
+                    unresolved = True
+                    break
+                state = str(task.get("state", ""))
+                if state not in {"completed", "failed"}:
+                    unresolved = True
+                    break
+                task_rows.append(_task_feedback_summary(task))
+
+            if unresolved:
+                next_pending.append(row)
+                continue
+
+            enriched = dict(row)
+            enriched["state"] = "completed"
+            enriched["completed_at"] = now_iso
+            enriched["completed_by"] = "validator"
+            enriched["result"] = _summarize_validation_request(task_rows)
+            completed.append(enriched)
+            completed_results.append(enriched)
+
+        handoffs["pending"] = next_pending
+        return handoffs
+
+    update_json_file(
+        json_path=handoffs_path,
+        lock_path=handoffs_lock,
+        default_payload={"schema_version": "1.0", "pending": [], "completed": []},
+        update_fn=_update,
+    )
+    return completed_results
+
+
 def _as_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -1084,6 +1234,32 @@ def main() -> None:
                     verdict=verdict,
                     details=details,
                 )
+                resolved_handoffs = _finalize_ready_validation_handoffs(
+                    queue_path=state_paths["queue"],
+                    queue_lock=state_paths["queue_lock"],
+                    handoffs_path=state_paths["handoffs"],
+                    handoffs_lock=state_paths["handoffs_lock"],
+                )
+                for handoff in resolved_handoffs:
+                    payload = handoff.get("payload") if isinstance(handoff.get("payload"), dict) else {}
+                    result = handoff.get("result") if isinstance(handoff.get("result"), dict) else {}
+                    log_experiment(
+                        {
+                            "run_id": run_id,
+                            "agent": "validator",
+                            "event": "validation_handoff_completed",
+                            "handoff_id": str(handoff.get("handoff_id", "")),
+                            "strategy_name": str(payload.get("strategy_name", "")),
+                            "hypothesis_id": str(payload.get("hypothesis_id", "")),
+                            "task_count": result.get("task_count"),
+                            "overall_verdict": result.get("overall_verdict"),
+                            "pass_count": result.get("pass_count"),
+                            "fail_count": result.get("fail_count"),
+                            "error_count": result.get("error_count"),
+                        },
+                        experiments_path=experiments_path,
+                        lock_path=experiments_lock,
+                    )
                 pruned = _prune_terminal_tasks(
                     queue_path=state_paths["queue"],
                     lock_path=state_paths["queue_lock"],
