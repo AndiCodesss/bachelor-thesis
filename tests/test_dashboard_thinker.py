@@ -139,3 +139,45 @@ def test_summarize_write():
 def test_summarize_edit():
     result = _summarize_tool_input("Edit", {"file_path": "/some/path/main.py"})
     assert "main.py" in result
+
+
+from unittest.mock import patch
+from fastapi.testclient import TestClient
+from src.dashboard.backend.main import app
+
+
+def test_thinker_endpoint_no_active_session(tmp_path):
+    """Returns empty events when no thinker session found."""
+    with patch("src.dashboard.backend.main._find_thinker_session_file", return_value=None), \
+         patch("src.dashboard.backend.main._find_fallback_session_file", return_value=None):
+        client = TestClient(app)
+        resp = client.get("/api/autonomy/thinker")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["events"] == []
+        assert data["is_active"] is False
+        assert data["session_id"] is None
+
+
+def test_thinker_endpoint_with_session(tmp_path):
+    """Returns parsed events from an identified session file."""
+    f = tmp_path / "abc123.jsonl"
+    import json as _json
+    entry = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Analyzing value area features."}]
+        }
+    }
+    f.write_text(_json.dumps(entry) + "\n")
+
+    with patch("src.dashboard.backend.main._find_thinker_session_file", return_value=f):
+        client = TestClient(app)
+        resp = client.get("/api/autonomy/thinker")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["events"]) == 1
+        assert data["events"][0]["type"] == "text"
+        assert data["is_active"] is True
+        assert data["session_id"] == "abc123"

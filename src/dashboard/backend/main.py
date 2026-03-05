@@ -190,6 +190,78 @@ def _parse_thinker_events(jsonl_path: Path, max_events: int = 40) -> list[dict]:
     return events[-max_events:]
 
 
+def _find_thinker_session_file() -> Optional[Path]:
+    """Find JSONL open by an active 'claude -p' (thinker) process."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ps", "aux"], capture_output=True, text=True, timeout=5
+        )
+        thinker_pids = []
+        for line in result.stdout.splitlines():
+            if "claude -p " in line:
+                parts = line.split()
+                if parts:
+                    thinker_pids.append(parts[1])
+
+        for pid in thinker_pids:
+            try:
+                fd_dir = Path(f"/proc/{pid}/fd")
+                for fd in fd_dir.iterdir():
+                    try:
+                        target = fd.resolve()
+                        if (target.suffix == ".jsonl"
+                                and str(SESSIONS_DIR) in str(target)
+                                and target.exists()):
+                            return target
+                    except (PermissionError, OSError):
+                        continue
+            except (PermissionError, OSError):
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _find_fallback_session_file() -> Optional[Path]:
+    """Most recently modified JSONL in sessions directory."""
+    if not SESSIONS_DIR.exists():
+        return None
+    files = list(SESSIONS_DIR.glob("*.jsonl"))
+    if not files:
+        return None
+    return max(files, key=lambda f: f.stat().st_mtime)
+
+
+@app.get("/api/autonomy/thinker")
+def get_thinker_activity():
+    from datetime import datetime, timezone
+
+    session_file = _find_thinker_session_file()
+    is_active = session_file is not None
+
+    if not is_active:
+        session_file = _find_fallback_session_file()
+        if not session_file:
+            return {"events": [], "session_id": None, "is_active": False, "last_updated": None}
+
+    events = _parse_thinker_events(session_file)
+
+    last_updated = None
+    try:
+        mtime = session_file.stat().st_mtime
+        last_updated = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        pass
+
+    return {
+        "events": events,
+        "session_id": session_file.stem,
+        "is_active": is_active,
+        "last_updated": last_updated,
+    }
+
+
 @app.get("/api/autonomy/status")
 def get_autonomy_status():
     state_dir = project_root / "research" / ".state"
