@@ -36,3 +36,4 @@ runtime:
   stage_backoff_seconds: 3
   quota_backoff_seconds: 20
   max_backoff_seconds: 90
+  max_code_repair_attempts: 2  # retry coder with injected errors on validation failure; set 0 to disable
