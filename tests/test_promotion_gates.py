@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from research.ml.promotion_gates import WalkForwardValidator, evaluate_promotion_gates
+from research.lib.promotion_gates import WalkForwardValidator, evaluate_promotion_gates
 
 
 def _make_month_files(tmp_path: Path, start_year: int, start_month: int, n_months: int) -> list[Path]:

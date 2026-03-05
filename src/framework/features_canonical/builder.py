@@ -698,7 +698,7 @@ def build_full_cache(
             completed += 1
             feat_path = cache_dir / fp.name
 
-            if feat_path.exists():
+            if feat_path.exists() and _cache_metadata_matches(feat_path):
                 cached = pl.read_parquet(feat_path)
                 print(f"  [{completed}/{total}] {fp.name} -> {len(cached)} rows (cached)", flush=True)
                 continue

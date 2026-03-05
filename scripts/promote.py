@@ -24,7 +24,7 @@ from research.lib.candidates import load_candidate
 from research.lib.promotion import verify_candidate_artifacts
 from research.signals import check_signal_causality
 from research.lib.trial_counter import estimate_effective_trials
-from research.ml.promotion_gates import WalkForwardFold, WalkForwardValidator, evaluate_promotion_gates
+from research.lib.promotion_gates import WalkForwardFold, WalkForwardValidator, evaluate_promotion_gates
 from src.framework import __version__ as framework_version
 from src.framework.backtest.engine import TRADE_SCHEMA, run_backtest
 from src.framework.backtest.metrics import compute_metrics

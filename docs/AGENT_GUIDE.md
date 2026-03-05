@@ -24,7 +24,6 @@ Agents are expected to be creative in:
 ## Workspace
 
 - Signals: `research/signals/`
-- Experimental features: `research/features_experimental/`
 - Runtime state: `research/.state/`
 - Candidates: `research/candidates/` (created at runtime)
 - Event log: `results/logs/research_experiments.jsonl` (created at runtime)

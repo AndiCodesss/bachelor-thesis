@@ -63,7 +63,7 @@
 
 ## Promotion Gates
 
-`research/ml/promotion_gates.py` runs month-based walk-forward evaluation with:
+`research/lib/promotion_gates.py` runs month-based walk-forward evaluation with:
 
 - rolling 12-month train / 2-month test folds (2-month step, non-overlapping tests)
 - optional embargo months and day-level purge at fold boundaries

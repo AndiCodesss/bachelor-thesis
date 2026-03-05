@@ -107,9 +107,8 @@ Same agent, same engine, same rules — only the feature space changes.
 ├── research/                             # Mutable workspace (LLM agent operates here)
 │   ├── signals/
 │   │   └── example_ema_turn.py           # Reference signal implementation
-│   ├── ml/
-│   │   └── promotion_gates.py            # Purged/embargoed WFA promotion gates
 │   └── lib/
+│       ├── promotion_gates.py            # Purged/embargoed WFA promotion gates
 │       ├── atomic_io.py                  # Thread-safe atomic JSON writes
 │       ├── candidates.py                 # Write-once candidate artifacts
 │       ├── coordination.py               # File locks, task state, heartbeat
