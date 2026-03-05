@@ -26,7 +26,7 @@ coder:
   max_output_tokens: 2600
 
 runtime:
-  max_iterations: 20
+  max_iterations: 200
   max_pending_tasks: 25
   poll_seconds: 10
   max_runtime_hours: 6

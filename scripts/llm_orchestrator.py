@@ -560,6 +560,7 @@ def _normalize_feedback_digest(payload: dict[str, Any]) -> dict[str, list[str]]:
     error_patterns = _as_str_list(payload.get("error_patterns"))
     guardrails = _as_str_list(payload.get("guardrails"))
     next_focus = _as_str_list(payload.get("next_focus"))
+    near_misses = _as_str_list(payload.get("near_misses"))
 
     if not strengths:
         strengths = ["No reliable strengths identified yet."]
@@ -576,6 +577,7 @@ def _normalize_feedback_digest(payload: dict[str, Any]) -> dict[str, list[str]]:
         "error_patterns": error_patterns,
         "guardrails": guardrails,
         "next_focus": next_focus,
+        "near_misses": near_misses,
     }
 
 
@@ -606,6 +608,10 @@ def _build_feedback_system_prompt() -> str:
         "- error_patterns: list[str] — specific technical errors to avoid (exact error messages if available)\n"
         "- guardrails: list[str] — concrete rules the next strategy MUST follow\n"
         "- next_focus: list[str] — specific hypothesis directions most likely to find edge\n"
+        "- near_misses: list[str] — strategies that showed genuine positive direction but failed on a single "
+        "fixable dimension (e.g. net_pnl > 0 but trade_count < 30, or Sharpe 0.2–1.4 with right trade count). "
+        "For each near-miss state: strategy name, what was good, what single parameter change would fix it. "
+        "Leave empty list if no near-misses exist.\n"
         "Keep each item concrete, specific, and actionable. Reference actual strategy names and metrics where available."
     )
 
@@ -964,7 +970,10 @@ def _build_thinker_system_prompt() -> str:
         "- Tick size: 0.25 pts = $5/tick. Total round-trip cost: $14.50 (commission + 1-tick slippage/side).\n"
         "- A strategy trading 100 times costs $1,450 in friction. At 500 trades it needs $7,250 gross to break even.\n"
         "- TARGET: 30–150 total signals across the 7-month validate split (Sep 2024–Mar 2025).\n"
-        "- Strategies firing >300 signals almost certainly lose to transaction costs. Design for precision, not frequency.\n\n"
+        "- Strategies firing >300 signals almost certainly lose to transaction costs. Design for precision, not frequency.\n"
+        "- Signal rate: target 0.05–0.3% of bars non-zero. time_1m has ~60,000 bars in validate; tick/volume bars similar.\n"
+        "  At 0.1% rate: ~60 signals total — ideal. At 1% rate: ~600 signals — cost destruction.\n"
+        "  Design thresholds to produce rare, high-conviction setups, not frequent noise.\n\n"
         "VALIDATE SPLIT CONTEXT (Sep 2024 – Mar 2025):\n"
         "- Includes: US presidential election (Nov 2024), multiple Fed rate decisions, Q4 2024 rally, early 2025 volatility.\n"
         "- ETH session: 03:00–16:00 ET. Signals must respect session boundaries.\n\n"
@@ -1037,7 +1046,14 @@ def _build_thinker_user_prompt(
         f"Current focus:\n{focus_blob}\n\n"
         f"Existing strategy files to avoid duplicating:\n{avoid}\n\n"
         f"Structured feedback digest:\n{json.dumps(feedback_digest, indent=2)}\n\n"
-        "Design exactly one hypothesis that is implementable by a separate coding model."
+        + (
+            "NEAR-MISS ALERT — prioritise iterating on these before inventing something entirely new:\n"
+            + "\n".join(f"  - {nm}" for nm in feedback_digest.get("near_misses", []))
+            + "\n\n"
+            if feedback_digest.get("near_misses")
+            else ""
+        )
+        + "Design exactly one hypothesis that is implementable by a separate coding model."
     )
     if feature_knowledge:
         prompt += (
@@ -1119,6 +1135,22 @@ REQUIREMENTS FOR `code`:
   * if "col_name" not in df.columns: use np.zeros(len(df), dtype=np.float64)
   * All precomputed features may be absent -- never crash on KeyError
 
+SIGNAL FREQUENCY — CRITICAL CALIBRATION WARNING:
+The pre-flight validation runs on a SMALL SAMPLE of ~1,200 bars (roughly 1-3 trading days).
+The full validate split has ~60,000 bars (7 months) for time_1m, similar for other configs.
+That is a 50x scale difference.
+
+NEVER embed raise ValueError or assert for signal count inside generate_signal.
+Reason: if you check "if signals < 30: raise ValueError", the repair loop will loosen
+thresholds until 30 signals appear in 1,200 bars — which equals ~1,500 signals on validate.
+The minimum trade count is enforced by the validation framework AFTER backtesting, not inside
+the module. Your job is only to generate the signal array; let the framework judge the count.
+
+Target signal RATE: 0.05–0.3% of bars should be non-zero (signal in {-1, 1}).
+On 1,200 sample bars that is 1–4 signals — which is correct and expected.
+On 60,000 validate bars that is 30–180 signals — which hits the 30-trade minimum.
+Design thresholds to produce rare, high-conviction events, not frequent signals.
+
 COMMON MISTAKES THAT WILL FAIL VALIDATION:
 1. Missing .astype(np.int8) -> dtype validation fails (int64 != int8)
 2. Negative shift: df["x"].shift(-1) -> causality check fails immediately
@@ -1126,6 +1158,7 @@ COMMON MISTAKES THAT WILL FAIL VALIDATION:
 4. NaN in output array -> contract validation fails
 5. Wrong length: len(signal) != len(df) -> contract validation fails
 6. Importing os, sys, requests, json, random -> forbidden imports check fails
+7. raise ValueError / assert for signal count -> triggers repair loop, causes overtrading
 """
 
 
