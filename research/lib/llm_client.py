@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -162,6 +163,9 @@ class ClaudeCodeCLIClient:
                 ],
             )
 
+        # Strip CLAUDECODE so the claude CLI doesn't refuse to run inside a Claude Code session.
+        child_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
         try:
             proc = subprocess.run(
                 cmd,
@@ -170,6 +174,7 @@ class ClaudeCodeCLIClient:
                 text=True,
                 timeout=self._timeout_seconds,
                 check=False,
+                env=child_env,
             )
         except subprocess.TimeoutExpired as exc:
             raise LLMClientError(f"Claude CLI request timed out after {self._timeout_seconds}s") from exc
