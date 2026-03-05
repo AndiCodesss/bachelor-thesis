@@ -1114,10 +1114,6 @@ def main() -> None:
     )
     start_monotonic = time.monotonic()
     poll_seconds = max(1, int(args.poll_seconds))
-    # Avoid exiting the worker on brief empty-queue gaps while another agent
-    # is still producing tasks.
-    queue_empty_grace_polls = max(1, _as_int(mission.get("queue_empty_grace_polls"), 6))
-    empty_queue_polls = 0
 
     reason = "single_pass"
     try:
@@ -1267,19 +1263,7 @@ def main() -> None:
                 )
                 if pruned > 0:
                     print(f"Queue compaction: pruned {pruned} terminal tasks.")
-                empty_queue_polls = 0
                 continue
-
-            # Re-read counts before deciding to stop to reduce race windows with
-            # external task producers (for example LLM orchestrator).
-            counts = _queue_counts(state_paths["queue"], state_paths["queue_lock"])
-            if counts["pending"] == 0 and counts["in_progress"] == 0:
-                empty_queue_polls += 1
-                if empty_queue_polls >= queue_empty_grace_polls:
-                    reason = "queue_empty"
-                    break
-            else:
-                empty_queue_polls = 0
 
             time.sleep(poll_seconds)
     finally:
