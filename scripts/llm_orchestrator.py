@@ -842,6 +842,23 @@ FEATURE_COMPUTATION_NOTES = [
     "Orderflow/toxicity/footprint features are bar-causal and derived only from events up to each bar close.",
 ]
 
+_FEATURE_CATALOG_PATH = Path(__file__).resolve().parent.parent / "research" / "feature_catalog.md"
+
+
+def _load_feature_catalog() -> list[str]:
+    """Load feature catalog lines, stripping comments and blank lines."""
+    if not _FEATURE_CATALOG_PATH.exists():
+        return []
+    lines = []
+    for raw in _FEATURE_CATALOG_PATH.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("#"):
+            lines.append(stripped)
+    return lines
+
+
+FEATURE_CATALOG_LINES: list[str] = _load_feature_catalog()
+
 
 def _build_feature_knowledge(
     *,
@@ -902,6 +919,7 @@ def _build_feature_knowledge(
         "common_columns": common_columns,
         "per_bar_extra_columns": extras,
         "computation_notes": list(FEATURE_COMPUTATION_NOTES),
+        "feature_catalog": FEATURE_CATALOG_LINES,
         "errors": errors,
     }
 
@@ -1128,7 +1146,10 @@ def _build_thinker_user_prompt(
             "\n\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
             f"{json.dumps(feature_knowledge, indent=2, sort_keys=True, default=str)}\n"
             "AVAILABLE_PRECOMPUTED_FEATURES_JSON_END\n"
-            "Use these precomputed feature columns as the primary building blocks."
+            "The JSON above contains: common_columns (all available column names), "
+            "feature_catalog (column | formula | interpretation for ~60 key features), "
+            "and computation_notes. Study feature_catalog carefully before designing entry conditions — "
+            "it tells you exactly what each column measures and its typical range."
         )
     return prompt
 
@@ -1352,7 +1373,9 @@ def _build_coder_user_prompt(
             "\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
             f"{json.dumps(feature_knowledge, indent=2, sort_keys=True, default=str)}\n"
             "AVAILABLE_PRECOMPUTED_FEATURES_JSON_END\n"
-            "Prefer these precomputed features directly; only compute local fallbacks when a column is missing."
+            "The JSON above contains feature_catalog: column | formula | interpretation for ~60 key features. "
+            "Use the exact column names from common_columns. "
+            "Prefer precomputed features directly; only compute local fallbacks when a column is absent."
         )
     return prompt
 

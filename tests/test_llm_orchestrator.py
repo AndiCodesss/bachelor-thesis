@@ -354,7 +354,7 @@ def test_prompts_include_feature_knowledge_markers():
         feature_knowledge=feature_knowledge,
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in coder_prompt
-    assert "Prefer these precomputed features directly" in coder_prompt
+    assert "Prefer precomputed features directly" in coder_prompt
 
 
 def test_thinker_system_prompt_requires_internal_brainstorm():
