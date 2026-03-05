@@ -372,3 +372,113 @@ def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):
             agent_cfg={},
             root=tmp_path,
         )
+
+
+def test_collect_orchestrator_feedback_items_reads_generation_rejected(tmp_path: Path):
+    mod = _load_module()
+    log = tmp_path / "llm_orchestrator.jsonl"
+    log.write_text(
+        json.dumps({
+            "event": "generation_rejected",
+            "strategy_name": "bad_strat",
+            "errors": ["bad_strat: generate_signal failed for tick_610: KeyError: 'ema_ratio_8'"],
+            "hypothesis_id": "h001",
+        }) + "\n" +
+        json.dumps({
+            "event": "generation_error",
+            "error": "LLMClientError: timeout",
+            "iteration": 1,
+        }) + "\n" +
+        json.dumps({
+            "event": "generation_enqueued",
+            "strategy_name": "good_strat",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    out = mod._collect_orchestrator_feedback_items(log, max_items=10)
+    assert len(out) == 2
+    events = {x["event"] for x in out}
+    assert "generation_rejected" in events
+    assert "generation_error" in events
+    # generation_enqueued must NOT be included
+    assert all(x["event"] != "generation_enqueued" for x in out)
+
+
+def test_collect_orchestrator_feedback_items_empty_when_no_log(tmp_path: Path):
+    mod = _load_module()
+    out = mod._collect_orchestrator_feedback_items(tmp_path / "missing.jsonl", max_items=10)
+    assert out == []
+
+
+def test_collect_orchestrator_feedback_items_respects_max_items(tmp_path: Path):
+    mod = _load_module()
+    log = tmp_path / "llm_orchestrator.jsonl"
+    lines = "\n".join(
+        json.dumps({"event": "generation_rejected", "strategy_name": f"s{i}", "errors": ["e"]})
+        for i in range(10)
+    ) + "\n"
+    log.write_text(lines, encoding="utf-8")
+    out = mod._collect_orchestrator_feedback_items(log, max_items=3)
+    assert len(out) == 3
+
+
+def test_merged_feedback_includes_all_sources(tmp_path: Path):
+    """_build_merged_feedback_items merges handoffs + research log + orchestrator log."""
+    mod = _load_module()
+
+    handoffs = tmp_path / "handoffs.json"
+    handoffs.write_text(json.dumps({
+        "schema_version": "1.0", "pending": [],
+        "completed": [{
+            "handoff_type": "validation_request",
+            "payload": {"strategy_name": "s_handoff", "hypothesis_id": "h1"},
+            "result": {"overall_verdict": "FAIL", "task_count": 1,
+                       "pass_count": 0, "fail_count": 1, "error_count": 0,
+                       "avg_sharpe_ratio": -0.5, "avg_trade_count": 10},
+        }],
+    }), encoding="utf-8")
+
+    research_log = tmp_path / "research.jsonl"
+    research_log.write_text(
+        json.dumps({"event": "task_error", "strategy_name": "s_error",
+                    "error": "ValueError: oops"}) + "\n",
+        encoding="utf-8",
+    )
+
+    orch_log = tmp_path / "orch.jsonl"
+    orch_log.write_text(
+        json.dumps({"event": "generation_rejected", "strategy_name": "s_rejected",
+                    "errors": ["causality failed"]}) + "\n",
+        encoding="utf-8",
+    )
+
+    out = mod._build_merged_feedback_items(
+        handoffs_path=handoffs,
+        research_log_path=research_log,
+        orchestrator_log_path=orch_log,
+        max_items=40,
+    )
+    events = [x["event"] for x in out]
+    assert "validation_result" in events
+    assert "task_error" in events
+    assert "generation_rejected" in events
+
+
+def test_merged_feedback_works_when_some_sources_empty(tmp_path: Path):
+    mod = _load_module()
+    # Only research log has content
+    research_log = tmp_path / "research.jsonl"
+    research_log.write_text(
+        json.dumps({"event": "task_result", "strategy_name": "s1", "verdict": "FAIL",
+                    "bar_config": "tick_610", "metrics": {"sharpe_ratio": -1.0,
+                    "trade_count": 5}}) + "\n",
+        encoding="utf-8",
+    )
+    out = mod._build_merged_feedback_items(
+        handoffs_path=tmp_path / "missing_handoffs.json",
+        research_log_path=research_log,
+        orchestrator_log_path=tmp_path / "missing_orch.jsonl",
+        max_items=40,
+    )
+    assert len(out) == 1
+    assert out[0]["event"] == "task_result"

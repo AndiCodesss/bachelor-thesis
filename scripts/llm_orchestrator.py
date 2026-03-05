@@ -463,6 +463,74 @@ def _collect_feedback_items_from_handoffs(
     return items
 
 
+def _collect_orchestrator_feedback_items(
+    log_path: Path,
+    limit: int = 4000,
+    max_items: int = 16,
+) -> list[dict[str, Any]]:
+    """Collect generation_rejected and generation_error events from orchestrator log."""
+    rows = _tail_lines(log_path, limit)
+    if not rows:
+        return []
+
+    items: list[dict[str, Any]] = []
+    for raw in reversed(rows):
+        try:
+            row = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        event = str(row.get("event", ""))
+        if event == "generation_rejected":
+            errors = row.get("errors", [])
+            error_str = str(errors[0]) if isinstance(errors, list) and errors else ""
+            items.append({
+                "event": "generation_rejected",
+                "strategy_name": str(row.get("strategy_name", "")),
+                "hypothesis_id": str(row.get("hypothesis_id", "")),
+                "error": error_str[:300],
+            })
+        elif event == "generation_error":
+            items.append({
+                "event": "generation_error",
+                "error": str(row.get("error", ""))[:240],
+                "iteration": row.get("iteration"),
+            })
+        if len(items) >= max_items:
+            break
+
+    return items
+
+
+def _build_merged_feedback_items(
+    *,
+    handoffs_path: Path,
+    research_log_path: Path,
+    orchestrator_log_path: Path,
+    max_items: int = 40,
+) -> list[dict[str, Any]]:
+    """Merge feedback from all three sources. Orch errors first (most actionable)."""
+    per_source = max(1, max_items // 3)
+
+    handoff_items = _collect_feedback_items_from_handoffs(
+        handoffs_path, max_items=per_source
+    )
+    research_items = _collect_feedback_items(
+        research_log_path, max_items=per_source
+    )
+    orch_items = _collect_orchestrator_feedback_items(
+        orchestrator_log_path, max_items=per_source
+    )
+
+    # Interleave: orch errors first (most actionable), then validator results, then handoffs
+    merged: list[dict[str, Any]] = []
+    merged.extend(orch_items)
+    merged.extend(research_items)
+    merged.extend(handoff_items)
+    return merged[:max_items]
+
+
 def _as_str_list(value: Any, max_items: int = 8, max_len: int = 220) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -1345,11 +1413,11 @@ def main() -> int:
             continue
 
         existing = _existing_signal_names(signals_dir)
-        feedback_items = _collect_feedback_items_from_handoffs(handoffs_path)
-        if not feedback_items:
-            # Backward-compatible fallback while older runs may not publish
-            # structured handoff results yet.
-            feedback_items = _collect_feedback_items(research_log_path)
+        feedback_items = _build_merged_feedback_items(
+            handoffs_path=handoffs_path,
+            research_log_path=research_log_path,
+            orchestrator_log_path=orchestrator_log_path,
+        )
 
         iteration_no = iterations_done + 1
         print(f"[iteration {iteration_no}/{max_iterations}] running feedback->thinker->coder pipeline")
