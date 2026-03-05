@@ -989,6 +989,38 @@ def _build_thinker_system_prompt() -> str:
         "- Every entry condition should have a clear microstructure rationale (why does this predict price direction?).\n"
         "- Include explicit exit logic: profit target in ticks, stop loss in ticks, max holding bars.\n"
         "- Include cooldown / reentry prevention to avoid chasing the same move multiple times.\n\n"
+        "AUCTION MARKET THEORY (AMT) — HIGH PRIORITY FOCUS:\n"
+        "AMT is a first-principles framework for NQ and is strongly encouraged as a basis for hypotheses.\n"
+        "Core AMT concepts to exploit:\n"
+        "- Value Area (VA): price range containing ~70% of prior session volume. VAH=top, VAL=bottom.\n"
+        "  Edge: price entering VA from outside has high probability of rotating to opposite boundary.\n"
+        "  Edge: price rejecting VA boundary after probing it signals continuation of prior trend.\n"
+        "- Point of Control (POC): single price level with highest prior-session volume.\n"
+        "  Edge: POC acts as magnet — price frequently revisits after moving away.\n"
+        "- Initial Balance (IB): first 30–60 min of RTH session (09:30–10:30 ET) high/low range.\n"
+        "  Edge: breakout from IB with volume confirms directional conviction for the session.\n"
+        "  Edge: IB extensions (price moving beyond IB) attract follow-through; failures reverse sharply.\n"
+        "- Acceptance vs Rejection: time spent at a level signals acceptance (range extension likely) or\n"
+        "  rejection (mean-reversion likely). Single prints / poor highs/lows signal weak auctions.\n"
+        "- Balance vs Imbalance: overlapping prior-day value areas = balance (fade range extremes);\n"
+        "  non-overlapping value areas = imbalance (trade in direction of gap).\n"
+        "AMT strategies naturally produce sparse, high-conviction signals because they fire only at\n"
+        "structural price levels — ideal for the 30–150 trade target.\n\n"
+        "STATE MACHINES — POWERFUL TOOL FOR SEQUENTIAL PATTERNS:\n"
+        "You can and SHOULD design multi-step sequential strategies using state machine logic.\n"
+        "A state machine tracks what has already happened and waits for confirmation before acting.\n"
+        "Example AMT state machine:\n"
+        "  State 0 (neutral): wait for price to probe below VAL\n"
+        "  State 1 (armed): price is below VAL — now wait for rejection bar (close > VAL)\n"
+        "  State 2 (triggered): rejection confirmed — fire LONG signal, reset to State 0\n"
+        "This is far more selective than a single-bar condition and aligns with how AMT traders think.\n"
+        "Other sequential patterns worth encoding as state machines:\n"
+        "- IB breakout → pullback to IB boundary → re-breakout entry\n"
+        "- Failed auction at POC (3 bars near POC, then sharp rejection) → fade entry\n"
+        "- CVD divergence builds over N bars → confirmed by delta flip on bar N+1 → entry\n"
+        "- Volatility compression (N bars of narrow range) → first expansion bar → trend entry\n"
+        "State machines produce naturally sparse signals, are robust to noise, and have clear\n"
+        "market physics rationale — the coder can implement them with a simple Python for-loop.\n\n"
         "BE CREATIVE — EXPLORE NOVEL ALPHA SOURCES:\n"
         "You are encouraged to think beyond the obvious EMA crossovers and simple orderflow divergence patterns.\n"
         "Novel hypothesis directions worth exploring (not exhaustive — invent your own):\n"
@@ -1134,6 +1166,31 @@ REQUIREMENTS FOR `code`:
 - Safe fallbacks for missing columns:
   * if "col_name" not in df.columns: use np.zeros(len(df), dtype=np.float64)
   * All precomputed features may be absent -- never crash on KeyError
+
+STATE MACHINES ARE ALLOWED AND ENCOURAGED:
+If the hypothesis requires sequential logic (e.g. "see event A, then wait for event B, then fire"),
+implement it as a bar-by-bar for-loop with integer state variables. This is pure numpy/polars —
+no special imports needed. Pattern:
+
+  signal = np.zeros(len(df), dtype=np.int8)
+  state = 0  # 0=neutral, 1=armed_long, 2=armed_short
+  for i in range(1, len(df)):
+      if state == 0:
+          if condition_a[i - 1]:   # event A seen on prior bar
+              state = 1
+      elif state == 1:
+          if condition_b[i]:        # event B confirms → fire
+              signal[i] = 1
+              state = 0
+          elif reset_condition[i]:  # setup invalidated → reset
+              state = 0
+  return signal
+
+Key rules for state machines:
+- All condition arrays must be precomputed BEFORE the loop (vectorised) for performance
+- Only reference index i (current) or i-1 (previous) inside the loop — never i+1 (lookahead)
+- Reset state at session boundaries to prevent cross-day contamination
+- State variable counts toward no imports — plain Python int is fine
 
 SIGNAL FREQUENCY — CRITICAL CALIBRATION WARNING:
 The pre-flight validation runs on a SMALL SAMPLE of ~1,200 bars (roughly 1-3 trading days).

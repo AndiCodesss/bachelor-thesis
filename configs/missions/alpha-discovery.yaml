@@ -20,7 +20,9 @@ kill_criteria:
   ERROR: 30
 
 current_focus:
-  - "Orderflow divergence reversals"
-  - "EMA turn events with quality gates"
-  - "Volatility spike fades"
+  - "AMT value area rejection and rotation (VAH/VAL/POC mean-reversion)"
+  - "AMT initial balance breakout and failed breakout fades"
+  - "Sequential state machine patterns: arm on condition A, fire on condition B"
+  - "Orderflow divergence reversals (fade delta extremes, not follow them)"
+  - "Volatility compression → expansion ignition"
 
