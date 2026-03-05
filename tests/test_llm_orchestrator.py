@@ -352,12 +352,21 @@ def test_prompts_include_feature_knowledge_markers():
         "errors": {},
     }
     thinker_prompt = mod._build_thinker_user_prompt(
-        mission={"objective": "x", "bar_configs": ["tick_610"], "session_filter": "eth", "feature_group": "all"},
+        mission={
+            "objective": "x",
+            "bar_configs": ["tick_610"],
+            "session_filter": "eth",
+            "feature_group": "all",
+            "notebooklm_notebook_url": "https://notebooklm.google.com/notebook/test-id",
+        },
         existing_strategies=[],
         feedback_items=[],
         feature_knowledge=feature_knowledge,
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in thinker_prompt
+    assert "KNOWLEDGE_BASE_COMMAND:" in thinker_prompt
+    assert "https://notebooklm.google.com/notebook/test-id" in thinker_prompt
+    assert "query_notebook.py" in thinker_prompt
     assert '"common_columns"' in thinker_prompt
 
     coder_prompt = mod._build_coder_user_prompt(
@@ -378,6 +387,19 @@ def test_thinker_system_prompt_requires_internal_brainstorm():
     mod = _load_module()
     prompt = mod._build_thinker_system_prompt()
     assert "internally brainstorm" in prompt
+    assert "RESEARCH HANDBOOK" in prompt
+    assert "KNOWLEDGE_BASE_COMMAND" in prompt
+
+
+def test_thinker_user_prompt_omits_notebook_command_when_no_url():
+    mod = _load_module()
+    prompt = mod._build_thinker_user_prompt(
+        mission={"objective": "x", "bar_configs": ["tick_610"]},
+        existing_strategies=[],
+        feedback_items=[],
+    )
+    assert "KNOWLEDGE_BASE_COMMAND" not in prompt
+    assert "query_notebook.py" not in prompt
 
 
 def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):

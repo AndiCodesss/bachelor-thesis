@@ -40,6 +40,7 @@ from src.framework.api import (
     load_cached_matrix,
     set_execution_mode,
 )
+from src.framework.data.constants import TICK_SIZE
 from src.framework.features_canonical.builder import LABEL_COLUMNS
 
 
@@ -979,6 +980,14 @@ def _build_thinker_system_prompt() -> str:
         "Preferred target: 2:1 or better. A 2:1 RR means you can be wrong 40% of the time and still profit.\n"
         "Example: SL=6 ticks ($30), PT=12 ticks ($60) → net per win $45.50, net per loss -$44.50 → viable at 50% WR.\n"
         "Avoid 1:1 RR — after $14.50 RT costs it is always negative expectancy regardless of win rate.\n\n"
+        "EXIT PARAMS — MANDATORY CANONICAL NAMES IN params_template:\n"
+        "The backtest engine reads exit configuration directly from the strategy's params. You MUST use\n"
+        "these exact keys in params_template — they are automatically extracted and applied during backtesting:\n"
+        "  pt_ticks  : profit target in NQ ticks (integer). Engine converts to points (ticks × 0.25).\n"
+        "  sl_ticks  : stop loss in NQ ticks (integer). Must satisfy pt_ticks >= 1.5 × sl_ticks.\n"
+        "  max_bars  : maximum bars to hold before forced exit (integer). Prevents overnight exposure.\n"
+        "Example: {\"pt_ticks\": 12, \"sl_ticks\": 6, \"max_bars\": 20} → PT=$30, SL=$15, hold max 20 bars.\n"
+        "Without these keys the engine has no exits — strategy holds until end-of-day with no stop protection.\n\n"
         "STOP PLACEMENT — STRUCTURAL, NOT ARBITRARY:\n"
         "Stops must be placed at the level that INVALIDATES the hypothesis — not a fixed tick count.\n"
         "Good stop placement:\n"
@@ -1070,13 +1079,31 @@ def _build_thinker_system_prompt() -> str:
         "- risk_controls: list[str] (e.g. max trades/day, time-of-day filter, spread filter)\n"
         "- anti_lookahead_checks: list[str] (explicit list of checks the coder must verify)\n"
         "- validation_focus: list[str] (what metrics/patterns would confirm this hypothesis has real edge)\n\n"
-        "FILE ACCESS — READ TOOL AVAILABLE:\n"
-        "You have the Read tool and can inspect files in this project before designing your hypothesis.\n"
-        "Use it selectively — only when it adds genuine insight:\n"
-        "- Near-miss signals: if the results table shows a strategy with positive Sharpe that failed,\n"
-        "  read research/signals/<strategy_name>.py to understand what was close to working.\n"
-        "- Signal examples: research/signals/ contains all past implementations — useful for code structure.\n"
-        "Focus reads on near-misses. Do not read every file.\n\n"
+        "RESEARCH HANDBOOK — NOTEBOOKLM:\n"
+        "You have a curated trading research knowledge base accessible via the Bash tool.\n"
+        "Treat it as your primary research handbook: query it actively during reasoning,\n"
+        "not as an afterthought. If a KNOWLEDGE_BASE_COMMAND is provided in the user message,\n"
+        "use it before finalising your hypothesis.\n\n"
+        "TWO QUERY MODES (choose based on need):\n"
+        "1. Plain query — fast, searches existing sources only:\n"
+        "     Bash: uv run python scripts/query_notebook.py --notebook-url \"<URL>\" \"question\"\n"
+        "   Use for: specific threshold lookups, pattern validation, market-physics checks.\n\n"
+        "2. Research query — searches the web, imports new sources, then answers:\n"
+        "     Bash: uv run python scripts/query_notebook.py --notebook-url \"<URL>\" --research \"question\"\n"
+        "   Use when: plain query returns a shallow or uncertain answer. Permanently enriches\n"
+        "   the notebook for all future runs. Takes ~30-60s.\n\n"
+        "Workflow: start with a plain query. If the answer lacks specificity (e.g. no concrete\n"
+        "thresholds, cites no sources), escalate to --research on the same question.\n\n"
+        "Ask specific, targeted questions — not broad summaries. Examples:\n"
+        "- \"What AMT value area rejection thresholds and bar conditions have documented NQ edge?\"\n"
+        "- \"What orderflow signals most reliably predict short-term NQ directional continuation?\"\n"
+        "- \"What threshold mistakes cause NQ scalping strategies to fire zero trades?\"\n"
+        "- \"What holding periods and PT/SL ratios work for profitable NQ intraday scalps?\"\n"
+        "Run multiple queries with different angles. The handbook is your primary resource.\n\n"
+        "FILE ACCESS — READ TOOL:\n"
+        "You also have the Read tool for inspecting files in this project.\n"
+        "Use it selectively — only for near-miss strategies (positive Sharpe that failed):\n"
+        "  read research/signals/<strategy_name>.py to understand what was close to working.\n\n"
         "Before producing the final JSON, internally brainstorm at least three distinct hypotheses — "
         "prioritise novelty and diversity across the three candidates. "
         "Evaluate each against cost reality, pass criteria, and the market physics constraint, "
@@ -1095,6 +1122,7 @@ def _build_thinker_user_prompt(
     current_focus = mission.get("current_focus", [])
     if not isinstance(current_focus, list):
         current_focus = []
+    notebooklm_url = str(mission.get("notebooklm_notebook_url", "")).strip()
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
@@ -1109,6 +1137,14 @@ def _build_thinker_user_prompt(
         f"Recent experiment results:\n{results_table}\n\n"
         "Design exactly one hypothesis that is implementable by a separate coding model."
     )
+    if notebooklm_url:
+        prompt += (
+            "\n\nKNOWLEDGE_BASE_COMMAND:\n"
+            f'  uv run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" "question"\n'
+            f'  uv run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --research "question"\n'
+            "Query your research handbook before designing the hypothesis. "
+            "Start with the plain form; escalate to --research if the answer lacks concrete thresholds."
+        )
     if feature_knowledge:
         prompt += (
             "\n\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
@@ -1178,6 +1214,12 @@ REQUIREMENTS FOR `code`:
 - Complete Python module (no placeholders, no `pass`)
 - Allowed imports ONLY: numpy as np, polars as pl, typing (Any, Optional, etc.), __future__
 - Defines DEFAULT_PARAMS: dict[str, Any] — all tunable scalars here
+  IMPORTANT — backtest engine exit params (use these exact keys, values in ticks):
+    pt_ticks : profit target in NQ ticks — engine converts to points automatically
+    sl_ticks : stop loss in NQ ticks — engine converts to points automatically
+    max_bars : max bars to hold before forced exit
+  Copy these from the handoff's params_template. DO NOT implement PT/SL logic inside
+  generate_signal — the engine handles all exits. generate_signal only detects entries.
 - Defines STRATEGY_METADATA: dict with name, version, features_required, description
 - Defines generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray
   * Returns array of dtype=np.int8, values strictly in {-1, 0, 1}, length == len(df)
@@ -1402,6 +1444,17 @@ def _build_task(
     max_retries = int(mission.get("max_retries", 2))
     timeout_minutes = int(mission.get("task_timeout_minutes", 30))
     heartbeat_seconds = int(mission.get("heartbeat_interval_seconds", 300))
+
+    # Promote engine exit params from params dict to task top-level so research.py
+    # can pass them directly to run_backtest(). Canonical names: pt_ticks, sl_ticks,
+    # max_bars. Convert ticks → points for profit_target/stop_loss.
+    _pt_ticks = params.get("pt_ticks")
+    _sl_ticks = params.get("sl_ticks")
+    _exit_bars = params.get("max_bars") or params.get("exit_bars")
+    profit_target = float(_pt_ticks) * TICK_SIZE if _pt_ticks is not None else None
+    stop_loss = float(_sl_ticks) * TICK_SIZE if _sl_ticks is not None else None
+    exit_bars = int(_exit_bars) if _exit_bars is not None else None
+
     return {
         "task_id": _task_id(strategy_name, bar_config, params, code_hash),
         "state": "pending",
@@ -1410,6 +1463,9 @@ def _build_task(
         "split": split,
         "bar_config": bar_config,
         "params": dict(params),
+        "exit_bars": exit_bars,
+        "profit_target": profit_target,
+        "stop_loss": stop_loss,
         "retries": 0,
         "max_retries": max_retries,
         "timeout_minutes": timeout_minutes,
@@ -1468,6 +1524,7 @@ def _build_llm_client(
     agent_cfg: dict[str, Any],
     root: Path,
     role_extra_args: list[str] | None = None,
+    role_disable_slash_commands: bool | None = None,
 ) -> LLMRawClient:
     raw_provider = str(provider).strip().lower()
     if raw_provider not in {"claude", "claude_cli", "claude_code"}:
@@ -1486,6 +1543,10 @@ def _build_llm_client(
     timeout_seconds = float(cli_cfg.get("timeout_seconds", agent_cfg.get("timeout_seconds", 180)))
     retries = int(cli_cfg.get("retries", agent_cfg.get("retries", 2)))
     retry_backoff_seconds = float(cli_cfg.get("retry_backoff_seconds", agent_cfg.get("retry_backoff_seconds", 1.5)))
+    disable_slash_commands_raw = cli_cfg.get("disable_slash_commands", agent_cfg.get("disable_slash_commands", True))
+    disable_slash_commands = bool(disable_slash_commands_raw)
+    if role_disable_slash_commands is not None:
+        disable_slash_commands = bool(role_disable_slash_commands)
     workdir_raw = str(cli_cfg.get("workdir", "")).strip()
     workdir = root if not workdir_raw else (Path(workdir_raw) if Path(workdir_raw).is_absolute() else (root / workdir_raw))
     global_extra_args_raw = cli_cfg.get("extra_args", [])
@@ -1500,6 +1561,7 @@ def _build_llm_client(
         retry_backoff_seconds=retry_backoff_seconds,
         workdir=workdir,
         extra_args=extra_args,
+        disable_slash_commands=disable_slash_commands,
     )
 
 
@@ -1518,6 +1580,12 @@ def _resolve_role_cfg(
     role_cli_cfg = _cfg_dict(role_cfg.get("claude_cli"))
     role_extra_args_raw = role_cli_cfg.get("extra_args", [])
     role_extra_args = [str(v) for v in role_extra_args_raw] if isinstance(role_extra_args_raw, list) else []
+    disable_slash_commands = role_cli_cfg.get("disable_slash_commands")
+    disable_slash_commands_out = (
+        bool(disable_slash_commands)
+        if isinstance(disable_slash_commands, bool)
+        else None
+    )
 
     return {
         "model": model,
@@ -1534,6 +1602,7 @@ def _resolve_role_cfg(
             ),
         ),
         "extra_args": role_extra_args,
+        "disable_slash_commands": disable_slash_commands_out,
     }
 
 
@@ -1639,6 +1708,7 @@ def main() -> int:
         agent_cfg=agent_cfg,
         root=root,
         role_extra_args=thinker_role.get("extra_args"),
+        role_disable_slash_commands=thinker_role.get("disable_slash_commands"),
     )
     coder_client = _build_llm_client(
         provider=provider,

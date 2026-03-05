@@ -19,10 +19,11 @@ kill_criteria:
   FAIL: 200
   ERROR: 30
 
+notebooklm_notebook_url: "https://notebooklm.google.com/notebook/769d7e8a-df51-4a7c-be58-b92e25e53e53"
+
 current_focus:
   - "AMT value area rejection and rotation (VAH/VAL/POC mean-reversion)"
   - "AMT initial balance breakout and failed breakout fades"
   - "Sequential state machine patterns: arm on condition A, fire on condition B"
   - "Orderflow divergence reversals (fade delta extremes, not follow them)"
   - "Volatility compression → expansion ignition"
-

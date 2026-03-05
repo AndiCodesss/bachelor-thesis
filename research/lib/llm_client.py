@@ -85,6 +85,7 @@ class ClaudeCodeCLIClient:
         retry_max_backoff_seconds: float = 30.0,
         workdir: str | Path | None = None,
         extra_args: list[str] | None = None,
+        disable_slash_commands: bool = True,
     ) -> None:
         self._model = str(model).strip()
         if not self._model:
@@ -112,6 +113,7 @@ class ClaudeCodeCLIClient:
         )
         self._workdir = str(workdir) if workdir is not None else None
         self._extra_args = [str(v) for v in (extra_args or []) if str(v).strip()]
+        self._disable_slash_commands = bool(disable_slash_commands)
 
     @property
     def model(self) -> str:
@@ -147,9 +149,9 @@ class ClaudeCodeCLIClient:
         # Keep orchestrator requests lean and deterministic: disable tool/runtime discovery overhead.
         if "--strict-mcp-config" not in cmd:
             cmd.append("--strict-mcp-config")
-        if "--disable-slash-commands" not in cmd:
+        if self._disable_slash_commands and "--disable-slash-commands" not in cmd:
             cmd.append("--disable-slash-commands")
-        if "--tools" not in cmd:
+        if "--tools" not in cmd and "--allowedTools" not in cmd:
             cmd.extend(["--tools", ""])
         # Claude CLI does not expose strict max-token control for local subscription usage.
         if max_output_tokens > 0:

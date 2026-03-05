@@ -14,10 +14,11 @@ quant_thinker:
   model: opus
   temperature: 0.35  # raised from 0.2 — we explicitly want creative, diverse hypotheses
   max_output_tokens: 2000
+  timeout_seconds: 1200  # 20 min — deep research can take up to 15 min before the chat response
   claude_cli:
     extra_args:
-      - --tools
-      - Read  # thinker can read signal files to study near-misses
+      - --allowedTools
+      - "Read,Bash(uv run python scripts/query_notebook.py *)"  # Read for near-misses; Bash restricted to notebook queries
 
 coder:
   model: claude-sonnet-4-6
