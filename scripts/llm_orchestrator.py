@@ -1623,6 +1623,22 @@ def main() -> int:
                 json.dumps(feedback_digest, sort_keys=True, separators=(",", ":")),
             )[:16]
 
+            log_experiment(
+                {
+                    "run_id": run_id,
+                    "agent": "llm_orchestrator",
+                    "event": "feedback_digest",
+                    "iteration": iteration_no,
+                    "digest_hash": feedback_digest_hash,
+                    "digest": feedback_digest,
+                    "feedback_items_count": len(feedback_items),
+                    "model": feedback_generation.model,
+                    "usage": feedback_generation.usage,
+                },
+                experiments_path=orchestrator_log_path,
+                lock_path=orchestrator_log_lock,
+            )
+
             thinker_user_prompt = _build_thinker_user_prompt(
                 mission=mission,
                 existing_strategies=existing,

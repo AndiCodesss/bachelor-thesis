@@ -516,3 +516,61 @@ def test_build_coder_repair_user_prompt_truncates_long_code():
     )
     # Should be truncated — prompt must be shorter than long_code alone
     assert len(prompt) < len(long_code) + 500
+
+
+def test_feedback_digest_is_logged_after_analyst(tmp_path: Path):
+    """feedback_digest event must be written to orchestrator log with digest content."""
+    import json
+    from research.lib.experiments import log_experiment
+
+    log_path = tmp_path / "llm_orchestrator.jsonl"
+    lock_path = tmp_path / "llm_orchestrator.lock"
+
+    digest = {
+        "strengths": ["good entry logic"],
+        "weaknesses": ["too many trades: 708 fired"],
+        "error_patterns": [],
+        "guardrails": ["keep threshold tighter"],
+        "next_focus": ["sparse signals only"],
+    }
+    digest_hash = "abc123"
+
+    # Simulate what the orchestrator does after analyst runs
+    log_experiment(
+        {
+            "run_id": "test_run",
+            "agent": "llm_orchestrator",
+            "event": "feedback_digest",
+            "iteration": 3,
+            "digest_hash": digest_hash,
+            "digest": digest,
+            "feedback_items_count": 5,
+            "model": "claude-sonnet-4-6",
+            "usage": {},
+        },
+        experiments_path=log_path,
+        lock_path=lock_path,
+    )
+
+    events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["event"] == "feedback_digest"
+    assert ev["digest_hash"] == digest_hash
+    assert ev["digest"]["weaknesses"] == ["too many trades: 708 fired"]
+    assert ev["feedback_items_count"] == 5
+
+
+def test_coder_system_prompt_requires_int8():
+    """Coder prompt must explicitly mandate dtype=np.int8."""
+    mod = _load_module()
+    prompt = mod._build_coder_system_prompt()
+    assert "int8" in prompt
+    assert "astype" in prompt
+
+
+def test_coder_system_prompt_forbids_negative_shift():
+    """Coder prompt must warn against shift(-1) lookahead."""
+    mod = _load_module()
+    prompt = mod._build_coder_system_prompt()
+    assert "shift(-1)" in prompt
