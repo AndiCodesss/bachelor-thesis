@@ -1638,6 +1638,7 @@ def main() -> int:
                 )
 
             # Inline repair loop: retry coder with injected errors
+            _last_coder_generation = coder_generation
             if validation_errors and not args.dry_run and max_code_repair_attempts > 0:
                 common_cols = list(feature_knowledge.get("common_columns", []))
                 for repair_attempt in range(max_code_repair_attempts):
@@ -1687,32 +1688,33 @@ def main() -> int:
                             max_backoff_seconds=max_backoff_seconds,
                             schema_hint="keys: strategy_name, bar_configs, params, code",
                         )
-                    except (LLMClientError, ValueError, RuntimeError) as repair_exc:
+                        _last_coder_generation = repair_generation
+
+                        # Update working variables with repaired output
+                        code = repaired_normalized["code"]
+                        params = repaired_normalized["params"]
+                        chosen_bars = repaired_normalized["bar_configs"]
+                        code_hash = _sha256_text(code)[:16]
+
+                        # Overwrite module file with repaired code
+                        _atomic_write_text(module_path, code)
+
+                        # Re-validate repaired code
+                        validation_errors = _validate_generated_strategy(
+                            strategy_name=module_name,
+                            signals_dir=signals_dir,
+                            params=params,
+                            bar_configs=chosen_bars,
+                            split=split,
+                            session_filter=session_filter,
+                            feature_group=feature_group,
+                            sample_cache=sample_cache,
+                        )
+                        if not validation_errors:
+                            print(f"  repair succeeded on attempt {repair_attempt + 1}")
+                            break
+                    except (LLMClientError, ValueError, RuntimeError, OSError) as repair_exc:
                         print(f"  repair call failed: {type(repair_exc).__name__}: {repair_exc}")
-                        break
-
-                    # Update working variables with repaired output
-                    code = repaired_normalized["code"]
-                    params = repaired_normalized["params"]
-                    chosen_bars = repaired_normalized["bar_configs"]
-                    code_hash = _sha256_text(code)[:16]
-
-                    # Overwrite module file with repaired code
-                    _atomic_write_text(module_path, code)
-
-                    # Re-validate repaired code
-                    validation_errors = _validate_generated_strategy(
-                        strategy_name=module_name,
-                        signals_dir=signals_dir,
-                        params=params,
-                        bar_configs=chosen_bars,
-                        split=split,
-                        session_filter=session_filter,
-                        feature_group=feature_group,
-                        sample_cache=sample_cache,
-                    )
-                    if not validation_errors:
-                        print(f"  repair succeeded on attempt {repair_attempt + 1}")
                         break
 
             if validation_errors:
@@ -1747,12 +1749,12 @@ def main() -> int:
                             "payload_hash": _sha256_text(thinker_generation.raw_text),
                         },
                         "coder": {
-                            "model": coder_generation.model,
-                            "response_id": coder_generation.response_id,
-                            "usage": coder_generation.usage,
-                            "attempts": coder_generation.attempts,
-                            "repaired": bool(coder_generation.repaired),
-                            "payload_hash": _sha256_text(coder_generation.raw_text),
+                            "model": _last_coder_generation.model,
+                            "response_id": _last_coder_generation.response_id,
+                            "usage": _last_coder_generation.usage,
+                            "attempts": _last_coder_generation.attempts,
+                            "repaired": bool(_last_coder_generation.repaired),
+                            "payload_hash": _sha256_text(_last_coder_generation.raw_text),
                         },
                     },
                     experiments_path=orchestrator_log_path,
@@ -1845,12 +1847,12 @@ def main() -> int:
                             "payload_hash": _sha256_text(thinker_generation.raw_text),
                         },
                         "coder": {
-                            "model": coder_generation.model,
-                            "response_id": coder_generation.response_id,
-                            "usage": coder_generation.usage,
-                            "attempts": coder_generation.attempts,
-                            "repaired": bool(coder_generation.repaired),
-                            "payload_hash": _sha256_text(coder_generation.raw_text),
+                            "model": _last_coder_generation.model,
+                            "response_id": _last_coder_generation.response_id,
+                            "usage": _last_coder_generation.usage,
+                            "attempts": _last_coder_generation.attempts,
+                            "repaired": bool(_last_coder_generation.repaired),
+                            "payload_hash": _sha256_text(_last_coder_generation.raw_text),
                         },
                         "feature_knowledge_hash": feature_knowledge_hash,
                         "code_hash": code_hash,
