@@ -581,26 +581,49 @@ def _normalize_feedback_digest(payload: dict[str, Any]) -> dict[str, list[str]]:
 
 def _build_feedback_system_prompt() -> str:
     return (
-        "You are a quantitative research feedback analyst.\n"
-        "Given recent experiment events, extract practical guidance for the next iteration.\n"
+        "You are a quantitative research feedback analyst for an automated NQ E-mini futures alpha discovery system.\n\n"
+        "INSTRUMENT CONTEXT:\n"
+        "- NQ E-mini Nasdaq-100 futures, tick size 0.25 pts = $5/tick\n"
+        "- Transaction cost: $14.50 per round-trip (commission + 1-tick slippage each side)\n"
+        "- To break even at 30 trades: need +$435 gross PnL minimum\n"
+        "- Validate split: Sep 2024 – Mar 2025 (7 months; includes US election Nov 2024, Fed rate cuts)\n"
+        "- Session filter: ETH (03:00–16:00 ET); signals fire on bar close, entry on next open\n\n"
+        "PASS CRITERIA (what success looks like):\n"
+        "- Sharpe ratio >= 1.5 on validate split\n"
+        "- Trade count >= 30 total across validate split\n"
+        "- Gauntlet pass: walk-forward consistency, day-of-week stability, permutation test\n\n"
+        "COMMON FAILURE PATTERNS TO WATCH FOR:\n"
+        "- Overtrading: >200 trades/month destroys PnL via $14.50 RT costs (e.g. Sharpe -4.41 from 853 trades)\n"
+        "- Zero signals: entry filter too strict, no trades generated at all\n"
+        "- Causality violations: using future bar data (negative shift index, global aggregates)\n"
+        "- dtype errors: signal array returned as int32 instead of int8 (contract failure)\n"
+        "- Missing column fallbacks: KeyError on feature columns that may be null/absent\n"
+        "- Cross-day contamination: rolling operations that bleed across session boundaries\n\n"
+        "Given recent experiment events, extract practical guidance for the next hypothesis iteration.\n"
         "Return ONLY a JSON object with keys:\n"
-        "- strengths: list[str]\n"
-        "- weaknesses: list[str]\n"
-        "- error_patterns: list[str]\n"
-        "- guardrails: list[str]\n"
-        "- next_focus: list[str]\n"
-        "Keep each item concrete and actionable."
+        "- strengths: list[str] — what is working or showing promise\n"
+        "- weaknesses: list[str] — recurring failure modes in recent strategies\n"
+        "- error_patterns: list[str] — specific technical errors to avoid (exact error messages if available)\n"
+        "- guardrails: list[str] — concrete rules the next strategy MUST follow\n"
+        "- next_focus: list[str] — specific hypothesis directions most likely to find edge\n"
+        "Keep each item concrete, specific, and actionable. Reference actual strategy names and metrics where available."
     )
 
 
 def _build_feedback_user_prompt(*, feedback_items: list[dict[str, Any]]) -> str:
     if not feedback_items:
         return (
-            "No recent events are available.\n"
-            "Return conservative defaults with strict anti-lookahead guardrails."
+            "No experiment results yet. This is the first iteration.\n"
+            "Return conservative defaults emphasising:\n"
+            "- strict causality (no lookahead)\n"
+            "- moderate signal frequency (30-150 trades over validate split)\n"
+            "- robust column access with null fallbacks\n"
+            "- return dtype must be np.int8"
         )
     return (
-        "Analyze these recent validator events and output structured guidance.\n\n"
+        "Analyze these recent experiment events and output structured guidance for the next hypothesis.\n"
+        "Pay special attention to error_patterns — extract exact error messages from generation_rejected "
+        "and task_error events so the coder can avoid repeating the same mistakes.\n\n"
         f"{json.dumps(feedback_items, indent=2, default=str)}"
     )
 
@@ -936,21 +959,41 @@ def _validate_generated_strategy(
 
 def _build_thinker_system_prompt() -> str:
     return (
-        "You are a quant thinker who designs one research hypothesis at a time.\n"
+        "You are a quant researcher designing intraday alpha hypotheses for NQ E-mini Nasdaq-100 futures.\n\n"
+        "INSTRUMENT & COST REALITY:\n"
+        "- Tick size: 0.25 pts = $5/tick. Total round-trip cost: $14.50 (commission + 1-tick slippage/side).\n"
+        "- A strategy trading 100 times costs $1,450 in friction. At 500 trades it needs $7,250 gross to break even.\n"
+        "- TARGET: 30–150 total signals across the 7-month validate split (Sep 2024–Mar 2025).\n"
+        "- Strategies firing >300 signals almost certainly lose to transaction costs. Design for precision, not frequency.\n\n"
+        "VALIDATE SPLIT CONTEXT (Sep 2024 – Mar 2025):\n"
+        "- Includes: US presidential election (Nov 2024), multiple Fed rate decisions, Q4 2024 rally, early 2025 volatility.\n"
+        "- ETH session: 03:00–16:00 ET. Signals must respect session boundaries.\n\n"
+        "PASS CRITERIA:\n"
+        "- Sharpe ratio >= 1.5, trade count >= 30, gauntlet pass (walk-forward + permutation + day-of-week tests).\n\n"
+        "ANTI-LOOKAHEAD RULES (non-negotiable):\n"
+        "- Never reference bar N+1 or later. Only use current bar (index i) and past bars.\n"
+        "- shift(1) means shift FORWARD in time (previous bar value) — safe. shift(-1) means FUTURE — forbidden.\n"
+        "- Rolling aggregates must use only past bars. No global future statistics.\n\n"
+        "DESIGN PRINCIPLES:\n"
+        "- Prefer event-driven, sparse signals (a few high-conviction entries per week over noisy daily signals).\n"
+        "- Use precomputed canonical features as primary building blocks — do not re-derive what is already there.\n"
+        "- Every entry condition should have a clear microstructure rationale (why does this predict price direction?).\n"
+        "- Include explicit exit logic: profit target in ticks, stop loss in ticks, max holding bars.\n"
+        "- Include cooldown / reentry prevention to avoid chasing the same move multiple times.\n\n"
         "Return ONLY a JSON object with keys:\n"
-        "- hypothesis_id: str\n"
-        "- strategy_name_hint: str\n"
-        "- thesis: str\n"
-        "- bar_configs: list[str]\n"
-        "- params_template: object\n"
-        "- entry_logic: str\n"
-        "- exit_logic: str\n"
-        "- risk_controls: list[str]\n"
-        "- anti_lookahead_checks: list[str]\n"
-        "- validation_focus: list[str]\n"
-        "Do not write code. Focus on falsifiable, causal hypotheses.\n"
-        "Before producing the final JSON, internally brainstorm at least three distinct hypotheses,\n"
-        "then select the strongest one. Output only the final selected hypothesis JSON."
+        "- hypothesis_id: str (short slug, e.g. 'cvd_fade_va_reject_001')\n"
+        "- strategy_name_hint: str (Python-safe slug)\n"
+        "- thesis: str (1-2 sentences: what market inefficiency does this exploit and why does it exist?)\n"
+        "- bar_configs: list[str] (choose from allowed configs; pick those that match signal frequency target)\n"
+        "- params_template: object (all numeric thresholds with sensible defaults)\n"
+        "- entry_logic: str (precise conditions using named feature columns; specify long/short separately)\n"
+        "- exit_logic: str (PT ticks, SL ticks, max_bars; rely on framework controls)\n"
+        "- risk_controls: list[str] (e.g. max trades/day, time-of-day filter, spread filter)\n"
+        "- anti_lookahead_checks: list[str] (explicit list of checks the coder must verify)\n"
+        "- validation_focus: list[str] (what metrics/patterns would confirm this hypothesis has real edge)\n\n"
+        "Before producing the final JSON, internally brainstorm at least three distinct hypotheses, "
+        "evaluate each against the cost reality and pass criteria, then select the strongest. "
+        "Output only the final selected hypothesis JSON."
     )
 
 
@@ -989,20 +1032,83 @@ def _build_thinker_user_prompt(
 
 
 def _build_coder_system_prompt() -> str:
-    return (
-        "You are a Python quant signal coder.\n"
-        "You receive a structured hypothesis from a thinker model. Implement only that plan.\n"
-        "Return ONLY a JSON object with keys: strategy_name, bar_configs, params, code.\n"
-        "Requirements for `code`:\n"
-        "- complete Python module\n"
-        "- imports only numpy as np and polars as pl\n"
-        "- defines DEFAULT_PARAMS dict\n"
-        "- defines STRATEGY_METADATA dict\n"
-        "- defines generate_signal(df, params) returning numpy array of -1/0/1 with len(df)\n"
-        "- deterministic, no I/O, no randomness, no network, no filesystem, no subprocess\n"
-        "- no lookahead/future leakage (never use negative shift for future values)\n"
-        "- robust to missing feature columns using safe fallbacks\n"
-    )
+    return """\
+You are a Python quant signal coder for NQ E-mini Nasdaq-100 futures.
+You receive a structured hypothesis from a thinker model. Implement ONLY that plan — nothing more.
+
+Return ONLY a JSON object with exactly these keys: strategy_name, bar_configs, params, code.
+
+CRITICAL: dtype=np.int8 IS MANDATORY
+generate_signal MUST return np.ndarray with dtype=np.int8 and values in {-1, 0, 1}.
+Use: signal = np.where(long_cond, 1, np.where(short_cond, -1, 0)).astype(np.int8)
+Do NOT omit .astype(np.int8). np.where returns int64 by default — that WILL fail validation.
+
+WORKING EXAMPLE MODULE (study this structure exactly):
+
+from __future__ import annotations
+from typing import Any
+import numpy as np
+import polars as pl
+
+DEFAULT_PARAMS: dict[str, Any] = {
+    "fast_span": 8,
+    "slow_span": 21,
+    "min_distance": 0.0,
+}
+
+def generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray:
+    cfg = dict(DEFAULT_PARAMS)
+    cfg.update(params or {})
+
+    close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+    fast = _ema(close, int(cfg["fast_span"]))
+    slow = _ema(close, int(cfg["slow_span"]))
+
+    dist = fast - slow
+    prev = np.roll(dist, 1)
+    prev[0] = 0.0
+
+    min_distance = float(cfg["min_distance"])
+    cross_up = (prev <= 0.0) & (dist > min_distance)
+    cross_down = (prev >= 0.0) & (dist < -min_distance)
+
+    # ALWAYS end with .astype(np.int8)
+    signal = np.where(cross_up, 1, np.where(cross_down, -1, 0)).astype(np.int8)
+    return signal
+
+STRATEGY_METADATA = {
+    "name": "example_ema_turn",
+    "version": "1.0",
+    "features_required": ["close"],
+    "description": "EMA crossover signal.",
+}
+
+REQUIREMENTS FOR `code`:
+- Complete Python module (no placeholders, no `pass`)
+- Allowed imports ONLY: numpy as np, polars as pl, typing (Any, Optional, etc.), __future__
+- Defines DEFAULT_PARAMS: dict[str, Any] — all tunable scalars here
+- Defines STRATEGY_METADATA: dict with name, version, features_required, description
+- Defines generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray
+  * Returns array of dtype=np.int8, values strictly in {-1, 0, 1}, length == len(df)
+  * No NaN values — fill any intermediate NaN before the final signal array
+  * Merge params into defaults at start: cfg = dict(DEFAULT_PARAMS); cfg.update(params or {})
+- Deterministic: no random, no time.time(), no uuid
+- No I/O: no open(), no os, no sys, no subprocess, no network, no filesystem
+- No lookahead: NEVER use shift(-1) or any negative offset (reads the future)
+  * Correct: df["col"].shift(1)  -- previous bar value
+  * WRONG:   df["col"].shift(-1) -- future bar value (instant disqualification)
+- Safe fallbacks for missing columns:
+  * if "col_name" not in df.columns: use np.zeros(len(df), dtype=np.float64)
+  * All precomputed features may be absent -- never crash on KeyError
+
+COMMON MISTAKES THAT WILL FAIL VALIDATION:
+1. Missing .astype(np.int8) -> dtype validation fails (int64 != int8)
+2. Negative shift: df["x"].shift(-1) -> causality check fails immediately
+3. KeyError on missing column -> crashes at import time
+4. NaN in output array -> contract validation fails
+5. Wrong length: len(signal) != len(df) -> contract validation fails
+6. Importing os, sys, requests, json, random -> forbidden imports check fails
+"""
 
 
 def _build_coder_handoff(
