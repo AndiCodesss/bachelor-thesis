@@ -1005,19 +1005,41 @@ def _build_thinker_system_prompt() -> str:
         "Express stop offset in params as ticks beyond the structural level so it is tunable.\n\n"
         "AUCTION MARKET THEORY (AMT) — HIGH PRIORITY FOCUS:\n"
         "AMT is a first-principles framework for NQ and is strongly encouraged as a basis for hypotheses.\n"
-        "Core AMT concepts to exploit:\n"
-        "- Value Area (VA): price range containing ~70% of prior session volume. VAH=top, VAL=bottom.\n"
-        "  Edge: price entering VA from outside has high probability of rotating to opposite boundary.\n"
-        "  Edge: price rejecting VA boundary after probing it signals continuation of prior trend.\n"
-        "- Point of Control (POC): single price level with highest prior-session volume.\n"
-        "  Edge: POC acts as magnet — price frequently revisits after moving away.\n"
-        "- Initial Balance (IB): first 30–60 min of RTH session (09:30–10:30 ET) high/low range.\n"
-        "  Edge: breakout from IB with volume confirms directional conviction for the session.\n"
-        "  Edge: IB extensions (price moving beyond IB) attract follow-through; failures reverse sharply.\n"
-        "- Acceptance vs Rejection: time spent at a level signals acceptance (range extension likely) or\n"
-        "  rejection (mean-reversion likely). Single prints / poor highs/lows signal weak auctions.\n"
-        "- Balance vs Imbalance: overlapping prior-day value areas = balance (fade range extremes);\n"
-        "  non-overlapping value areas = imbalance (trade in direction of gap).\n"
+        "Core AMT concepts and their EXACT precomputed column names:\n"
+        "- Value Area (VA): ~70% of prior session volume. VAH = va_high, VAL = va_low.\n"
+        "  position_in_va: current price position within VA (0=at VAL, 1=at VAH, <0=below VA, >1=above VA)\n"
+        "  va_width: total width of value area in points\n"
+        "  rolling_va_high, rolling_va_low, rolling_va_position: rolling (intraday) equivalents\n"
+        "  Edge: price entering VA from outside rotates to opposite boundary. Price rejecting VA boundary\n"
+        "  signals continuation. Use position_in_va < 0 for 'price below VA' condition.\n"
+        "- Point of Control (POC): highest-volume price level.\n"
+        "  poc_price: actual price level of POC\n"
+        "  poc_distance: normalised distance of close from POC (positive = above, negative = below)\n"
+        "  poc_distance_raw: distance in raw points\n"
+        "  poc_slope_6: 6-bar slope of rolling POC — positive means POC drifting up\n"
+        "  rolling_poc, rolling_poc_distance: intraday rolling POC equivalents\n"
+        "  Edge: POC is a magnet. Fade moves away from POC when no directional conviction.\n"
+        "- Opening Range (IB proxy): first 30 min of RTH (09:30–10:00 ET).\n"
+        "  or_broken_up: 1 when price first breaks above OR high, 0 otherwise\n"
+        "  or_broken_down: 1 when price first breaks below OR low, 0 otherwise\n"
+        "  or_width: opening range width in points\n"
+        "  position_in_or: 0=at OR low, 1=at OR high, outside=breakout\n"
+        "  Edge: OR breakout with volume = directional conviction. Failed breakout (re-enters OR) = fade.\n"
+        "- Poor Highs/Lows (Unfinished Business): bars that closed away from their extreme.\n"
+        "  fp_unfinished_high: 1 if current bar has an unfinished/poor high (selling didn't complete)\n"
+        "  fp_unfinished_low: 1 if current bar has an unfinished/poor low (buying didn't complete)\n"
+        "  bars_since_unfinished_high, bars_since_unfinished_low: recency (0=this bar, 1=prior bar, etc.)\n"
+        "  Edge: unfinished business signals incomplete auction — price likely returns to complete it.\n"
+        "- High/Low Volume Nodes:\n"
+        "  at_hvn: 1 if price is near a High Volume Node (support/resistance — expect stalling)\n"
+        "  at_lvn: 1 if price is near a Low Volume Node (thin area — expect fast passage)\n"
+        "  dist_nearest_hvn, dist_nearest_lvn: distance to nearest HVN/LVN in points\n"
+        "  hvn_lvn_ratio: ratio of nearby HVN to LVN volume — high ratio = strong local support\n"
+        "- Swing-based AMT:\n"
+        "  swing_va_position: price position within the recent swing value area\n"
+        "  swing_poc_dist: distance from swing POC\n"
+        "  breakout_direction: 1=up breakout, -1=down breakout, 0=inside\n"
+        "  bars_since_breakout: how many bars ago the breakout occurred\n"
         "AMT strategies naturally produce sparse, high-conviction signals because they fire only at\n"
         "structural price levels — ideal for the 30–150 trade target.\n\n"
         "STATE MACHINES — POWERFUL TOOL FOR SEQUENTIAL PATTERNS:\n"
@@ -1205,6 +1227,17 @@ Key rules for state machines:
 - Only reference index i (current) or i-1 (previous) inside the loop — never i+1 (lookahead)
 - Reset state at session boundaries to prevent cross-day contamination
 - State variable counts toward no imports — plain Python int is fine
+
+SESSION BOUNDARY RESET (required for state machines):
+Detect new session from ts_event so state does not bleed across days:
+
+  ts = df["ts_event"].cast(pl.Datetime("us", "UTC"))
+  dates = ts.dt.convert_time_zone("US/Eastern").dt.date().to_numpy()
+  new_session = np.concatenate([[True], dates[1:] != dates[:-1]])
+
+Then inside the loop reset on new_session[i]:
+  if new_session[i]:
+      state = 0  # reset all state at start of each session
 
 SIGNAL FREQUENCY — CRITICAL CALIBRATION WARNING:
 The pre-flight validation runs on a SMALL SAMPLE of ~1,200 bars (roughly 1-3 trading days).
