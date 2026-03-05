@@ -69,6 +69,13 @@ def test_normalize_feedback_digest_defaults():
     assert out["next_focus"]
 
 
+def test_should_wait_for_validation_requires_no_active_queue_work():
+    mod = _load_module()
+    assert mod._should_wait_for_validation({"pending": 0, "in_progress": 0}) is False
+    assert mod._should_wait_for_validation({"pending": 1, "in_progress": 0}) is True
+    assert mod._should_wait_for_validation({"pending": 0, "in_progress": 1}) is True
+
+
 def test_choose_module_path_versions_when_content_differs(tmp_path: Path):
     mod = _load_module()
     signals_dir = tmp_path

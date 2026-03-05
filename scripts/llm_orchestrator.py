@@ -368,6 +368,13 @@ def _queue_counts(queue_path: Path) -> dict[str, int]:
     }
 
 
+def _should_wait_for_validation(queue_counts: dict[str, int]) -> bool:
+    """Strict sequential mode: do not generate while validation is outstanding."""
+    pending = int(queue_counts.get("pending", 0))
+    in_progress = int(queue_counts.get("in_progress", 0))
+    return (pending + in_progress) > 0
+
+
 def _collect_feedback_items(log_path: Path, limit: int = 6000, max_items: int = 24) -> list[dict[str, Any]]:
     rows = _tail_lines(log_path, limit)
     if not rows:
@@ -1192,6 +1199,11 @@ def main() -> int:
     stage_backoff_seconds = float(runtime_cfg.get("stage_backoff_seconds", 3.0))
     quota_backoff_seconds = float(runtime_cfg.get("quota_backoff_seconds", 20.0))
     max_backoff_seconds = float(runtime_cfg.get("max_backoff_seconds", 90.0))
+    if max_pending_tasks != 1:
+        print(
+            "Sequential mode active: "
+            f"runtime.max_pending_tasks={max_pending_tasks} is ignored (effective=1).",
+        )
 
     feedback_role = _resolve_role_cfg(
         agent_cfg=agent_cfg,
@@ -1276,8 +1288,11 @@ def main() -> int:
 
         queue_counts = _queue_counts(state_paths["queue"])
         queued = queue_counts["pending"] + queue_counts["in_progress"]
-        if queued >= max_pending_tasks:
-            print(f"Queue saturated ({queued}/{max_pending_tasks}); sleeping {poll_seconds}s")
+        if _should_wait_for_validation(queue_counts):
+            print(
+                "Waiting for validator completion before next generation: "
+                f"active_tasks={queued}; sleeping {poll_seconds}s",
+            )
             time.sleep(max(1, poll_seconds))
             continue
 
