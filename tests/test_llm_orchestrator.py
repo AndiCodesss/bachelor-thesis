@@ -482,3 +482,37 @@ def test_merged_feedback_works_when_some_sources_empty(tmp_path: Path):
     )
     assert len(out) == 1
     assert out[0]["event"] == "task_result"
+
+
+def test_build_coder_repair_user_prompt_includes_errors_and_code():
+    mod = _load_module()
+    thinker_handoff = {"hypothesis": {"hypothesis_id": "h001", "thesis": "test thesis"}}
+    previous_code = "def generate_signal(df, params):\n    return df['bad_col'].to_numpy()\n"
+    validation_errors = [
+        "my_strat: generate_signal failed for tick_610: KeyError: 'bad_col'",
+        "my_strat: contract failed for volume_2000: signal contains NaN",
+    ]
+    prompt = mod._build_coder_repair_user_prompt(
+        thinker_handoff=thinker_handoff,
+        previous_code=previous_code,
+        validation_errors=validation_errors,
+        common_columns=["close", "ema_ratio_8", "cvd_price_divergence_6"],
+    )
+    assert "bad_col" in prompt
+    assert "KeyError" in prompt
+    assert "NaN" in prompt
+    assert "generate_signal" in prompt
+    assert "ema_ratio_8" in prompt
+
+
+def test_build_coder_repair_user_prompt_truncates_long_code():
+    mod = _load_module()
+    long_code = "x = 1\n" * 1000  # very long
+    prompt = mod._build_coder_repair_user_prompt(
+        thinker_handoff={},
+        previous_code=long_code,
+        validation_errors=["error"],
+        common_columns=[],
+    )
+    # Should be truncated — prompt must be shorter than long_code alone
+    assert len(prompt) < len(long_code) + 500

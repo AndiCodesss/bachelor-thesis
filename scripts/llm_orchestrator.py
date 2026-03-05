@@ -1096,6 +1096,39 @@ def _build_coder_user_prompt(
     return prompt
 
 
+_REPAIR_CODE_MAX_CHARS = 4000
+
+
+def _build_coder_repair_user_prompt(
+    *,
+    thinker_handoff: dict[str, Any],
+    previous_code: str,
+    validation_errors: list[str],
+    common_columns: list[str],
+) -> str:
+    """Build a targeted repair prompt for the coder when generated code fails validation."""
+    code_snippet = previous_code
+    if len(code_snippet) > _REPAIR_CODE_MAX_CHARS:
+        code_snippet = code_snippet[:_REPAIR_CODE_MAX_CHARS] + "\n... [truncated]"
+
+    errors_blob = "\n".join(f"  - {e}" for e in validation_errors)
+    cols_hint = ", ".join(common_columns[:40]) if common_columns else "(see feature knowledge)"
+
+    return (
+        "Your previously generated code FAILED validation. Fix ONLY the listed errors.\n\n"
+        "ORIGINAL_THINKER_HANDOFF_JSON_BEGIN\n"
+        f"{json.dumps(thinker_handoff, indent=2, sort_keys=True, default=str)}\n"
+        "ORIGINAL_THINKER_HANDOFF_JSON_END\n\n"
+        "PREVIOUS_CODE_BEGIN\n"
+        f"{code_snippet}\n"
+        "PREVIOUS_CODE_END\n\n"
+        f"VALIDATION_ERRORS:\n{errors_blob}\n\n"
+        f"AVAILABLE_COLUMNS_HINT (common across bar configs): {cols_hint}\n\n"
+        "Return corrected JSON with same schema: strategy_name, bar_configs, params, code.\n"
+        "Fix ONLY the validation errors above. Do not change the overall strategy logic."
+    )
+
+
 def _task_id(strategy_name: str, bar_config: str, params: dict[str, Any], code_hash: str) -> str:
     digest = _sha256_text(
         f"{strategy_name}|{bar_config}|{json.dumps(params, sort_keys=True, separators=(',', ':'))}|{code_hash}",
@@ -1317,6 +1350,7 @@ def main() -> int:
     stage_max_attempts = int(runtime_cfg.get("stage_max_attempts", 3))
     json_repair_attempts = int(runtime_cfg.get("json_repair_attempts", 1))
     semantic_retry_attempts = int(runtime_cfg.get("semantic_retry_attempts", 1))
+    max_code_repair_attempts = int(runtime_cfg.get("max_code_repair_attempts", 2))
     stage_backoff_seconds = float(runtime_cfg.get("stage_backoff_seconds", 3.0))
     quota_backoff_seconds = float(runtime_cfg.get("quota_backoff_seconds", 20.0))
     max_backoff_seconds = float(runtime_cfg.get("max_backoff_seconds", 90.0))
@@ -1602,6 +1636,84 @@ def main() -> int:
                     feature_group=feature_group,
                     sample_cache=sample_cache,
                 )
+
+            # Inline repair loop: retry coder with injected errors
+            if validation_errors and not args.dry_run and max_code_repair_attempts > 0:
+                common_cols = list(feature_knowledge.get("common_columns", []))
+                for repair_attempt in range(max_code_repair_attempts):
+                    print(
+                        f"  repair attempt {repair_attempt + 1}/{max_code_repair_attempts} "
+                        f"for {module_name}: {validation_errors[0]}"
+                    )
+                    try:
+                        repair_user_prompt = _build_coder_repair_user_prompt(
+                            thinker_handoff=thinker_handoff,
+                            previous_code=code,
+                            validation_errors=validation_errors,
+                            common_columns=common_cols,
+                        )
+                        repair_generation = _call_stage_json(
+                            stage_name="coder_repair",
+                            schema_hint="keys: strategy_name, bar_configs, params, code",
+                            client=coder_client,
+                            system_prompt=_build_coder_system_prompt(),
+                            user_prompt=repair_user_prompt,
+                            temperature=0.1,
+                            max_output_tokens=int(coder_role["max_output_tokens"]),
+                            max_attempts=2,
+                            json_repair_attempts=json_repair_attempts,
+                            stage_backoff_seconds=stage_backoff_seconds,
+                            quota_backoff_seconds=quota_backoff_seconds,
+                            max_backoff_seconds=max_backoff_seconds,
+                        )
+                        repaired_normalized, repair_generation = _normalize_with_semantic_retry(
+                            stage_name="coder_repair",
+                            stage_result=repair_generation,
+                            normalize_fn=lambda payload: _normalize_coder_payload(
+                                payload,
+                                mission_bar_configs=mission_bar_configs,
+                                thinker_brief=thinker_brief,
+                            ),
+                            client=coder_client,
+                            system_prompt=_build_coder_system_prompt(),
+                            base_user_prompt=repair_user_prompt,
+                            temperature=0.1,
+                            max_output_tokens=int(coder_role["max_output_tokens"]),
+                            max_semantic_retries=semantic_retry_attempts,
+                            max_attempts=2,
+                            json_repair_attempts=json_repair_attempts,
+                            stage_backoff_seconds=stage_backoff_seconds,
+                            quota_backoff_seconds=quota_backoff_seconds,
+                            max_backoff_seconds=max_backoff_seconds,
+                            schema_hint="keys: strategy_name, bar_configs, params, code",
+                        )
+                    except (LLMClientError, ValueError, RuntimeError) as repair_exc:
+                        print(f"  repair call failed: {type(repair_exc).__name__}: {repair_exc}")
+                        break
+
+                    # Update working variables with repaired output
+                    code = repaired_normalized["code"]
+                    params = repaired_normalized["params"]
+                    chosen_bars = repaired_normalized["bar_configs"]
+                    code_hash = _sha256_text(code)[:16]
+
+                    # Overwrite module file with repaired code
+                    _atomic_write_text(module_path, code)
+
+                    # Re-validate repaired code
+                    validation_errors = _validate_generated_strategy(
+                        strategy_name=module_name,
+                        signals_dir=signals_dir,
+                        params=params,
+                        bar_configs=chosen_bars,
+                        split=split,
+                        session_filter=session_filter,
+                        feature_group=feature_group,
+                        sample_cache=sample_cache,
+                    )
+                    if not validation_errors:
+                        print(f"  repair succeeded on attempt {repair_attempt + 1}")
+                        break
 
             if validation_errors:
                 if not args.dry_run and is_new_path and module_path.exists():
