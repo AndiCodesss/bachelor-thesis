@@ -61,13 +61,30 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
     assert out["code"].endswith("\n")
 
 
-def test_normalize_feedback_digest_defaults():
+def test_format_results_table_sorts_by_sharpe_and_marks_near_misses():
     mod = _load_module()
-    out = mod._normalize_feedback_digest({})
-    assert out["strengths"]
-    assert out["weaknesses"]
-    assert out["guardrails"]
-    assert out["next_focus"]
+    items = [
+        {"event": "task_result", "strategy_name": "bad_strat", "bar_config": "tick_610",
+         "verdict": "FAIL", "sharpe_ratio": -2.1, "trade_count": 80},
+        {"event": "task_result", "strategy_name": "near_miss_strat", "bar_config": "time_1m",
+         "verdict": "FAIL", "sharpe_ratio": 0.42, "trade_count": 25},
+        {"event": "generation_rejected", "strategy_name": "broken_gen", "error": "KeyError: ema_ratio"},
+    ]
+    table = mod._format_results_table(items)
+    # near_miss_strat should appear before bad_strat (sorted by sharpe desc)
+    assert table.index("near_miss_strat") < table.index("bad_strat")
+    # near-miss annotation present
+    assert "NEAR-MISS" in table
+    assert "research/signals/near_miss_strat.py" in table
+    # error block present
+    assert "broken_gen" in table
+    assert "KeyError" in table
+
+
+def test_format_results_table_empty_items():
+    mod = _load_module()
+    table = mod._format_results_table([])
+    assert "iteration 1" in table
 
 
 def test_should_wait_for_validation_requires_no_active_queue_work():
@@ -337,7 +354,7 @@ def test_prompts_include_feature_knowledge_markers():
     thinker_prompt = mod._build_thinker_user_prompt(
         mission={"objective": "x", "bar_configs": ["tick_610"], "session_filter": "eth", "feature_group": "all"},
         existing_strategies=[],
-        feedback_digest={"strengths": [], "weaknesses": [], "error_patterns": [], "guardrails": [], "next_focus": []},
+        feedback_items=[],
         feature_knowledge=feature_knowledge,
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in thinker_prompt
@@ -516,49 +533,6 @@ def test_build_coder_repair_user_prompt_truncates_long_code():
     )
     # Should be truncated — prompt must be shorter than long_code alone
     assert len(prompt) < len(long_code) + 500
-
-
-def test_feedback_digest_is_logged_after_analyst(tmp_path: Path):
-    """feedback_digest event must be written to orchestrator log with digest content."""
-    import json
-    from research.lib.experiments import log_experiment
-
-    log_path = tmp_path / "llm_orchestrator.jsonl"
-    lock_path = tmp_path / "llm_orchestrator.lock"
-
-    digest = {
-        "strengths": ["good entry logic"],
-        "weaknesses": ["too many trades: 708 fired"],
-        "error_patterns": [],
-        "guardrails": ["keep threshold tighter"],
-        "next_focus": ["sparse signals only"],
-    }
-    digest_hash = "abc123"
-
-    # Simulate what the orchestrator does after analyst runs
-    log_experiment(
-        {
-            "run_id": "test_run",
-            "agent": "llm_orchestrator",
-            "event": "feedback_digest",
-            "iteration": 3,
-            "digest_hash": digest_hash,
-            "digest": digest,
-            "feedback_items_count": 5,
-            "model": "claude-sonnet-4-6",
-            "usage": {},
-        },
-        experiments_path=log_path,
-        lock_path=lock_path,
-    )
-
-    events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
-    assert len(events) == 1
-    ev = events[0]
-    assert ev["event"] == "feedback_digest"
-    assert ev["digest_hash"] == digest_hash
-    assert ev["digest"]["weaknesses"] == ["too many trades: 708 fired"]
-    assert ev["feedback_items_count"] == 5
 
 
 def test_coder_system_prompt_requires_int8():

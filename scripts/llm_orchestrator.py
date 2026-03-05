@@ -551,87 +551,54 @@ def _as_str_list(value: Any, max_items: int = 8, max_len: int = 220) -> list[str
     return out
 
 
-def _normalize_feedback_digest(payload: dict[str, Any]) -> dict[str, list[str]]:
-    if not isinstance(payload, dict):
-        raise ValueError("feedback payload must be a JSON object")
-
-    strengths = _as_str_list(payload.get("strengths"))
-    weaknesses = _as_str_list(payload.get("weaknesses"))
-    error_patterns = _as_str_list(payload.get("error_patterns"))
-    guardrails = _as_str_list(payload.get("guardrails"))
-    next_focus = _as_str_list(payload.get("next_focus"))
-    near_misses = _as_str_list(payload.get("near_misses"))
-
-    if not strengths:
-        strengths = ["No reliable strengths identified yet."]
-    if not weaknesses:
-        weaknesses = ["No consistent weaknesses identified yet."]
-    if not guardrails:
-        guardrails = ["Enforce strict causality and signal contract."]
-    if not next_focus:
-        next_focus = ["Generate one robust, testable hypothesis."]
-
-    return {
-        "strengths": strengths,
-        "weaknesses": weaknesses,
-        "error_patterns": error_patterns,
-        "guardrails": guardrails,
-        "next_focus": next_focus,
-        "near_misses": near_misses,
-    }
-
-
-def _build_feedback_system_prompt() -> str:
-    return (
-        "You are a quantitative research feedback analyst for an automated NQ E-mini futures alpha discovery system.\n\n"
-        "INSTRUMENT CONTEXT:\n"
-        "- NQ E-mini Nasdaq-100 futures, tick size 0.25 pts = $5/tick\n"
-        "- Transaction cost: $14.50 per round-trip (commission + 1-tick slippage each side)\n"
-        "- To break even at 30 trades: need +$435 gross PnL minimum\n"
-        "- Validate split: Sep 2024 – Mar 2025 (7 months; includes US election Nov 2024, Fed rate cuts)\n"
-        "- Session filter: ETH (03:00–16:00 ET); signals fire on bar close, entry on next open\n\n"
-        "PASS CRITERIA (what success looks like):\n"
-        "- Sharpe ratio >= 1.5 on validate split\n"
-        "- Trade count >= 30 total across validate split\n"
-        "- Gauntlet pass: walk-forward consistency, day-of-week stability, permutation test\n\n"
-        "COMMON FAILURE PATTERNS TO WATCH FOR:\n"
-        "- Overtrading: >200 trades/month destroys PnL via $14.50 RT costs (e.g. Sharpe -4.41 from 853 trades)\n"
-        "- Zero signals: entry filter too strict, no trades generated at all\n"
-        "- Causality violations: using future bar data (negative shift index, global aggregates)\n"
-        "- dtype errors: signal array returned as int32 instead of int8 (contract failure)\n"
-        "- Missing column fallbacks: KeyError on feature columns that may be null/absent\n"
-        "- Cross-day contamination: rolling operations that bleed across session boundaries\n\n"
-        "Given recent experiment events, extract practical guidance for the next hypothesis iteration.\n"
-        "Return ONLY a JSON object with keys:\n"
-        "- strengths: list[str] — what is working or showing promise\n"
-        "- weaknesses: list[str] — recurring failure modes in recent strategies\n"
-        "- error_patterns: list[str] — specific technical errors to avoid (exact error messages if available)\n"
-        "- guardrails: list[str] — concrete rules the next strategy MUST follow\n"
-        "- next_focus: list[str] — specific hypothesis directions most likely to find edge\n"
-        "- near_misses: list[str] — strategies that showed genuine positive direction but failed on a single "
-        "fixable dimension (e.g. net_pnl > 0 but trade_count < 30, or Sharpe 0.2–1.4 with right trade count). "
-        "For each near-miss state: strategy name, what was good, what single parameter change would fix it. "
-        "Leave empty list if no near-misses exist.\n"
-        "Keep each item concrete, specific, and actionable. Reference actual strategy names and metrics where available."
-    )
-
-
-def _build_feedback_user_prompt(*, feedback_items: list[dict[str, Any]]) -> str:
+def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
+    """Format raw feedback items into a compact results table for the thinker."""
     if not feedback_items:
-        return (
-            "No experiment results yet. This is the first iteration.\n"
-            "Return conservative defaults emphasising:\n"
-            "- strict causality (no lookahead)\n"
-            "- moderate signal frequency (30-150 trades over validate split)\n"
-            "- robust column access with null fallbacks\n"
-            "- return dtype must be np.int8"
-        )
-    return (
-        "Analyze these recent experiment events and output structured guidance for the next hypothesis.\n"
-        "Pay special attention to error_patterns — extract exact error messages from generation_rejected "
-        "and task_error events so the coder can avoid repeating the same mistakes.\n\n"
-        f"{json.dumps(feedback_items, indent=2, default=str)}"
-    )
+        return "No experiment results yet — this is iteration 1."
+
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for item in feedback_items:
+        event = item.get("event", "")
+        if event in ("task_result", "validation_result"):
+            results.append(item)
+        elif event in ("task_error", "generation_rejected", "generation_error"):
+            errors.append(item)
+
+    def _sharpe(x: dict[str, Any]) -> float:
+        s = x.get("sharpe_ratio") or x.get("avg_sharpe_ratio")
+        return float(s) if s is not None else -999.0
+
+    results.sort(key=_sharpe, reverse=True)
+
+    lines: list[str] = []
+    if results:
+        lines.append("EXPERIMENT RESULTS (sorted best-first):")
+        for r in results:
+            sharpe = r.get("sharpe_ratio") or r.get("avg_sharpe_ratio")
+            trades = r.get("trade_count") or r.get("avg_trade_count")
+            verdict = r.get("verdict") or r.get("overall_verdict", "?")
+            name = r.get("strategy_name", "?")
+            bar = r.get("bar_config", "")
+
+            sharpe_str = f"{float(sharpe):.3f}" if sharpe is not None else "N/A"
+            trades_str = str(int(float(trades))) if trades is not None else "N/A"
+            bar_str = f" [{bar}]" if bar else ""
+
+            note = ""
+            if sharpe is not None and float(sharpe) > 0 and verdict not in ("PASS",):
+                note = f"  ← NEAR-MISS: read research/signals/{name}.py"
+
+            lines.append(f"  {name}{bar_str}: {verdict} sharpe={sharpe_str} trades={trades_str}{note}")
+
+    if errors:
+        lines.append("\nGENERATION/VALIDATION ERRORS:")
+        for e in errors[:8]:
+            name = str(e.get("strategy_name") or e.get("hypothesis_id", "?"))
+            err = str(e.get("error", ""))[:120]
+            lines.append(f"  {name}: {err}")
+
+    return "\n".join(lines)
 
 
 def _normalize_thinker_brief(
@@ -1103,6 +1070,13 @@ def _build_thinker_system_prompt() -> str:
         "- risk_controls: list[str] (e.g. max trades/day, time-of-day filter, spread filter)\n"
         "- anti_lookahead_checks: list[str] (explicit list of checks the coder must verify)\n"
         "- validation_focus: list[str] (what metrics/patterns would confirm this hypothesis has real edge)\n\n"
+        "FILE ACCESS — READ TOOL AVAILABLE:\n"
+        "You have the Read tool and can inspect files in this project before designing your hypothesis.\n"
+        "Use it selectively — only when it adds genuine insight:\n"
+        "- Near-miss signals: if the results table shows a strategy with positive Sharpe that failed,\n"
+        "  read research/signals/<strategy_name>.py to understand what was close to working.\n"
+        "- Signal examples: research/signals/ contains all past implementations — useful for code structure.\n"
+        "Focus reads on near-misses. Do not read every file.\n\n"
         "Before producing the final JSON, internally brainstorm at least three distinct hypotheses — "
         "prioritise novelty and diversity across the three candidates. "
         "Evaluate each against cost reality, pass criteria, and the market physics constraint, "
@@ -1114,7 +1088,7 @@ def _build_thinker_user_prompt(
     *,
     mission: dict[str, Any],
     existing_strategies: list[str],
-    feedback_digest: dict[str, list[str]],
+    feedback_items: list[dict[str, Any]],
     feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
     bar_configs = mission.get("bar_configs", ["tick_610"])
@@ -1124,6 +1098,7 @@ def _build_thinker_user_prompt(
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
+    results_table = _format_results_table(feedback_items)
     prompt = (
         f"Mission objective:\n{objective}\n\n"
         f"Allowed bar_configs: {bar_configs}\n"
@@ -1131,15 +1106,8 @@ def _build_thinker_user_prompt(
         f"Feature group: {mission.get('feature_group', 'all')}\n"
         f"Current focus:\n{focus_blob}\n\n"
         f"Existing strategy files to avoid duplicating:\n{avoid}\n\n"
-        f"Structured feedback digest:\n{json.dumps(feedback_digest, indent=2)}\n\n"
-        + (
-            "NEAR-MISS ALERT — prioritise iterating on these before inventing something entirely new:\n"
-            + "\n".join(f"  - {nm}" for nm in feedback_digest.get("near_misses", []))
-            + "\n\n"
-            if feedback_digest.get("near_misses")
-            else ""
-        )
-        + "Design exactly one hypothesis that is implementable by a separate coding model."
+        f"Recent experiment results:\n{results_table}\n\n"
+        "Design exactly one hypothesis that is implementable by a separate coding model."
     )
     if feature_knowledge:
         prompt += (
@@ -1499,6 +1467,7 @@ def _build_llm_client(
     model: str,
     agent_cfg: dict[str, Any],
     root: Path,
+    role_extra_args: list[str] | None = None,
 ) -> LLMRawClient:
     raw_provider = str(provider).strip().lower()
     if raw_provider not in {"claude", "claude_cli", "claude_code"}:
@@ -1519,8 +1488,9 @@ def _build_llm_client(
     retry_backoff_seconds = float(cli_cfg.get("retry_backoff_seconds", agent_cfg.get("retry_backoff_seconds", 1.5)))
     workdir_raw = str(cli_cfg.get("workdir", "")).strip()
     workdir = root if not workdir_raw else (Path(workdir_raw) if Path(workdir_raw).is_absolute() else (root / workdir_raw))
-    extra_args_raw = cli_cfg.get("extra_args", [])
-    extra_args = [str(v) for v in extra_args_raw] if isinstance(extra_args_raw, list) else []
+    global_extra_args_raw = cli_cfg.get("extra_args", [])
+    global_extra_args = [str(v) for v in global_extra_args_raw] if isinstance(global_extra_args_raw, list) else []
+    extra_args = global_extra_args + (role_extra_args or [])
 
     return ClaudeCodeCLIClient(
         model=model,
@@ -1545,6 +1515,10 @@ def _resolve_role_cfg(
     if not model:
         raise ValueError(f"agent config requires `{role}.model` (or legacy `model`)")
 
+    role_cli_cfg = _cfg_dict(role_cfg.get("claude_cli"))
+    role_extra_args_raw = role_cli_cfg.get("extra_args", [])
+    role_extra_args = [str(v) for v in role_extra_args_raw] if isinstance(role_extra_args_raw, list) else []
+
     return {
         "model": model,
         "temperature": float(
@@ -1559,6 +1533,7 @@ def _resolve_role_cfg(
                 agent_cfg.get("max_output_tokens", default_max_output_tokens),
             ),
         ),
+        "extra_args": role_extra_args,
     }
 
 
@@ -1644,12 +1619,6 @@ def main() -> int:
             f"runtime.max_pending_tasks={max_pending_tasks} is ignored (effective=1).",
         )
 
-    feedback_role = _resolve_role_cfg(
-        agent_cfg=agent_cfg,
-        role="feedback_analyst",
-        default_temperature=0.1,
-        default_max_output_tokens=1400,
-    )
     thinker_role = _resolve_role_cfg(
         agent_cfg=agent_cfg,
         role="quant_thinker",
@@ -1664,17 +1633,12 @@ def main() -> int:
     )
 
     provider = str(agent_cfg.get("provider", "claude_cli")).strip().lower()
-    feedback_client = _build_llm_client(
-        provider=provider,
-        model=feedback_role["model"],
-        agent_cfg=agent_cfg,
-        root=root,
-    )
     thinker_client = _build_llm_client(
         provider=provider,
         model=thinker_role["model"],
         agent_cfg=agent_cfg,
         root=root,
+        role_extra_args=thinker_role.get("extra_args"),
     )
     coder_client = _build_llm_client(
         provider=provider,
@@ -1713,7 +1677,7 @@ def main() -> int:
         "LLM orchestrator run_id="
         f"{run_id} mission={mission_name} "
         f"provider={provider} "
-        f"models=feedback:{feedback_role['model']} thinker:{thinker_role['model']} coder:{coder_role['model']}",
+        f"models=thinker:{thinker_role['model']} coder:{coder_role['model']}",
     )
     print(f"split={split} session_filter={session_filter} feature_group={feature_group}")
     print(f"max_iterations={max_iterations} dry_run={bool(args.dry_run)}")
@@ -1744,65 +1708,13 @@ def main() -> int:
         )
 
         iteration_no = iterations_done + 1
-        print(f"[iteration {iteration_no}/{max_iterations}] running feedback->thinker->coder pipeline")
+        print(f"[iteration {iteration_no}/{max_iterations}] running thinker->coder pipeline")
 
         try:
-            feedback_user_prompt = _build_feedback_user_prompt(feedback_items=feedback_items)
-            feedback_generation = _call_stage_json(
-                stage_name="feedback_analyst",
-                schema_hint="keys: strengths, weaknesses, error_patterns, guardrails, next_focus; each list[str]",
-                client=feedback_client,
-                system_prompt=_build_feedback_system_prompt(),
-                user_prompt=feedback_user_prompt,
-                temperature=float(feedback_role["temperature"]),
-                max_output_tokens=int(feedback_role["max_output_tokens"]),
-                max_attempts=stage_max_attempts,
-                json_repair_attempts=json_repair_attempts,
-                stage_backoff_seconds=stage_backoff_seconds,
-                quota_backoff_seconds=quota_backoff_seconds,
-                max_backoff_seconds=max_backoff_seconds,
-            )
-            feedback_digest, feedback_generation = _normalize_with_semantic_retry(
-                stage_name="feedback_analyst",
-                stage_result=feedback_generation,
-                normalize_fn=_normalize_feedback_digest,
-                client=feedback_client,
-                system_prompt=_build_feedback_system_prompt(),
-                base_user_prompt=feedback_user_prompt,
-                temperature=float(feedback_role["temperature"]),
-                max_output_tokens=int(feedback_role["max_output_tokens"]),
-                max_semantic_retries=semantic_retry_attempts,
-                max_attempts=stage_max_attempts,
-                json_repair_attempts=json_repair_attempts,
-                stage_backoff_seconds=stage_backoff_seconds,
-                quota_backoff_seconds=quota_backoff_seconds,
-                max_backoff_seconds=max_backoff_seconds,
-                schema_hint="keys: strengths, weaknesses, error_patterns, guardrails, next_focus; each list[str]",
-            )
-            feedback_digest_hash = _sha256_text(
-                json.dumps(feedback_digest, sort_keys=True, separators=(",", ":")),
-            )[:16]
-
-            log_experiment(
-                {
-                    "run_id": run_id,
-                    "agent": "llm_orchestrator",
-                    "event": "feedback_digest",
-                    "iteration": iteration_no,
-                    "digest_hash": feedback_digest_hash,
-                    "digest": feedback_digest,
-                    "feedback_items_count": len(feedback_items),
-                    "model": feedback_generation.model,
-                    "usage": feedback_generation.usage,
-                },
-                experiments_path=orchestrator_log_path,
-                lock_path=orchestrator_log_lock,
-            )
-
             thinker_user_prompt = _build_thinker_user_prompt(
                 mission=mission,
                 existing_strategies=existing,
-                feedback_digest=feedback_digest,
+                feedback_items=feedback_items,
                 feature_knowledge=feature_knowledge,
             )
             thinker_generation = _call_stage_json(
@@ -2030,15 +1942,6 @@ def main() -> int:
                         "bar_configs": chosen_bars,
                         "errors": validation_errors,
                         "hypothesis_id": hypothesis_id,
-                        "feedback": {
-                            "model": feedback_generation.model,
-                            "response_id": feedback_generation.response_id,
-                            "usage": feedback_generation.usage,
-                            "attempts": feedback_generation.attempts,
-                            "repaired": bool(feedback_generation.repaired),
-                            "digest_hash": feedback_digest_hash,
-                            "payload_hash": _sha256_text(feedback_generation.raw_text),
-                        },
                         "thinker": {
                             "model": thinker_generation.model,
                             "response_id": thinker_generation.response_id,
@@ -2128,15 +2031,6 @@ def main() -> int:
                         "params": params,
                         "task_ids": enqueued_task_ids,
                         "module_path": str(module_path),
-                        "feedback": {
-                            "model": feedback_generation.model,
-                            "response_id": feedback_generation.response_id,
-                            "usage": feedback_generation.usage,
-                            "attempts": feedback_generation.attempts,
-                            "repaired": bool(feedback_generation.repaired),
-                            "digest_hash": feedback_digest_hash,
-                            "payload_hash": _sha256_text(feedback_generation.raw_text),
-                        },
                         "thinker": {
                             "model": thinker_generation.model,
                             "response_id": thinker_generation.response_id,
@@ -2204,7 +2098,6 @@ def main() -> int:
         "iterations_completed": iterations_done,
         "total_tasks_enqueued": total_tasks,
         "models": {
-            "feedback_analyst": feedback_role["model"],
             "quant_thinker": thinker_role["model"],
             "coder": coder_role["model"],
         },
