@@ -11,7 +11,7 @@ claude_cli:
     - high
 
 feedback_analyst:
-  model: opus
+  model: claude-sonnet-4-6
   temperature: 0.1
   max_output_tokens: 1400
 
@@ -21,7 +21,7 @@ quant_thinker:
   max_output_tokens: 2000
 
 coder:
-  model: opus
+  model: claude-sonnet-4-6
   temperature: 0.2
   max_output_tokens: 2600
 

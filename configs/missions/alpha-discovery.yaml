@@ -13,11 +13,11 @@ feature_group: all  # "ohlcv" for Group A, "all" for Group B (OHLCV + MBP1)
 target_sharpe: 1.5
 min_trade_count: 30
 
-max_experiments: 100
-max_runtime_hours: 48
+max_experiments: 400
+max_runtime_hours: 6
 kill_criteria:
-  FAIL: 10
-  ERROR: 5
+  FAIL: 200
+  ERROR: 30
 
 current_focus:
   - "Orderflow divergence reversals"
