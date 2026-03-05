@@ -126,7 +126,7 @@ def _git_commit(project_root: Path) -> str | None:
 
 
 def _run_contract_tests(project_root: Path) -> None:
-    cmd = ["uv", "run", "pytest", "research/signals/tests", "-q"]
+    cmd = ["uv", "run", "pytest", "tests/test_signal_contract.py", "-q"]
     proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         if proc.stdout:

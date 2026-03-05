@@ -19,7 +19,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-SIGNALS_DIR = Path(__file__).resolve().parent.parent
+SIGNALS_DIR = Path(__file__).resolve().parent.parent / "research" / "signals"
 
 
 def _discover_signal_modules():
