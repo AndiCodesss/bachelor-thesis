@@ -622,6 +622,38 @@ def _normalize_thinker_brief(
     if not isinstance(params_template, dict):
         params_template = {}
 
+    # Minimum SL by bar type — anything smaller gets noise-stopped on the entry bar itself
+    _BAR_MIN_SL = {"tick_610": 20, "volume_2000": 40, "time_1m": 4}
+
+    # Enforce minimum 1.5:1 RR and bar-type-aware minimum SL
+    _pt = params_template.get("pt_ticks")
+    _sl = params_template.get("sl_ticks")
+    if _pt is not None and _sl is not None:
+        try:
+            pt_val = float(_pt)
+            sl_val = float(_sl)
+            if sl_val <= 0:
+                raise ValueError(f"sl_ticks must be > 0, got {sl_val}")
+            if pt_val < 1.5 * sl_val:
+                raise ValueError(
+                    f"RR violation: pt_ticks={pt_val} < 1.5 × sl_ticks={sl_val} "
+                    f"(minimum 1.5:1 required, got {pt_val/sl_val:.2f}:1)"
+                )
+            # Check bar-type minimum SL
+            raw_cfgs_check = payload.get("bar_configs", [])
+            if isinstance(raw_cfgs_check, list):
+                for bc in raw_cfgs_check:
+                    min_sl = _BAR_MIN_SL.get(str(bc).strip(), 0)
+                    _bar_range_hint = {"tick_610": "~56t", "volume_2000": "~94t", "time_1m": "~12t"}
+                    if min_sl and sl_val < min_sl:
+                        raise ValueError(
+                            f"sl_ticks={int(sl_val)} too tight for {bc} "
+                            f"(median bar range {_bar_range_hint.get(str(bc), '?')}) — "
+                            f"minimum sl_ticks={min_sl} required to survive entry bar noise"
+                        )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid pt_ticks/sl_ticks in params_template: {exc}") from exc
+
     thesis = str(payload.get("thesis", "")).strip()[:800]
     entry_logic = str(payload.get("entry_logic", "")).strip()[:1200]
     exit_logic = str(payload.get("exit_logic", "")).strip()[:800]
@@ -951,7 +983,11 @@ def _validate_generated_strategy(
 
 def _build_thinker_system_prompt() -> str:
     return (
-        "You are a quant researcher designing intraday alpha hypotheses for NQ E-mini Nasdaq-100 futures.\n\n"
+        "You are a quant researcher designing intraday alpha hypotheses for NQ E-mini Nasdaq-100 futures.\n"
+        "Before producing the final JSON, internally brainstorm at least three distinct hypotheses — "
+        "prioritise novelty and diversity across the three candidates. "
+        "Evaluate each against cost reality, pass criteria, and the market physics constraint, "
+        "then select the strongest. Output only the final selected hypothesis JSON.\n\n"
         "INSTRUMENT & COST REALITY:\n"
         "- Tick size: 0.25 pts = $5/tick. Total round-trip cost: $14.50 (commission + 1-tick slippage/side).\n"
         "- A strategy trading 100 times costs $1,450 in friction. At 500 trades it needs $7,250 gross to break even.\n"
@@ -960,6 +996,20 @@ def _build_thinker_system_prompt() -> str:
         "- Signal rate: target 0.05–0.3% of bars non-zero. time_1m has ~60,000 bars in validate; tick/volume bars similar.\n"
         "  At 0.1% rate: ~60 signals total — ideal. At 1% rate: ~600 signals — cost destruction.\n"
         "  Design thresholds to produce rare, high-conviction setups, not frequent noise.\n\n"
+        "BAR RANGE REALITY — CRITICAL FOR STOP SIZING:\n"
+        "The backtest engine evaluates stops INTRA-BAR. A stop smaller than the bar's typical noise range\n"
+        "will be hit within the same bar the trade enters — producing avg_bars_held=0 and 100% stop-outs.\n"
+        "Measured median high-low range per bar type (ETH session, validate split):\n"
+        "  tick_610  : median=56t  p25=42t  p75=73t  p90=78t  → MIN viable SL: 30–40 ticks\n"
+        "  volume_2000: median=94t  p25=83t  p75=109t p90=150t → MIN viable SL: 50–80 ticks\n"
+        "  time_1m   : median~12t  p25~8t   p75~18t  p90~25t  → MIN viable SL: 8–15 ticks\n"
+        "RULE: sl_ticks MUST be at least half the p25 bar range for the chosen bar type.\n"
+        "  tick_610 → sl_ticks >= 20 (30+ strongly preferred)\n"
+        "  volume_2000 → sl_ticks >= 40 (60+ strongly preferred)\n"
+        "  time_1m → sl_ticks >= 4 (8–15 typical)\n"
+        "With 1.5:1 RR minimum: pt_ticks >= 1.5 × sl_ticks.\n"
+        "Example for tick_610: sl_ticks=32, pt_ticks=48 → PT=$240, SL=$160 — viable at 42%+ WR.\n"
+        "Example for time_1m: sl_ticks=10, pt_ticks=16 → PT=$80, SL=$50 — viable at 40%+ WR.\n\n"
         "VALIDATE SPLIT CONTEXT (Sep 2024 – Mar 2025):\n"
         "- Includes: US presidential election (Nov 2024), multiple Fed rate decisions, Q4 2024 rally, early 2025 volatility.\n"
         "- ETH session: 03:00–16:00 ET. Signals must respect session boundaries.\n\n"
@@ -978,7 +1028,8 @@ def _build_thinker_system_prompt() -> str:
         "RISK/REWARD — MINIMUM 1.5:1 REQUIRED:\n"
         "Every hypothesis must specify PT and SL in ticks with PT >= 1.5 × SL.\n"
         "Preferred target: 2:1 or better. A 2:1 RR means you can be wrong 40% of the time and still profit.\n"
-        "Example: SL=6 ticks ($30), PT=12 ticks ($60) → net per win $45.50, net per loss -$44.50 → viable at 50% WR.\n"
+        "Example time_1m: SL=10t ($50), PT=16t ($80) → net per win $65.50, net per loss -$64.50 → viable at 50% WR.\n"
+        "Example tick_610: SL=32t ($160), PT=48t ($240) → net per win $225.50, net per loss -$174.50 → viable at 44% WR.\n"
         "Avoid 1:1 RR — after $14.50 RT costs it is always negative expectancy regardless of win rate.\n\n"
         "EXIT PARAMS — MANDATORY CANONICAL NAMES IN params_template:\n"
         "The backtest engine reads exit configuration directly from the strategy's params. You MUST use\n"
@@ -986,7 +1037,8 @@ def _build_thinker_system_prompt() -> str:
         "  pt_ticks  : profit target in NQ ticks (integer). Engine converts to points (ticks × 0.25).\n"
         "  sl_ticks  : stop loss in NQ ticks (integer). Must satisfy pt_ticks >= 1.5 × sl_ticks.\n"
         "  max_bars  : maximum bars to hold before forced exit (integer). Prevents overnight exposure.\n"
-        "Example: {\"pt_ticks\": 12, \"sl_ticks\": 6, \"max_bars\": 20} → PT=$30, SL=$15, hold max 20 bars.\n"
+        "Example tick_610: {\"pt_ticks\": 48, \"sl_ticks\": 32, \"max_bars\": 8} → PT=$240, SL=$160, hold max 8 bars.\n"
+        "Example time_1m: {\"pt_ticks\": 16, \"sl_ticks\": 10, \"max_bars\": 20} → PT=$80, SL=$50, hold max 20 bars.\n"
         "Without these keys the engine has no exits — strategy holds until end-of-day with no stop protection.\n\n"
         "STOP PLACEMENT — STRUCTURAL, NOT ARBITRARY:\n"
         "Stops must be placed at the level that INVALIDATES the hypothesis — not a fixed tick count.\n"
@@ -1103,11 +1155,7 @@ def _build_thinker_system_prompt() -> str:
         "FILE ACCESS — READ TOOL:\n"
         "You also have the Read tool for inspecting files in this project.\n"
         "Use it selectively — only for near-miss strategies (positive Sharpe that failed):\n"
-        "  read research/signals/<strategy_name>.py to understand what was close to working.\n\n"
-        "Before producing the final JSON, internally brainstorm at least three distinct hypotheses — "
-        "prioritise novelty and diversity across the three candidates. "
-        "Evaluate each against cost reality, pass criteria, and the market physics constraint, "
-        "then select the strongest. Output only the final selected hypothesis JSON."
+        "  read research/signals/<strategy_name>.py to understand what was close to working."
     )
 
 
@@ -1403,7 +1451,8 @@ def _build_coder_repair_user_prompt(
     """Build a targeted repair prompt for the coder when generated code fails validation."""
     code_snippet = previous_code
     if len(code_snippet) > _REPAIR_CODE_MAX_CHARS:
-        code_snippet = code_snippet[:_REPAIR_CODE_MAX_CHARS] + "\n... [truncated]"
+        # Keep the tail — generate_signal body (where errors live) appears after imports/DEFAULT_PARAMS
+        code_snippet = "[... truncated ...]\n" + code_snippet[-_REPAIR_CODE_MAX_CHARS:]
 
     errors_blob = "\n".join(f"  - {e}" for e in validation_errors)
     cols_hint = ", ".join(common_columns[:40]) if common_columns else "(see feature knowledge)"
@@ -1525,6 +1574,7 @@ def _build_llm_client(
     root: Path,
     role_extra_args: list[str] | None = None,
     role_disable_slash_commands: bool | None = None,
+    role_timeout_seconds: float | None = None,
 ) -> LLMRawClient:
     raw_provider = str(provider).strip().lower()
     if raw_provider not in {"claude", "claude_cli", "claude_code"}:
@@ -1541,6 +1591,8 @@ def _build_llm_client(
         ),
     ).strip() or "claude"
     timeout_seconds = float(cli_cfg.get("timeout_seconds", agent_cfg.get("timeout_seconds", 180)))
+    if role_timeout_seconds is not None:
+        timeout_seconds = float(role_timeout_seconds)
     retries = int(cli_cfg.get("retries", agent_cfg.get("retries", 2)))
     retry_backoff_seconds = float(cli_cfg.get("retry_backoff_seconds", agent_cfg.get("retry_backoff_seconds", 1.5)))
     disable_slash_commands_raw = cli_cfg.get("disable_slash_commands", agent_cfg.get("disable_slash_commands", True))
@@ -1587,6 +1639,9 @@ def _resolve_role_cfg(
         else None
     )
 
+    role_timeout_raw = role_cfg.get("timeout_seconds")
+    role_timeout_out = float(role_timeout_raw) if role_timeout_raw is not None else None
+
     return {
         "model": model,
         "temperature": float(
@@ -1603,6 +1658,7 @@ def _resolve_role_cfg(
         ),
         "extra_args": role_extra_args,
         "disable_slash_commands": disable_slash_commands_out,
+        "timeout_seconds": role_timeout_out,
     }
 
 
@@ -1641,7 +1697,10 @@ def main() -> int:
     splits_raw = mission.get("splits_allowed", ["validate"])
     split = str((splits_raw[0] if isinstance(splits_raw, list) and splits_raw else "validate")).lower()
     if split == "test":
-        split = "validate"
+        raise ValueError(
+            "splits_allowed contains 'test' — TEST split is blocked in research mode. "
+            "Use 'validate' or 'train'."
+        )
     session_filter = str(mission.get("session_filter", "eth")).lower()
     feature_group = str(mission.get("feature_group", "all")).lower()
 
@@ -1709,12 +1768,16 @@ def main() -> int:
         root=root,
         role_extra_args=thinker_role.get("extra_args"),
         role_disable_slash_commands=thinker_role.get("disable_slash_commands"),
+        role_timeout_seconds=thinker_role.get("timeout_seconds"),
     )
     coder_client = _build_llm_client(
         provider=provider,
         model=coder_role["model"],
         agent_cfg=agent_cfg,
         root=root,
+        role_extra_args=coder_role.get("extra_args"),
+        role_disable_slash_commands=coder_role.get("disable_slash_commands"),
+        role_timeout_seconds=coder_role.get("timeout_seconds"),
     )
 
     signals_dir = root / "research" / "signals"

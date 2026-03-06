@@ -8,6 +8,7 @@ bar_configs:
   - time_1m
 splits_allowed:
   - validate
+session_filter: eth  # ETH = 03:00–16:00 ET (extended trading hours)
 feature_group: all  # "ohlcv" for Group A, "all" for Group B (OHLCV + MBP1)
 
 target_sharpe: 1.5
