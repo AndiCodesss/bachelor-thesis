@@ -8,7 +8,7 @@ bar_configs:
   - time_1m
 splits_allowed:
   - validate
-session_filter: eth  # ETH = 03:00–16:00 ET (extended trading hours)
+session_filter: rth  # RTH = 09:30–16:00 ET (regular trading hours)
 feature_group: all  # "ohlcv" for Group A, "all" for Group B (OHLCV + MBP1)
 
 target_sharpe: 1.5
@@ -20,7 +20,7 @@ kill_criteria:
   FAIL: 200
   ERROR: 30
 
-notebooklm_notebook_url: "https://notebooklm.google.com/notebook/769d7e8a-df51-4a7c-be58-b92e25e53e53"
+notebooklm_notebook_url: "https://notebooklm.google.com/notebook/c59b7dcc-ffeb-431a-b2a8-dbf5bf9cde58"
 
 current_focus:
   - "AMT value area rejection and rotation (VAH/VAL/POC mean-reversion)"

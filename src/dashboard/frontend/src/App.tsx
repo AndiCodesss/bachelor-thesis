@@ -34,10 +34,15 @@ interface SignalItem {
 interface SignalDetails {
   strategy: string;
   code: string;
-  metrics: any;
-  gauntlet: any;
+  metrics: Record<string, unknown>;
+  gauntlet: Record<string, unknown>;
   verdict: string;
   timestamp: string;
+}
+
+interface GauntletItem {
+  verdict?: string;
+  msg?: string;
 }
 
 interface ThinkerEvent {
@@ -52,6 +57,47 @@ interface ThinkerData {
   session_id: string | null
   is_active: boolean
   last_updated: string | null
+}
+
+function formatMetricKey(key: string): string {
+  return key
+    .split('_')
+    .map(word => (word ? word.charAt(0).toUpperCase() + word.slice(1) : ''))
+    .join(' ')
+}
+
+function formatMetricValue(key: string, value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'N/A'
+  }
+
+  if (typeof value === 'number') {
+    if (key.includes('pnl')) {
+      return `$${Number(value).toFixed(2)}`
+    }
+    if (key === 'win_rate') {
+      return `${(Number(value) * 100).toFixed(2)}%`
+    }
+    if (key.endsWith('_pct')) {
+      return `${Number(value).toFixed(2)}%`
+    }
+    if (Number.isInteger(value) && !key.includes('ratio')) {
+      return String(value)
+    }
+    return Math.abs(value) < 0.01 && value !== 0
+      ? value.toExponential(4)
+      : Number(value).toFixed(4)
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false'
+  }
+
+  if (typeof value === 'object') {
+    return JSON.stringify(value)
+  }
+
+  return String(value)
 }
 
 export default function App() {
@@ -77,11 +123,11 @@ export default function App() {
   // Autonomy State
   const [aMission, setAMission] = useState('configs/missions/alpha-discovery.yaml')
   const [aAgent, setAAgent] = useState('configs/agents/llm_orchestrator.yaml')
-  const [aNoRestart, setANoRestart] = useState(false)
   const [aNoResume, setANoResume] = useState(false)
   const [aAllowBootstrap, setAAllowBootstrap] = useState(false)
   const [aValidatorOnly, setAValidatorOnly] = useState(false)
   const [aOrchestratorOnly, setAOrchestratorOnly] = useState(false)
+  const [aLaneCount, setALaneCount] = useState(2)
   const [aStatusData, setAStatusData] = useState<AutonomyStatus | null>(null)
   const [thinkerView, setThinkerView] = useState<'logs' | 'thinker'>('logs')
   const [thinkerData, setThinkerData] = useState<ThinkerData | null>(null)
@@ -94,6 +140,8 @@ export default function App() {
   const [signalsList, setSignalsList] = useState<SignalItem[]>([])
   const [selectedSignal, setSelectedSignal] = useState<string | null>(null)
   const [signalDetails, setSignalDetails] = useState<SignalDetails | null>(null)
+  const orchestratorEnabled = !aValidatorOnly
+  const autonomySelectionInvalid = aValidatorOnly && aOrchestratorOnly
 
   useEffect(() => {
     fetch(`${API_URL}/config/cache`)
@@ -171,7 +219,7 @@ export default function App() {
     }
   }
 
-  const triggerRun = async (endpoint: string, payload: any) => {
+  const triggerRun = async (endpoint: string, payload: Record<string, unknown>) => {
     if (status === 'running') return
     setLogs([])
     setStatus('running')
@@ -183,11 +231,17 @@ export default function App() {
         body: JSON.stringify(payload)
       })
       const data = await resp.json()
+      if (!resp.ok) {
+        throw new Error(String(data.detail ?? data.error ?? `Request failed with status ${resp.status}`))
+      }
+      if (!data.run_id || !data.cmd) {
+        throw new Error('Backend response missing run metadata.')
+      }
       connectWebSocket(data.run_id, data.cmd)
     } catch (e) {
       console.error(e)
       setStatus('failed')
-      setLogs(['Failed to connect to backend server.'])
+      setLogs([e instanceof Error ? e.message : 'Failed to connect to backend server.'])
     }
   }
 
@@ -206,8 +260,9 @@ export default function App() {
   })
 
   const startAutonomy = () => triggerRun('autonomy', {
-    mission: aMission, agent_config: aAgent, no_restart: aNoRestart, no_resume: aNoResume, 
-    allow_bootstrap: aAllowBootstrap, validator_only: aValidatorOnly, orchestrator_only: aOrchestratorOnly
+    mission: aMission, agent_config: aAgent, no_resume: aNoResume,
+    allow_bootstrap: aAllowBootstrap, validator_only: aValidatorOnly, orchestrator_only: aOrchestratorOnly,
+    lane_count: aLaneCount
   })
 
   const startCleanup = () => triggerRun('cleanup', { force: clForce })
@@ -406,11 +461,33 @@ export default function App() {
               </div>
 
               <div className="form-group">
+                <label>Orchestrator Lanes</label>
+                <div className="checkbox-group">
+                  {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                    <label
+                      key={n}
+                      className={`checkbox-label ${aLaneCount === n ? 'active' : ''}`}
+                      style={{
+                        cursor: orchestratorEnabled ? 'pointer' : 'not-allowed',
+                        minWidth: '2.2rem',
+                        justifyContent: 'center',
+                        opacity: orchestratorEnabled ? 1 : 0.45,
+                      }}
+                      onClick={() => {
+                        if (orchestratorEnabled) {
+                          setALaneCount(n)
+                        }
+                      }}
+                    >
+                      {n}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="form-group">
                 <label>Execution Flags</label>
                 <div className="checkbox-group" style={{flexDirection: 'column', alignItems: 'flex-start'}}>
-                  <label className={`checkbox-label ${aNoRestart ? 'active' : ''}`}>
-                    <input type="checkbox" checked={aNoRestart} onChange={e => setANoRestart(e.target.checked)}/> No Restart (Keep Tmux)
-                  </label>
                   <label className={`checkbox-label ${aNoResume ? 'active' : ''}`}>
                     <input type="checkbox" checked={aNoResume} onChange={e => setANoResume(e.target.checked)}/> No Resume (Fresh Start)
                   </label>
@@ -421,7 +498,7 @@ export default function App() {
               </div>
 
               <div style={{display: 'flex', gap: '1rem', marginTop: 'auto'}}>
-                <button className="action-btn" style={{flex: 1}} onClick={startAutonomy} disabled={status === 'running' || (aValidatorOnly && aOrchestratorOnly)}>
+                <button className="action-btn" style={{flex: 1}} onClick={startAutonomy} disabled={status === 'running' || autonomySelectionInvalid}>
                   {status === 'running' ? <><span className="loader"></span>Deploying Mission...</> : 'Launch Autonomy'}
                 </button>
                 {status === 'running' && activeTab === 'autonomy' && (
@@ -504,35 +581,48 @@ export default function App() {
                       <div className="signal-metrics-view">
                         
                         <div className="metric-card">
-                          <span className="metric-label">Execution Results</span>
-                          <span className="metric-value">
-                             {signalDetails.metrics?.net_pnl !== undefined ? `$${Number(signalDetails.metrics.net_pnl).toFixed(2)}` : 'N/A'}
-                          </span>
-                          {signalDetails.metrics?.sharpe_ratio !== undefined && (
-                            <span className="metric-sub">Sharpe: {Number(signalDetails.metrics.sharpe_ratio).toFixed(2)} · Trades: {signalDetails.metrics.trade_count}</span>
-                          )}
-                          {signalDetails.metrics?.win_rate !== undefined && (
-                            <span className="metric-sub">Win Rate: {(Number(signalDetails.metrics.win_rate)*100).toFixed(1)}%</span>
-                          )}
+                          <span className="metric-label">All Financial Metrics</span>
+                          <div className="hyp-list" style={{marginTop: '0.75rem'}}>
+                            {signalDetails.metrics && Object.keys(signalDetails.metrics).length > 0 ? (
+                              Object.entries(signalDetails.metrics).map(([k, v]) => (
+                                <div key={k} className="hyp-item" style={{display: 'flex', justifyContent: 'space-between', width: '100%', padding: '0.3rem 0'}}>
+                                  <span className="metric-sub">{formatMetricKey(k)}</span>
+                                  <span className="metric-value" style={{fontSize: '0.9rem'}}>{formatMetricValue(k, v)}</span>
+                                </div>
+                              ))
+                            ) : (
+                              <span className="metric-sub">No metrics available</span>
+                            )}
+                          </div>
                         </div>
 
                         <div className="metric-card">
                           <span className="metric-label">Gauntlet Verification</span>
-                          <span className="metric-value" style={{fontSize: '1.2rem', color: signalDetails.gauntlet?.overall_verdict === 'PASS' ? 'var(--success)' : 'var(--danger)'}}>
-                            {signalDetails.gauntlet?.overall_verdict || 'No Data'}
+                          <span
+                            className="metric-value"
+                            style={{
+                              fontSize: '1.2rem',
+                              color: signalDetails.gauntlet?.overall_verdict === 'PASS' ? 'var(--success)' : 'var(--danger)'
+                            }}
+                          >
+                            {typeof signalDetails.gauntlet?.overall_verdict === 'string'
+                              ? signalDetails.gauntlet.overall_verdict
+                              : 'No Data'}
                           </span>
                           
                           <div className="hyp-list" style={{marginTop: '1rem'}}>
-                             {signalDetails.gauntlet && Object.entries(signalDetails.gauntlet).map(([k, v]: [string, any]) => {
+                             {signalDetails.gauntlet && Object.entries(signalDetails.gauntlet).map(([k, v]) => {
                                if (k === 'overall_verdict' || k === 'pass_count' || k === 'total_tests') return null;
-                               const vpass = v.verdict === 'PASS';
+                               if (typeof v !== 'object' || v === null) return null;
+                               const item = v as GauntletItem;
+                               const vpass = item.verdict === 'PASS';
                                return (
                                  <div key={k} className="hyp-item" style={{flexDirection: 'column', alignItems: 'flex-start'}}>
                                     <div style={{display: 'flex', justifyContent: 'space-between', width: '100%'}}>
                                       <span className="metric-sub">{k}</span>
-                                      <span className={vpass ? 'gauntlet-pass' : 'gauntlet-fail'}>{v.verdict}</span>
+                                      <span className={vpass ? 'gauntlet-pass' : 'gauntlet-fail'}>{item.verdict}</span>
                                     </div>
-                                    <span style={{fontSize: '0.7rem', color: 'var(--border-focus)', marginTop: '0.2rem'}}>{v.msg}</span>
+                                    <span style={{fontSize: '0.7rem', color: 'var(--border-focus)', marginTop: '0.2rem'}}>{item.msg}</span>
                                  </div>
                                )
                              })}

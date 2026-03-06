@@ -1,6 +1,6 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import asyncio
 import uuid
@@ -49,11 +49,11 @@ class CacheRunRequest(BaseModel):
 class AutonomyRunRequest(BaseModel):
     mission: str = "configs/missions/alpha-discovery.yaml"
     agent_config: str = "configs/agents/llm_orchestrator.yaml"
-    no_restart: bool = False
     no_resume: bool = False
     allow_bootstrap: bool = False
     validator_only: bool = False
     orchestrator_only: bool = False
+    lane_count: int = Field(default=2, ge=1, le=10)
 
 class CleanupRunRequest(BaseModel):
     force: bool = False
@@ -72,7 +72,8 @@ def get_cache_config():
 
 # --- Autonomy Status Parsers ---
 def _tail_lines(path: Path, max_lines: int = 300) -> list[str]:
-    if not path.exists(): return []
+    if not path.exists():
+        return []
     data = path.read_text(encoding="utf-8", errors="replace").splitlines()
     return data[-max_lines:] if max_lines > 0 else data
 
@@ -80,14 +81,24 @@ def _recent_json_events(path: Path, event_names: set[str], limit: int, scan_line
     out = []
     for raw in reversed(_tail_lines(path, max_lines=scan_lines)):
         line = raw.strip()
-        if not line: continue
+        if not line:
+            continue
         try:
             row = json.loads(line)
             if isinstance(row, dict) and str(row.get("event", "")) in event_names:
                 out.append(row)
-                if len(out) >= limit: break
-        except Exception: continue
+                if len(out) >= limit:
+                    break
+        except Exception:
+            continue
     return list(reversed(out))
+
+
+def _terminate_process(proc) -> None:
+    try:
+        proc.terminate()
+    except Exception:
+        pass
 
 # --- Thinker Session Helpers ---
 
@@ -266,8 +277,7 @@ def get_autonomy_status():
     queue_path = state_dir / "experiment_queue.json"
     budget_path = state_dir / "mission_budget.json"
     exp_log = logs_dir / "research_experiments.jsonl"
-    llm_log = logs_dir / "llm_orchestrator.jsonl"
-    
+
     # Defaults
     metrics = {
         "queue": {"pending": 0, "in_progress": 0, "completed": 0, "failed": 0},
@@ -286,16 +296,22 @@ def get_autonomy_status():
             tasks = queue.get("tasks", [])
             for t in tasks:
                 state = t.get("state")
-                if state in metrics["queue"]: metrics["queue"][state] += 1
-            
+                if state in metrics["queue"]:
+                    metrics["queue"][state] += 1
+
             # Active hypotheses
             hyp_counts = {}
             for t in tasks:
                 if t.get("state") in ["pending", "in_progress"]:
                     hid = str(t.get("source", {}).get("hypothesis_id", "")).strip()
-                    if hid: hyp_counts[hid] = hyp_counts.get(hid, 0) + 1
-            metrics["active_hypotheses"] = [{"id": k, "tasks": v} for k, v in sorted(hyp_counts.items(), key=lambda x: -x[1])[:4]]
-    except Exception: pass
+                    if hid:
+                        hyp_counts[hid] = hyp_counts.get(hid, 0) + 1
+            metrics["active_hypotheses"] = [
+                {"id": k, "tasks": v}
+                for k, v in sorted(hyp_counts.items(), key=lambda x: -x[1])[:4]
+            ]
+    except Exception:
+        pass
 
     # Budget
     try:
@@ -304,7 +320,8 @@ def get_autonomy_status():
             metrics["budget"]["experiments_run"] = b.get("experiments_run", 0)
             metrics["budget"]["max_experiments"] = b.get("max_experiments", "n/a")
             metrics["budget"]["failures"] = b.get("failures_by_type", {})
-    except Exception: pass
+    except Exception:
+        pass
 
     # Financial Snapshot
     try:
@@ -313,7 +330,8 @@ def get_autonomy_status():
         pass_count = 0
         for row in recent_tasks:
             m = row.get("metrics")
-            if not isinstance(m, dict): continue
+            if not isinstance(m, dict):
+                continue
             npnl, sharpe = m.get("net_pnl"), m.get("sharpe_ratio")
             if isinstance(npnl, (int, float)) and isinstance(sharpe, (int, float)):
                 points.append({
@@ -323,8 +341,9 @@ def get_autonomy_status():
                     "sharpe": float(sharpe),
                     "trades": m.get("trade_count")
                 })
-            if str(row.get("verdict", "")) == "PASS": pass_count += 1
-        
+            if str(row.get("verdict", "")) == "PASS":
+                pass_count += 1
+
         if points:
             metrics["financial"] = {
                 "tested": len(points),
@@ -334,7 +353,8 @@ def get_autonomy_status():
                 "best": max(points, key=lambda x: x["net_pnl"]),
                 "worst": min(points, key=lambda x: x["net_pnl"])
             }
-    except Exception: pass
+    except Exception:
+        pass
 
     return metrics
 
@@ -343,7 +363,7 @@ def get_autonomy_status():
 def list_signals():
     logs_dir = project_root / "results" / "logs"
     exp_log = logs_dir / "research_experiments.jsonl"
-    
+
     signals = []
     seen = set()
     try:
@@ -351,8 +371,9 @@ def list_signals():
         recent_tasks = _recent_json_events(exp_log, {"task_result"}, limit=100, scan_lines=15000)
         for row in recent_tasks:
             strat = str(row.get("strategy_name", ""))
-            if not strat or strat in seen: continue
-            
+            if not strat or strat in seen:
+                continue
+
             seen.add(strat)
             signals.append({
                 "strategy": strat,
@@ -360,8 +381,9 @@ def list_signals():
                 "timestamp": row.get("timestamp", ""),
                 "bar_config": row.get("bar_config", "")
             })
-    except Exception: pass
-    
+    except Exception:
+        pass
+
     return sorted(signals, key=lambda x: x["timestamp"], reverse=True)
 
 @app.get("/api/signals/{strategy_name}")
@@ -369,7 +391,7 @@ def get_signal_details(strategy_name: str):
     logs_dir = project_root / "results" / "logs"
     exp_log = logs_dir / "research_experiments.jsonl"
     signals_dir = project_root / "research" / "signals"
-    
+
     # 1. Fetch exact JSON event payload
     experiment_data = None
     try:
@@ -379,8 +401,9 @@ def get_signal_details(strategy_name: str):
             if str(row.get("strategy_name", "")) == strategy_name:
                 experiment_data = row
                 break
-    except Exception: pass
-    
+    except Exception:
+        pass
+
     # 2. Fetch the actual .py code
     code = ""
     try:
@@ -391,11 +414,11 @@ def get_signal_details(strategy_name: str):
             code = f"# Source code for {strategy_name}.py not found on disk."
     except Exception as e:
         code = f"# Error reading file: {str(e)}"
-        
+
     if not experiment_data:
         # Provide fallback if they clicked a generated signal file without an experiment log
         experiment_data = {"strategy_name": strategy_name, "error": "No matching experiment metrics found in logs."}
-        
+
     return {
         "strategy": strategy_name,
         "code": code,
@@ -416,14 +439,14 @@ async def execute_in_background(run_id: str, cmd: list[str]):
             env=os.environ.copy()
         )
         runs[run_id]["process"] = process
-        
+
         while True:
             line = await process.stdout.readline()
             if not line:
                 break
             text = line.decode('utf-8', errors='replace')
             runs[run_id]["logs"].append(text)
-            
+
         await process.wait()
         runs[run_id]["status"] = "completed" if process.returncode == 0 else "failed"
     except Exception as e:
@@ -431,12 +454,11 @@ async def execute_in_background(run_id: str, cmd: list[str]):
         runs[run_id]["status"] = "failed"
 
 async def direct_run_autonomy(run_id: str, commands: list[dict]):
-    import subprocess
     active_procs = []
-    
-    runs[run_id]["process"] = None 
+
+    runs[run_id]["process"] = None
     runs[run_id]["processes"] = []
-    
+
     try:
         for cmd_info in commands:
             cmd = cmd_info["cmd"]
@@ -451,33 +473,40 @@ async def direct_run_autonomy(run_id: str, commands: list[dict]):
             )
             active_procs.append((name, proc))
             runs[run_id]["processes"].append(proc)
-            
+
         async def read_stream(name, stream):
             while True:
                 line = await stream.readline()
-                if not line: break
+                if not line:
+                    break
                 text = line.decode('utf-8', errors='replace')
                 runs[run_id]["logs"].append(f"[{name}] {text}")
 
         readers = [asyncio.create_task(read_stream(name, p.stdout)) for name, p in active_procs]
-        
+
         await asyncio.gather(*readers)
-        
+
+        failures = []
         for name, p in active_procs:
-            await p.wait()
-            
-        runs[run_id]["status"] = "completed"
-        runs[run_id]["logs"].append("\n--- Autonomy processes completed ---\n")
-        
+            return_code = await p.wait()
+            if return_code != 0:
+                failures.append((name, return_code))
+
+        if failures:
+            runs[run_id]["status"] = "failed"
+            details = ", ".join(f"{name} exited {code}" for name, code in failures)
+            runs[run_id]["logs"].append(f"\n--- Autonomy processes failed: {details} ---\n")
+        else:
+            runs[run_id]["status"] = "completed"
+            runs[run_id]["logs"].append("\n--- Autonomy processes completed ---\n")
+
     except Exception as e:
         runs[run_id]["logs"].append(f"\nError running autonomy: {str(e)}\n")
         runs[run_id]["status"] = "failed"
     finally:
         for p in runs[run_id].get("processes", []):
-            try:
-                p.terminate()
-            except:
-                pass
+            if p.returncode is None:
+                _terminate_process(p)
 
 # --- Endpoints ---
 
@@ -501,19 +530,28 @@ async def start_cache_run(req: CacheRunRequest):
 @app.post("/api/run/autonomy")
 async def start_autonomy_run(req: AutonomyRunRequest):
     run_id = f"autonomy-{uuid.uuid4().hex[:8]}"
-    
+
     commands = []
     resume_flag = [] if req.no_resume else ["--resume"]
-    
+
+    if req.validator_only and req.orchestrator_only:
+        raise HTTPException(status_code=400, detail="Cannot request validator-only and orchestrator-only at the same time.")
+
     if not req.orchestrator_only:
         val_cmd = [sys.executable, "-u", "scripts/research.py", "--mission", req.mission, "--auto-mode", "--worker-agent", "validator"] + resume_flag
         if not req.allow_bootstrap:
             val_cmd.append("--no-bootstrap")
         commands.append({"name": "Validator", "cmd": val_cmd})
-        
+
     if not req.validator_only:
-        orch_cmd = [sys.executable, "-u", "scripts/llm_orchestrator.py", "--mission", req.mission, "--agent-config", req.agent_config] + resume_flag
-        commands.append({"name": "Orchestrator", "cmd": orch_cmd})
+        lane_count = max(1, min(10, req.lane_count))
+        for i in range(lane_count):
+            lane_letter = chr(ord('A') + i)
+            orch_cmd = [sys.executable, "-u", "scripts/llm_orchestrator.py", "--mission", req.mission, "--agent-config", req.agent_config, "--lane", lane_letter] + resume_flag
+            commands.append({"name": f"Orchestrator-{lane_letter}", "cmd": orch_cmd})
+
+    if not commands:
+        raise HTTPException(status_code=400, detail="No autonomy workers selected.")
 
     runs[run_id] = {"logs": [], "status": "running", "cmd": f"Directly running {len(commands)} background processes", "type": "autonomy"}
     asyncio.create_task(direct_run_autonomy(run_id, commands))
@@ -561,32 +599,29 @@ def get_run(run_id: str):
 def stop_run(run_id: str):
     if run_id not in runs:
         return {"error": "Run not found"}
-        
+
     r_info = runs[run_id]
     if r_info["status"] != "running":
         return {"error": "Run is not active"}
-        
+
     process = r_info.get("process")
     if process:
         try:
             process.terminate()
             r_info["status"] = "failed"
             r_info["logs"].append("\n--- Process forcefully terminated by user ---")
-            
+
             return {"status": "stopped"}
         except Exception as e:
             return {"error": str(e)}
-            
+
     if r_info.get("type") == "autonomy" and "processes" in r_info:
         for p in r_info["processes"]:
-            try:
-                p.terminate()
-            except:
-                pass
+            _terminate_process(p)
         r_info["status"] = "failed"
         r_info["logs"].append("\n--- Processes forcefully terminated by user ---")
         return {"status": "stopped"}
-        
+
     return {"error": "Process handle missing"}
 
 @app.websocket("/ws/runs/{run_id}/logs")
@@ -606,11 +641,11 @@ async def websocket_logs(websocket: WebSocket, run_id: str):
             while sent_lines < len(current_logs):
                 await websocket.send_text(current_logs[sent_lines])
                 sent_lines += 1
-            
+
             if run_info["status"] != "running" and sent_lines == len(run_info["logs"]):
                 await websocket.send_text(f"\n--- Process exited with status: {run_info['status']} ---\n")
                 break
-                
+
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         pass
@@ -618,5 +653,5 @@ async def websocket_logs(websocket: WebSocket, run_id: str):
         try:
             await websocket.send_text(f"\nWebSocket error: {str(e)}\n")
             await websocket.close(code=1011)
-        except:
+        except Exception:
             pass
