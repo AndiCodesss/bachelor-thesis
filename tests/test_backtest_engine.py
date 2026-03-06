@@ -52,6 +52,22 @@ def test_always_long():
     assert trade["size"] == 1
 
 
+def test_non_empty_backtest_preserves_trade_schema():
+    """Non-empty trade output should match the canonical TRADE_SCHEMA."""
+    start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(5)]
+    closes = [18000.0, 18005.0, 18010.0, 18015.0, 18020.0]
+    signals = [1, 1, 1, 1, 0]
+
+    df = create_test_df(timestamps, closes, signals).with_columns(
+        pl.col("ts_event").cast(pl.Datetime("ns", "UTC"))
+    )
+    trades = run_backtest(df)
+
+    assert len(trades) == 1
+    assert trades.schema == TRADE_SCHEMA
+
+
 def test_long_short_alternating():
     """Test long-short alternating signals."""
     start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)

@@ -93,8 +93,20 @@ def compute_adaptive_costs(
     if len(trades) == 0:
         return trades.with_columns(pl.lit(0.0).alias("adaptive_cost_rt"))
 
+    # Normalize join keys to the framework's canonical timestamp precision.
+    # This keeps adaptive-cost attachment robust even if a caller provides
+    # trades with microsecond datetimes while bars use nanoseconds.
+    join_dtype = pl.Datetime("ns", "UTC")
+    trades = trades.with_columns([
+        pl.col("entry_time").cast(join_dtype).alias("entry_time"),
+        pl.col("entry_time").cast(join_dtype).alias("_entry_time_join"),
+        pl.col("exit_time").cast(join_dtype).alias("exit_time"),
+    ])
+
     # Prepare bars with required derived columns
-    bars_sorted = bars.sort("ts_event")
+    bars_sorted = bars.with_columns(
+        pl.col("ts_event").cast(join_dtype)
+    ).sort("ts_event")
 
     # Spread in ticks: if ask_price/bid_price available, compute; otherwise assume 1 tick
     if "ask_price" in bars_sorted.columns and "bid_price" in bars_sorted.columns:
@@ -165,7 +177,7 @@ def compute_adaptive_costs(
 
     # Select only the columns needed for the asof join
     bar_features = bars_sorted.select([
-        pl.col("ts_event"),
+        pl.col("ts_event").alias("_ts_event_join"),
         pl.col("_spread_ticks"),
         pl.col("_volatility_z"),
         pl.col("_volume_z"),
@@ -173,11 +185,11 @@ def compute_adaptive_costs(
     ])
 
     # Asof join: for each trade entry_time, find the nearest preceding bar
-    trades_sorted = trades.sort("entry_time")
+    trades_sorted = trades.sort("_entry_time_join")
     joined = trades_sorted.join_asof(
         bar_features,
-        left_on="entry_time",
-        right_on="ts_event",
+        left_on="_entry_time_join",
+        right_on="_ts_event_join",
         strategy="backward",
     )
 

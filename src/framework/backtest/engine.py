@@ -352,4 +352,4 @@ def run_backtest(
     if not trades:
         return pl.DataFrame(schema=TRADE_SCHEMA)
 
-    return pl.DataFrame(trades)
+    return pl.DataFrame(trades).cast(TRADE_SCHEMA)

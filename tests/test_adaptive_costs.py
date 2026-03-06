@@ -172,6 +172,24 @@ def test_compute_adaptive_costs_preserves_trade_columns():
         assert col in result.columns
 
 
+def test_compute_adaptive_costs_handles_datetime_unit_mismatch():
+    """Adaptive cost join should tolerate us/ns timestamp precision mismatches."""
+    bars = _make_bars(50).with_columns(
+        pl.col("ts_event").dt.replace_time_zone("UTC").cast(pl.Datetime("ns", "UTC"))
+    )
+    trades = _make_trades(3).with_columns(
+        pl.col("entry_time").dt.replace_time_zone("UTC").cast(pl.Datetime("us", "UTC")),
+        pl.col("exit_time").dt.replace_time_zone("UTC").cast(pl.Datetime("us", "UTC")),
+    )
+
+    result = compute_adaptive_costs(trades, bars)
+
+    assert "adaptive_cost_rt" in result.columns
+    assert len(result) == 3
+    assert result.schema["entry_time"] == pl.Datetime("ns", "UTC")
+    assert result.schema["exit_time"] == pl.Datetime("ns", "UTC")
+
+
 def test_compute_adaptive_costs_non_rth_uses_neutral_session_progress():
     """Non-RTH trades should not get edge penalties from session_progress."""
     non_rth_bar_ts = datetime(2025, 3, 1, 8, 0, 0)   # ~03:00 ET
