@@ -33,6 +33,7 @@ from research.lib.llm_client import (
     LLMRawClient,
     extract_json_object,
 )
+from research.lib.mission_splits import resolve_research_splits
 from research.lib.runtime_state import (
     ensure_orchestrator_state,
     ensure_shared_state,
@@ -1057,7 +1058,8 @@ def _build_runtime_context(
     *,
     mission: dict[str, Any],
     mission_bar_configs: list[str],
-    split: str,
+    search_split: str,
+    selection_split: str | None,
     session_filter: str,
     feature_group: str,
     sample_cache: dict[str, pl.DataFrame],
@@ -1071,7 +1073,10 @@ def _build_runtime_context(
     return {
         "schema_version": "1.0",
         "objective": str(mission.get("objective", "")),
-        "split": split,
+        "split": search_split,
+        "search_split": search_split,
+        "selection_split": selection_split,
+        "feedback_split": search_split,
         "session_filter": session_filter,
         "feature_group": feature_group,
         "allowed_bar_configs": list(mission_bar_configs),
@@ -1086,6 +1091,7 @@ def _build_runtime_context(
             "decay",
             "trade_count",
         ],
+        "selection_policy": "Selection split is a gate only and is not fed back into thinker learning.",
         "sample_bar_context": bar_context,
     }
 
@@ -1585,6 +1591,8 @@ def _build_coder_handoff(
             "preferred_session_filter": str(mission.get("session_filter", "eth")),
             "feature_group": str(mission.get("feature_group", "all")),
             "split": str((runtime_context or {}).get("split", mission.get("split", "validate"))),
+            "search_split": str((runtime_context or {}).get("search_split", mission.get("search_split", "validate"))),
+            "selection_split": (runtime_context or {}).get("selection_split", mission.get("selection_split")),
             "target_sharpe": float((runtime_context or {}).get("target_sharpe", mission.get("target_sharpe", 0.0))),
             "min_trade_count": int((runtime_context or {}).get("min_trade_count", mission.get("min_trade_count", 1))),
             "sample_bar_context": dict((runtime_context or {}).get("sample_bar_context", {})),
@@ -1693,7 +1701,8 @@ def _task_id(strategy_name: str, bar_config: str, params: dict[str, Any], code_h
 def _build_task(
     *,
     strategy_name: str,
-    split: str,
+    search_split: str,
+    selection_split: str | None,
     bar_config: str,
     params: dict[str, Any],
     mission: dict[str, Any],
@@ -1720,7 +1729,9 @@ def _build_task(
         "state": "pending",
         "assigned_to": None,
         "strategy_name": strategy_name,
-        "split": split,
+        "split": search_split,
+        "search_split": search_split,
+        "selection_split": selection_split,
         "bar_config": bar_config,
         "params": dict(params),
         "exit_bars": exit_bars,
@@ -1919,13 +1930,13 @@ def main() -> int:
     if not mission_bar_configs:
         raise ValueError("mission.bar_configs cannot be empty")
 
-    splits_raw = mission.get("splits_allowed", ["validate"])
-    split = str((splits_raw[0] if isinstance(splits_raw, list) and splits_raw else "validate")).lower()
-    if split == "test":
-        raise ValueError(
-            "splits_allowed contains 'test' — TEST split is blocked in research mode. "
-            "Use 'validate' or 'train'."
-        )
+    split_plan = resolve_research_splits(mission)
+    search_split = str(split_plan["search_split"])
+    selection_split = (
+        str(split_plan["selection_split"])
+        if split_plan["selection_split"] is not None
+        else None
+    )
     session_filter = str(mission.get("session_filter", "eth")).lower()
     feature_group = str(mission.get("feature_group", "all")).lower()
 
@@ -2031,7 +2042,7 @@ def main() -> int:
     sample_cache: dict[str, pl.DataFrame] = {}
     feature_knowledge = _build_feature_knowledge(
         mission_bar_configs=mission_bar_configs,
-        split=split,
+        split=search_split,
         session_filter=session_filter,
         feature_group=feature_group,
         sample_cache=sample_cache,
@@ -2039,7 +2050,8 @@ def main() -> int:
     runtime_context = _build_runtime_context(
         mission=mission,
         mission_bar_configs=mission_bar_configs,
-        split=split,
+        search_split=search_split,
+        selection_split=selection_split,
         session_filter=session_filter,
         feature_group=feature_group,
         sample_cache=sample_cache,
@@ -2059,7 +2071,10 @@ def main() -> int:
         f"provider={provider} "
         f"models=thinker:{thinker_role['model']} coder:{coder_role['model']}",
     )
-    print(f"split={split} session_filter={session_filter} feature_group={feature_group}")
+    print(
+        f"search_split={search_split} selection_split={selection_split or 'none'} "
+        f"session_filter={session_filter} feature_group={feature_group}",
+    )
     print(f"state_mode={state_mode}")
     print(f"max_iterations={max_iterations} dry_run={bool(args.dry_run)}")
 
@@ -2227,7 +2242,7 @@ def main() -> int:
                     signals_dir=signals_dir,
                     params=params,
                     bar_configs=chosen_bars,
-                    split=split,
+                    split=search_split,
                     session_filter=session_filter,
                     feature_group=feature_group,
                     sample_cache=sample_cache,
@@ -2302,7 +2317,7 @@ def main() -> int:
                             signals_dir=signals_dir,
                             params=params,
                             bar_configs=chosen_bars,
-                            split=split,
+                            split=search_split,
                             session_filter=session_filter,
                             feature_group=feature_group,
                             sample_cache=sample_cache,
@@ -2355,7 +2370,8 @@ def main() -> int:
                 for bar_config in chosen_bars:
                     task = _build_task(
                         strategy_name=module_name,
-                        split=split,
+                        search_split=search_split,
+                        selection_split=selection_split,
                         bar_config=bar_config,
                         params=params,
                         mission=mission,

@@ -7,6 +7,11 @@ on NQ E-mini futures. An autonomous LLM agent writes Python signal functions,
 submits them to a locked evaluation engine, reads the results, and iterates —
 searching for robust intraday trading signals without human intervention.
 
+Discovery follows a split-separated workflow:
+- `train` is the search / iteration split
+- `validate` is an untouched candidate-selection gate
+- `test` stays blocked until promotion
+
 The central question: does giving the agent microstructure features derived from
 Level-1 market data (order flow imbalance, micro-price, cumulative volume delta)
 lead to measurably better signals than restricting it to standard OHLCV bars?
@@ -184,8 +189,8 @@ format.
 
 | Split    | Period              | Purpose                             |
 | -------- | ------------------- | ----------------------------------- |
-| Train    | Oct 2022 – Aug 2024 | Feature engineering, model training |
-| Validate | Sep 2024 – Mar 2025 | Signal evaluation, gauntlet testing |
+| Train    | Oct 2022 – Aug 2024 | Discovery search and LLM feedback    |
+| Validate | Sep 2024 – Mar 2025 | Candidate selection gate             |
 | Test     | Apr 2025 – Feb 2026 | Holdout (blocked in research mode)  |
 
 Data is not included. Set `NQ_DATA_PATH` to your raw data directory.

@@ -1,18 +1,24 @@
 mission_name: alpha-discovery
-objective: "Find robust, event-driven NQ scalp candidates on validate split"
+objective: "Search train split for robust, event-driven NQ scalp candidates that survive validate selection"
 started_at: "2026-02-18T00:00:00Z"
 
 bar_configs:
   - tick_610
   - volume_2000
   - time_1m
-splits_allowed:
-  - validate
+search_split: train
+selection_split: validate
+promotion_split: test
 session_filter: rth  # RTH = 09:30–16:00 ET (regular trading hours)
 feature_group: all  # "ohlcv" for Group A, "all" for Group B (OHLCV + MBP1)
 
 target_sharpe: 1.5
 min_trade_count: 30
+
+selection_gate:
+  require_gauntlet: true
+  target_sharpe: 1.25
+  min_trade_count: 20
 
 max_experiments: 400
 max_runtime_hours: 6

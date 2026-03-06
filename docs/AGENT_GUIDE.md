@@ -62,9 +62,10 @@ What happens:
 4. initialize queue/handoffs/budget state files
 5. bootstrap tasks from `research/signals/` when queue is empty (unless `--no-bootstrap`)
 6. claim pending tasks by priority
-7. execute task end-to-end: signal -> backtest -> metrics -> optional gauntlet -> artifacts
-8. complete task with verdict and details
-9. write run summary under `results/runs/<run_id>/summary.json`
+7. run the strategy on the mission `search_split` and write search artifacts/feedback
+8. if search passes, rerun the exact same strategy on `selection_split` before candidate promotion
+9. complete task with search feedback plus final selection-gated verdict/details
+10. write run summary under `results/runs/<run_id>/summary.json`
 
 ## Full Autonomy (Generator + Validator)
 

@@ -64,6 +64,27 @@ def test_validate_signal_array_contract():
     assert errors and "length" in errors[0]
 
 
+def test_task_split_plan_supports_search_and_selection_splits():
+    mod = _load_runner_module()
+    plan = mod._task_split_plan(
+        {"task_id": "t1", "split": "train"},
+        {"search_split": "train", "selection_split": "validate"},
+    )
+    assert plan["search_split"] == "train"
+    assert plan["selection_split"] == "validate"
+    assert plan["feedback_split"] == "train"
+
+
+def test_task_split_plan_downgrades_legacy_validate_task_without_selection():
+    mod = _load_runner_module()
+    plan = mod._task_split_plan(
+        {"task_id": "legacy", "split": "validate"},
+        {"search_split": "train", "selection_split": "validate"},
+    )
+    assert plan["search_split"] == "validate"
+    assert plan["selection_split"] is None
+
+
 def test_bootstrap_tasks_and_claim_priority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     mod = _load_runner_module()
     queue = tmp_path / "queue.json"
@@ -79,7 +100,8 @@ def test_bootstrap_tasks_and_claim_priority(tmp_path: Path, monkeypatch: pytest.
 
     mission = {
         "bar_configs": ["tick_610", "volume_2000"],
-        "splits_allowed": ["validate"],
+        "search_split": "train",
+        "selection_split": "validate",
         "run_gauntlet": True,
         "write_candidates": True,
     }
@@ -96,6 +118,9 @@ def test_bootstrap_tasks_and_claim_priority(tmp_path: Path, monkeypatch: pytest.
     assert len(tasks) == 2
     assert all(t["state"] == "pending" for t in tasks)
     assert {t["bar_config"] for t in tasks} == {"tick_610", "volume_2000"}
+    assert {t["split"] for t in tasks} == {"train"}
+    assert {t["search_split"] for t in tasks} == {"train"}
+    assert {t["selection_split"] for t in tasks} == {"validate"}
     assert all(t["params"] == {"lookback": 5} for t in tasks)
 
     # Reorder priorities to verify claim order is priority-ascending.
@@ -126,7 +151,9 @@ def test_bootstrap_tasks_deduplicates_existing_combinations(
                         "task_id": "done_1",
                         "state": "completed",
                         "strategy_name": "alpha_a",
-                        "split": "validate",
+                        "split": "train",
+                        "search_split": "train",
+                        "selection_split": "validate",
                         "bar_config": "tick_610",
                         "params": {"lookback": 5},
                     }
@@ -148,7 +175,8 @@ def test_bootstrap_tasks_deduplicates_existing_combinations(
         lock_path=lock,
         mission={
             "bar_configs": ["tick_610"],
-            "splits_allowed": ["validate"],
+            "search_split": "train",
+            "selection_split": "validate",
         },
         max_new_tasks=10,
     )
@@ -431,6 +459,76 @@ def test_finalize_ready_validation_handoffs_keeps_active_request_pending(
     assert payload["completed"] == []
 
 
+def test_finalize_ready_validation_handoffs_uses_search_feedback_not_final_selection_gate(
+    tmp_path: Path,
+):
+    mod = _load_runner_module()
+    queue_path = tmp_path / "queue.json"
+    queue_lock = tmp_path / "queue.lock"
+    handoffs_path = tmp_path / "handoffs.json"
+    handoffs_lock = tmp_path / "handoffs.lock"
+
+    queue_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "t1",
+                        "state": "failed",
+                        "verdict": "FAIL",
+                        "strategy_name": "alpha_x",
+                        "bar_config": "tick_610",
+                        "completed_at": "2026-01-01T00:01:00+00:00",
+                        "details": {
+                            "feedback_split": "train",
+                            "feedback_verdict": "PASS",
+                            "final_verdict": "FAIL",
+                            "candidate_status": "rejected_selection",
+                            "metrics": {
+                                "sharpe_ratio": 1.8,
+                                "trade_count": 44,
+                                "net_pnl": 320.0,
+                            },
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handoffs_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "pending": [
+                    {
+                        "handoff_id": "h3",
+                        "handoff_type": "validation_request",
+                        "payload": {
+                            "strategy_name": "alpha_x",
+                            "hypothesis_id": "h_003",
+                            "task_ids": ["t1"],
+                        },
+                    }
+                ],
+                "completed": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = mod._finalize_ready_validation_handoffs(
+        queue_path=queue_path,
+        queue_lock=queue_lock,
+        handoffs_path=handoffs_path,
+        handoffs_lock=handoffs_lock,
+    )
+    assert len(resolved) == 1
+    assert resolved[0]["result"]["overall_verdict"] == "PASS"
+    assert resolved[0]["result"]["tasks"][0]["final_verdict"] == "FAIL"
+
+
 def test_execute_claimed_task_gauntlet_respects_metric_thresholds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -518,6 +616,145 @@ def test_execute_claimed_task_gauntlet_respects_metric_thresholds(
     )
 
     assert verdict == "FAIL"
+
+
+def test_execute_claimed_task_runs_selection_gate_without_leaking_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    def _signal_fn(df, _params):
+        arr = np.zeros(len(df), dtype=np.int8)
+        arr[::10] = 1
+        return arr
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=_signal_fn,
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_selection_gate")
+    monkeypatch.setattr(mod, "check_signal_causality", lambda **kwargs: [])
+    monkeypatch.setattr(mod, "run_backtest", lambda *_args, **_kwargs: pl.DataFrame(schema=mod.TRADE_SCHEMA))
+    monkeypatch.setattr(mod, "run_validation_gauntlet", lambda *_args, **_kwargs: {"overall_verdict": "PASS"})
+
+    metric_rows = iter(
+        [
+            {
+                "trade_count": 48,
+                "win_count": 0,
+                "loss_count": 0,
+                "win_rate": 0.0,
+                "gross_pnl": 0.0,
+                "total_costs": 0.0,
+                "net_pnl": 0.0,
+                "avg_trade_pnl": 0.0,
+                "max_win": 0.0,
+                "max_loss": 0.0,
+                "profit_factor": 0.0,
+                "sharpe_ratio": 1.9,
+                "max_drawdown": 0.0,
+                "max_drawdown_pct": 0.0,
+                "avg_holding_time_min": 0.0,
+                "avg_bars_held": 0.0,
+            },
+            {
+                "trade_count": 48,
+                "win_count": 0,
+                "loss_count": 0,
+                "win_rate": 0.0,
+                "gross_pnl": 0.0,
+                "total_costs": 0.0,
+                "net_pnl": 0.0,
+                "avg_trade_pnl": 0.0,
+                "max_win": 0.0,
+                "max_loss": 0.0,
+                "profit_factor": 0.0,
+                "sharpe_ratio": 0.2,
+                "max_drawdown": 0.0,
+                "max_drawdown_pct": 0.0,
+                "avg_holding_time_min": 0.0,
+                "avg_bars_held": 0.0,
+            },
+        ]
+    )
+    monkeypatch.setattr(mod, "compute_metrics", lambda *_args, **_kwargs: dict(next(metric_rows)))
+
+    fake_train = tmp_path / "nq_train.parquet"
+    fake_validate = tmp_path / "nq_validate.parquet"
+    fake_train.write_text("", encoding="utf-8")
+    fake_validate.write_text("", encoding="utf-8")
+
+    def _get_split_files(split: str):
+        return [fake_train] if split == "train" else [fake_validate]
+
+    monkeypatch.setattr(mod, "get_split_files", _get_split_files)
+
+    start = np.datetime64("2024-01-02T14:30:00")
+    bars = pl.DataFrame(
+        {
+            "ts_event": pl.datetime_range(start, start + np.timedelta64(39, "m"), interval="1m", eager=True),
+            "open": np.linspace(100.0, 101.0, 40),
+            "high": np.linspace(100.5, 101.5, 40),
+            "low": np.linspace(99.5, 100.5, 40),
+            "close": np.linspace(100.0, 101.0, 40),
+        }
+    ).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    monkeypatch.setattr(mod, "load_cached_matrix", lambda *args, **kwargs: bars)
+
+    write_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        mod,
+        "write_candidate",
+        lambda **kwargs: write_calls.append(kwargs) or (tmp_path / "candidate.json"),
+    )
+
+    experiments_path = tmp_path / "experiments.jsonl"
+    verdict, details = mod._execute_claimed_task(
+        task={
+            "task_id": "t_selection_gate",
+            "strategy_name": "dummy",
+            "split": "train",
+            "selection_split": "validate",
+            "bar_config": "time_1m",
+            "params": {},
+            "run_gauntlet": True,
+            "write_candidate": True,
+        },
+        mission={
+            "search_split": "train",
+            "selection_split": "validate",
+            "selection_gate": {"target_sharpe": 1.25, "min_trade_count": 20, "require_gauntlet": True},
+            "run_gauntlet": True,
+            "target_sharpe": 1.5,
+            "min_trade_count": 30,
+            "session_filter": "rth",
+            "write_candidates": True,
+        },
+        run_id="run_x",
+        run_dir=tmp_path,
+        framework_lock_hash="abc123",
+        git_commit=None,
+        experiments_path=experiments_path,
+        experiments_lock=tmp_path / "experiments.lock",
+    )
+
+    assert verdict == "FAIL"
+    assert details["feedback_verdict"] == "PASS"
+    assert details["search_result"]["verdict"] == "PASS"
+    assert details["selection_result"]["verdict"] == "FAIL"
+    assert details["candidate_status"] == "rejected_selection"
+    assert write_calls == []
+
+    rows = [json.loads(line) for line in experiments_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    task_row = rows[-1]
+    assert task_row["event"] == "task_result"
+    assert task_row["split"] == "train"
+    assert task_row["verdict"] == "PASS"
+    assert task_row["final_verdict"] == "FAIL"
+    assert task_row["selection_result"]["split"] == "validate"
 
 
 def test_execute_claimed_task_rejects_non_causal_signal(
