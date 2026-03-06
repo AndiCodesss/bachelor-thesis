@@ -12,29 +12,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 
-import yaml
+from research.lib.coordination import read_json_file_if_exists
+from src.framework.data.bar_configs import BAR_CONFIGS, bar_config_label
 
-# Fix path to import from src
 project_root = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.insert(0, str(project_root))
 
-try:
-    from src.framework.features_canonical.builder import BAR_CONFIGS
-    def get_bar_label(cfg):
-        if cfg["bar_type"] == "time":
-            return cfg["bar_size"]
-        if cfg["bar_type"] == "volume":
-            return f"vol_{cfg['bar_threshold']}"
-        return f"{cfg['bar_type']}_{cfg['bar_threshold']}"
-    AVAILABLE_BARS = [get_bar_label(cfg) for cfg in BAR_CONFIGS]
-except ImportError:
-    AVAILABLE_BARS = []
+AVAILABLE_BARS = [bar_config_label(cfg) for cfg in BAR_CONFIGS]
+LOCAL_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 
 app = FastAPI(title="NQ-Alpha Central Dashboard API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=LOCAL_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +54,8 @@ runs = {}
 
 
 def _load_mission_name(mission_ref: str) -> str:
+    import yaml
+
     mission_path = Path(mission_ref)
     if not mission_path.is_absolute():
         mission_path = project_root / mission_path
@@ -84,6 +76,14 @@ def _reset_runtime_state(mission_name: str) -> None:
 
     reset_shared_state(project_root, mission_name=mission_name)
     clear_orchestrator_state(project_root)
+
+
+def _read_runtime_json(path: Path, default_payload: dict) -> dict:
+    return read_json_file_if_exists(
+        json_path=path,
+        lock_path=path.with_suffix(".lock"),
+        default_payload=default_payload,
+    )
 
 # --- Cache Config ---
 @app.get("/api/config/cache")
@@ -316,35 +316,32 @@ def get_autonomy_status():
 
     # Queue
     try:
-        if queue_path.exists():
-            queue = json.loads(queue_path.read_text())
-            tasks = queue.get("tasks", [])
-            for t in tasks:
-                state = t.get("state")
-                if state in metrics["queue"]:
-                    metrics["queue"][state] += 1
+        queue = _read_runtime_json(queue_path, {"schema_version": "1.0", "tasks": []})
+        tasks = queue.get("tasks", [])
+        for t in tasks:
+            state = t.get("state")
+            if state in metrics["queue"]:
+                metrics["queue"][state] += 1
 
-            # Active hypotheses
-            hyp_counts = {}
-            for t in tasks:
-                if t.get("state") in ["pending", "in_progress"]:
-                    hid = str(t.get("source", {}).get("hypothesis_id", "")).strip()
-                    if hid:
-                        hyp_counts[hid] = hyp_counts.get(hid, 0) + 1
-            metrics["active_hypotheses"] = [
-                {"id": k, "tasks": v}
-                for k, v in sorted(hyp_counts.items(), key=lambda x: -x[1])[:4]
-            ]
+        hyp_counts = {}
+        for t in tasks:
+            if t.get("state") in ["pending", "in_progress"]:
+                hid = str(t.get("source", {}).get("hypothesis_id", "")).strip()
+                if hid:
+                    hyp_counts[hid] = hyp_counts.get(hid, 0) + 1
+        metrics["active_hypotheses"] = [
+            {"id": k, "tasks": v}
+            for k, v in sorted(hyp_counts.items(), key=lambda x: -x[1])[:4]
+        ]
     except Exception:
         pass
 
     # Budget
     try:
-        if budget_path.exists():
-            b = json.loads(budget_path.read_text())
-            metrics["budget"]["experiments_run"] = b.get("experiments_run", 0)
-            metrics["budget"]["max_experiments"] = b.get("max_experiments", "n/a")
-            metrics["budget"]["failures"] = b.get("failures_by_type", {})
+        b = _read_runtime_json(budget_path, {"experiments_run": 0, "max_experiments": "n/a", "failures_by_type": {}})
+        metrics["budget"]["experiments_run"] = b.get("experiments_run", 0)
+        metrics["budget"]["max_experiments"] = b.get("max_experiments", "n/a")
+        metrics["budget"]["failures"] = b.get("failures_by_type", {})
     except Exception:
         pass
 

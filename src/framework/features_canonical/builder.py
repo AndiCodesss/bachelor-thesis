@@ -10,8 +10,13 @@ import json
 import re
 from datetime import date as _date_cls
 from pathlib import Path
+
 import polars as pl
+
 from src.framework.data.bars import aggregate_time_bars, aggregate_volume_bars, aggregate_tick_bars
+from src.framework.data.bar_configs import BAR_CONFIGS, bar_config_label
+from src.framework.data.constants import RESULTS_DIR
+from src.framework.data.loader import filter_rth, filter_eth
 from src.framework.features_canonical.orderflow import compute_orderflow_features
 from src.framework.features_canonical.book import compute_book_features
 from src.framework.features_canonical.microstructure import compute_microstructure_features
@@ -26,8 +31,6 @@ from src.framework.features_canonical.footprint import compute_footprint_feature
 from src.framework.features_canonical.opening_range import compute_opening_range_features
 from src.framework.features_canonical.ohlcv_indicators import compute_ohlcv_indicators
 from src.framework.features_canonical.pipeline import compute_pipeline_features
-from src.framework.data.constants import RESULTS_DIR
-from src.framework.data.loader import filter_rth, filter_eth
 
 CACHE_DIR = RESULTS_DIR / "cache"
 
@@ -633,14 +636,6 @@ def _find_context_files(target_path: Path, n_days: int) -> list[Path]:
     return all_files[start:target_idx]
 
 
-# Default bar configurations for NQ E-mini futures
-BAR_CONFIGS = [
-    {"bar_type": "tick",   "bar_size": "5m", "bar_threshold": 610},
-    {"bar_type": "volume", "bar_size": "5m", "bar_threshold": 2000},
-    {"bar_type": "time",   "bar_size": "1m", "bar_threshold": None},
-]
-
-
 def build_full_cache(
     split: str = "validate",
     bar_configs: list[dict] | None = None,
@@ -730,9 +725,4 @@ def build_full_cache(
 
 
 def _bar_label(bc: dict) -> str:
-    """Human-readable bar config label: tick_610, vol_2000, 1m."""
-    if bc["bar_type"] == "time":
-        return bc["bar_size"]
-    if bc["bar_type"] == "volume":
-        return f"vol_{bc['bar_threshold']}"
-    return f"{bc['bar_type']}_{bc['bar_threshold']}"
+    return bar_config_label(bc)

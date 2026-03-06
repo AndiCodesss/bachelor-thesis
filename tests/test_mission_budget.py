@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from research.lib.budget import MissionBudget
@@ -23,9 +24,13 @@ def test_mission_budget_persists_state(tmp_path: Path):
     )
     snap = resumed.snapshot()
     assert snap["experiments_run"] == 3
+    assert snap["max_experiments"] == 5
     assert snap["failures_by_type"]["FAIL"] == 1
     assert snap["failures_by_type"]["ERROR"] == 1
     assert state_file.with_suffix(".lock").exists()
+    persisted = json.loads(state_file.read_text(encoding="utf-8"))
+    assert persisted["max_experiments"] == 5
+    assert persisted["kill_criteria"] == {"FAIL": 3, "ERROR": 2}
 
 
 def test_mission_budget_limits(tmp_path: Path):

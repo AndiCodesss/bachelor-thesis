@@ -17,9 +17,9 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.framework.api import ExecutionMode
+from src.framework.data.bar_configs import BAR_CONFIGS, bar_config_label
 from src.framework.data.loader import get_execution_mode, set_execution_mode
 from src.framework.features_canonical.builder import (
-    BAR_CONFIGS,
     CACHE_DIR,
     _feature_cache_dir,
     build_full_cache,
@@ -31,11 +31,7 @@ _VALID_EXEC_MODES = ("auto", "research", "promotion")
 
 
 def _bar_label(cfg: dict) -> str:
-    if cfg["bar_type"] == "time":
-        return cfg["bar_size"]
-    if cfg["bar_type"] == "volume":
-        return f"vol_{cfg['bar_threshold']}"
-    return f"{cfg['bar_type']}_{cfg['bar_threshold']}"
+    return bar_config_label(cfg)
 
 
 def _parse_splits(values: list[str]) -> list[str]:

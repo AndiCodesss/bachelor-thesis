@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -92,6 +93,24 @@ def read_json_file(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with portalocker.Lock(lock_path, mode="a", timeout=max(1, int(lock_timeout_seconds))):
         _ensure_json(json_path, default_payload)
+        return _read_json(json_path)
+
+
+def read_json_file_if_exists(
+    *,
+    json_path: Path,
+    lock_path: Path,
+    default_payload: dict[str, Any],
+    lock_timeout_seconds: int = DEFAULT_LOCK_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Lock sidecar file and read JSON if present, without creating new state."""
+    if not json_path.exists():
+        return deepcopy(default_payload)
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with portalocker.Lock(lock_path, mode="a", timeout=max(1, int(lock_timeout_seconds))):
+        if not json_path.exists():
+            return deepcopy(default_payload)
         return _read_json(json_path)
 
 

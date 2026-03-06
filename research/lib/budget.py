@@ -79,7 +79,9 @@ class MissionBudget:
             "schema_version": "1.0",
             "mission_name": self.mission_name,
             "experiments_run": int(self.experiments_run),
+            "max_experiments": int(self.max_experiments),
             "failures_by_type": dict(self.failures_by_type),
+            "kill_criteria": dict(self.kill_criteria),
             "started_at": self.started_at,
             "last_updated": _utc_now(),
         }
