@@ -489,7 +489,7 @@ export default function App() {
                 <label>Execution Flags</label>
                 <div className="checkbox-group" style={{flexDirection: 'column', alignItems: 'flex-start'}}>
                   <label className={`checkbox-label ${aNoResume ? 'active' : ''}`}>
-                    <input type="checkbox" checked={aNoResume} onChange={e => setANoResume(e.target.checked)}/> No Resume (Fresh Start)
+                    <input type="checkbox" checked={aNoResume} onChange={e => setANoResume(e.target.checked)}/> Fresh State (Reset Runtime State)
                   </label>
                   <label className={`checkbox-label ${aAllowBootstrap ? 'active' : ''}`}>
                     <input type="checkbox" checked={aAllowBootstrap} onChange={e => setAAllowBootstrap(e.target.checked)}/> Allow Bootstrap

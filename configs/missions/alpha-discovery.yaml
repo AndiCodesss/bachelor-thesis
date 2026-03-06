@@ -20,6 +20,16 @@ kill_criteria:
   FAIL: 200
   ERROR: 30
 
+advanced_validation:
+  min_dsr_probability: 0.10
+  allowed_alpha_decay_verdicts:
+    - STABLE
+    - NOISY
+    - INSUFFICIENT_DATA
+  allowed_factor_verdicts:
+    - PURE_ALPHA
+    - INSUFFICIENT_DATA
+
 notebooklm_notebook_url: "https://notebooklm.google.com/notebook/c59b7dcc-ffeb-431a-b2a8-dbf5bf9cde58"
 
 current_focus:

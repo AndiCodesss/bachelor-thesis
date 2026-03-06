@@ -19,7 +19,6 @@ from typing import Any, Callable
 
 import numpy as np
 import polars as pl
-import portalocker
 import yaml
 
 if __package__ is None or __package__ == "":
@@ -33,11 +32,18 @@ from research.lib.coordination import (
     claim_task,
     complete_task,
     compute_event_id,
+    read_json_file,
     update_json_file,
     update_task_heartbeat,
     watchdog_check_timeouts,
 )
 from research.lib.experiments import log_experiment
+from research.lib.runtime_state import (
+    clear_orchestrator_state,
+    ensure_shared_state,
+    reset_shared_state,
+    shared_state_defaults,
+)
 from research.lib.trial_counter import estimate_effective_trials
 from research.signals import (
     CAUSALITY_MIN_PREFIX_BARS,
@@ -92,21 +98,8 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected JSON object at {path}")
-    return payload
-
-
-def _read_json_locked(path: Path, lock_path: Path, default_payload: dict[str, Any]) -> dict[str, Any]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with portalocker.Lock(lock_path, mode="a", timeout=30):
-        if not path.exists():
-            atomic_json_write(path, default_payload)
-        return _read_json(path)
+def _state_mode(*, fresh_state: bool) -> str:
+    return "fresh" if fresh_state else "resume"
 
 
 def _sha256_file(path: Path) -> str:
@@ -158,38 +151,10 @@ def _verify_lock(manifest: Path, mode: str) -> dict[str, Any]:
     return result
 
 
-def _ensure_runtime_state(root: Path, *, resume: bool, mission_name: str) -> dict[str, Path]:
-    state_dir = root / "research" / ".state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    paths = {
-        "queue": state_dir / "experiment_queue.json",
-        "queue_lock": state_dir / "experiment_queue.lock",
-        "handoffs": state_dir / "handoffs.json",
-        "handoffs_lock": state_dir / "handoffs.lock",
-        "budget": state_dir / "mission_budget.json",
-    }
-    defaults = {
-        "queue": {"schema_version": "1.0", "tasks": []},
-        "handoffs": {"schema_version": "1.0", "pending": [], "completed": []},
-        "budget": {
-            "schema_version": "1.0",
-            "mission_name": mission_name,
-            "experiments_run": 0,
-            "failures_by_type": {},
-            "started_at": None,
-            "last_updated": None,
-        },
-    }
-    for key in ("queue", "handoffs", "budget"):
-        if (not resume) or (not paths[key].exists()):
-            atomic_json_write(paths[key], defaults[key])
-    return paths
-
-
 def _queue_counts(queue_path: Path, lock_path: Path) -> dict[str, int]:
-    payload = _read_json_locked(
-        queue_path,
-        lock_path,
+    payload = read_json_file(
+        json_path=queue_path,
+        lock_path=lock_path,
         default_payload={"schema_version": "1.0", "tasks": []},
     )
     tasks = list(payload.get("tasks", []))
@@ -206,9 +171,9 @@ def _collect_new_terminal_task_verdicts(
     lock_path: Path,
     seen_task_ids: set[str],
 ) -> list[str]:
-    payload = _read_json_locked(
-        queue_path,
-        lock_path,
+    payload = read_json_file(
+        json_path=queue_path,
+        lock_path=lock_path,
         default_payload={"schema_version": "1.0", "tasks": []},
     )
     verdicts: list[str] = []
@@ -231,9 +196,9 @@ def _seed_seen_terminal_task_ids(queue_path: Path, lock_path: Path, already_coun
     are already reflected in MissionBudget.experiments_run, and only unseen
     terminal tasks should increment budget after resume.
     """
-    payload = _read_json_locked(
-        queue_path,
-        lock_path,
+    payload = read_json_file(
+        json_path=queue_path,
+        lock_path=lock_path,
         default_payload={"schema_version": "1.0", "tasks": []},
     )
     terminal_tasks = [
@@ -432,9 +397,9 @@ def _finalize_ready_validation_handoffs(
     handoffs_path: Path,
     handoffs_lock: Path,
 ) -> list[dict[str, Any]]:
-    queue_payload = _read_json_locked(
-        queue_path,
-        queue_lock,
+    queue_payload = read_json_file(
+        json_path=queue_path,
+        lock_path=queue_lock,
         default_payload={"schema_version": "1.0", "tasks": []},
     )
     tasks_by_id = {
@@ -631,7 +596,11 @@ def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
 
 
 def _claim_next_task(queue_path: Path, lock_path: Path, *, agent_name: str) -> dict[str, Any] | None:
-    payload = _read_json(queue_path)
+    payload = read_json_file(
+        json_path=queue_path,
+        lock_path=lock_path,
+        default_payload={"schema_version": "1.0", "tasks": []},
+    )
     pending = [
         task for task in payload.get("tasks", [])
         if task.get("state") == "pending" and task.get("task_id")
@@ -1109,9 +1078,16 @@ def main() -> None:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume existing research/.state files instead of resetting state for this run.",
+        help="Resume existing research/.state files (default behavior).",
+    )
+    parser.add_argument(
+        "--fresh-state",
+        action="store_true",
+        help="Reset queue, handoffs, budget, and all orchestrator state before starting.",
     )
     args = parser.parse_args()
+    if args.resume and args.fresh_state:
+        parser.error("Use at most one of --resume or --fresh-state.")
 
     root = Path(__file__).resolve().parent.parent
     mission_path = args.mission.resolve()
@@ -1140,13 +1116,19 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_json_write(run_dir / "mission.json", mission)
 
-    state_paths = _ensure_runtime_state(root, resume=bool(args.resume), mission_name=mission_name)
+    state_mode = _state_mode(fresh_state=bool(args.fresh_state))
+    if state_mode == "fresh":
+        state_paths = reset_shared_state(root, mission_name=mission_name)
+        clear_orchestrator_state(root)
+    else:
+        state_paths = ensure_shared_state(root, mission_name=mission_name)
     budget = MissionBudget(
         max_experiments=int(args.max_experiments if args.max_experiments is not None else mission.get("max_experiments", 100)),
         kill_criteria=dict(mission.get("kill_criteria", {"FAIL": 10, "ERROR": 5})),
         state_file=state_paths["budget"],
+        lock_file=state_paths["budget_lock"],
         mission_name=mission_name,
-        reset_on_mission_change=True,
+        reset_on_mission_change=state_mode != "fresh",
     )
     seen_terminal_tasks: set[str] = (
         _seed_seen_terminal_task_ids(
@@ -1154,7 +1136,7 @@ def main() -> None:
             state_paths["queue_lock"],
             budget.experiments_run,
         )
-        if args.resume else set()
+        if state_mode == "resume" else set()
     )
 
     logs_dir = root / "results" / "logs"
@@ -1176,7 +1158,8 @@ def main() -> None:
             "event": "run_start",
             "mission_name": mission_name,
             "auto_mode": bool(args.auto_mode),
-            "resume": bool(args.resume),
+            "resume": state_mode == "resume",
+            "state_mode": state_mode,
             "worker_agent": str(args.worker_agent),
         },
         experiments_path=experiments_path,
@@ -1203,6 +1186,7 @@ def main() -> None:
     print(f"Run ID: {run_id}")
     print(f"Mission: {mission_name}")
     print(f"Auto mode: {bool(args.auto_mode)}")
+    print(f"State mode: {state_mode}")
     print(f"Worker agent: {args.worker_agent}")
     print(f"Budget max experiments: {budget.max_experiments}")
 
@@ -1382,14 +1366,29 @@ def main() -> None:
     atomic_json_write(run_dir / "provenance.json", provenance)
     atomic_json_write(
         run_dir / "queue_final.json",
-        _read_json_locked(
-            state_paths["queue"],
-            state_paths["queue_lock"],
+        read_json_file(
+            json_path=state_paths["queue"],
+            lock_path=state_paths["queue_lock"],
             default_payload={"schema_version": "1.0", "tasks": []},
         ),
     )
-    atomic_json_write(run_dir / "handoffs_final.json", _read_json(state_paths["handoffs"]))
-    atomic_json_write(run_dir / "mission_budget_final.json", _read_json(state_paths["budget"]))
+    runtime_defaults = shared_state_defaults(mission_name)
+    atomic_json_write(
+        run_dir / "handoffs_final.json",
+        read_json_file(
+            json_path=state_paths["handoffs"],
+            lock_path=state_paths["handoffs_lock"],
+            default_payload=runtime_defaults["handoffs"],
+        ),
+    )
+    atomic_json_write(
+        run_dir / "mission_budget_final.json",
+        read_json_file(
+            json_path=state_paths["budget"],
+            lock_path=state_paths["budget_lock"],
+            default_payload=runtime_defaults["budget"],
+        ),
+    )
 
     summary = {
         "run_id": run_id,

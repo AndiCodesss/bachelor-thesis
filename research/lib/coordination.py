@@ -80,6 +80,21 @@ def update_json_file(
         return updated
 
 
+def read_json_file(
+    *,
+    json_path: Path,
+    lock_path: Path,
+    default_payload: dict[str, Any],
+    lock_timeout_seconds: int = DEFAULT_LOCK_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Lock sidecar file, ensure JSON exists, and return the current payload."""
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with portalocker.Lock(lock_path, mode="a", timeout=max(1, int(lock_timeout_seconds))):
+        _ensure_json(json_path, default_payload)
+        return _read_json(json_path)
+
+
 def enqueue_task(
     *,
     queue_path: Path,

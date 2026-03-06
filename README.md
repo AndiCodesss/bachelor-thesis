@@ -206,11 +206,14 @@ uv sync                                                                         
 uv run pytest -q                                                                # run tests
 uv run python scripts/framework/verify_lock.py --manifest configs/framework_lock.json --mode error   # verify integrity
 uv run python scripts/cache_runner.py --split all --session-filter eth --bar-filter tick_610 --clean # rebuild cache
-uv run python scripts/launch_autonomy.py                                          # launch orchestrator + validator with live dashboard (Ctrl+C stops both gracefully)
-uv run python scripts/llm_orchestrator.py --mission configs/missions/alpha-discovery.yaml --resume    # generate signals + enqueue tasks (Claude Code CLI)
-uv run python scripts/research.py --mission configs/missions/alpha-discovery.yaml --max-experiments 100 --auto-mode  # research loop
+uv run python scripts/launch_autonomy.py --lane-count 2                           # resume-safe launcher with validator + 2 orchestrator lanes
+uv run python scripts/launch_autonomy.py --fresh-state --lane-count 2             # explicitly start a new runtime state
+uv run python scripts/llm_orchestrator.py --mission configs/missions/alpha-discovery.yaml --lane A --resume    # generate signals + enqueue tasks (Claude Code CLI)
+uv run python scripts/research.py --mission configs/missions/alpha-discovery.yaml --max-experiments 100 --auto-mode  # research loop (resume-safe by default)
 uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.json --verify-only        # promotion verification
 ```
+
+Runner entrypoints are resume-safe by default. Use `--fresh-state` only when you intentionally want a new queue/handoff/budget state.
 
 ## Promotion Workflow
 

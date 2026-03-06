@@ -24,7 +24,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research.lib.atomic_io import atomic_json_write
-from research.lib.coordination import append_handoff, enqueue_task
+from research.lib.coordination import append_handoff, enqueue_task, read_json_file
 from research.lib.experiments import log_experiment
 from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.llm_client import (
@@ -32,6 +32,11 @@ from research.lib.llm_client import (
     LLMClientError,
     LLMRawClient,
     extract_json_object,
+)
+from research.lib.runtime_state import (
+    ensure_orchestrator_state,
+    ensure_shared_state,
+    reset_orchestrator_state,
 )
 from research.signals import check_signal_causality, load_signal_module
 from src.framework.api import (
@@ -383,48 +388,16 @@ def _diagnose_zero_signal(df: pl.DataFrame, code: str) -> str:
     return "\n".join(lines) if lines else "  (could not compute stats for referenced columns)"
 
 
-def _ensure_runtime_state(
-    root: Path,
-    *,
-    resume: bool,
-    mission_name: str,
-    lane_id: str | None = None,
-) -> dict[str, Path]:
-    state_dir = root / "research" / ".state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    orch_filename = f"llm_orchestrator_{lane_id}.json" if lane_id else "llm_orchestrator.json"
-    paths = {
-        "queue": state_dir / "experiment_queue.json",
-        "queue_lock": state_dir / "experiment_queue.lock",
-        "handoffs": state_dir / "handoffs.json",
-        "handoffs_lock": state_dir / "handoffs.lock",
-        "orchestrator": state_dir / orch_filename,
-    }
-
-    defaults = {
-        "queue": {"schema_version": "1.0", "tasks": []},
-        "handoffs": {"schema_version": "1.0", "pending": [], "completed": []},
-        "orchestrator": {
-            "schema_version": "1.0",
-            "mission_name": mission_name,
-            "iterations_completed": 0,
-            "total_tasks_enqueued": 0,
-            "generated_modules": [],
-            "last_updated": _utc_now(),
-        },
-    }
-
-    for key in ("queue", "handoffs"):
-        if not paths[key].exists():
-            atomic_json_write(paths[key], defaults[key])
-
-    if (not resume) or (not paths["orchestrator"].exists()):
-        atomic_json_write(paths["orchestrator"], defaults["orchestrator"])
-    return paths
+def _state_mode(*, fresh_state: bool) -> str:
+    return "fresh" if fresh_state else "resume"
 
 
-def _queue_counts(queue_path: Path) -> dict[str, int]:
-    payload = _read_json(queue_path)
+def _queue_counts(queue_path: Path, queue_lock: Path) -> dict[str, int]:
+    payload = read_json_file(
+        json_path=queue_path,
+        lock_path=queue_lock,
+        default_payload={"schema_version": "1.0", "tasks": []},
+    )
     tasks = list(payload.get("tasks", []))
     return {
         "pending": sum(1 for t in tasks if t.get("state") == "pending"),
@@ -490,13 +463,16 @@ def _collect_feedback_items(log_path: Path, limit: int = 6000, max_items: int = 
 
 def _collect_feedback_items_from_handoffs(
     handoffs_path: Path,
+    handoffs_lock: Path,
     *,
     max_items: int = 24,
 ) -> list[dict[str, Any]]:
-    if not handoffs_path.exists():
-        return []
     try:
-        payload = _read_json(handoffs_path)
+        payload = read_json_file(
+            json_path=handoffs_path,
+            lock_path=handoffs_lock,
+            default_payload={"schema_version": "1.0", "pending": [], "completed": []},
+        )
     except Exception:
         return []
 
@@ -584,6 +560,7 @@ def _collect_orchestrator_feedback_items(
 def _build_merged_feedback_items(
     *,
     handoffs_path: Path,
+    handoffs_lock_path: Path,
     research_log_path: Path,
     orchestrator_log_path: Path,
     max_items: int = 40,
@@ -592,7 +569,9 @@ def _build_merged_feedback_items(
     per_source = max(1, max_items // 3)
 
     handoff_items = _collect_feedback_items_from_handoffs(
-        handoffs_path, max_items=per_source
+        handoffs_path,
+        handoffs_lock_path,
+        max_items=per_source,
     )
     research_items = _collect_feedback_items(
         research_log_path, max_items=per_source
@@ -1906,10 +1885,17 @@ def main() -> int:
     parser.add_argument("--max-iterations", type=int, default=None, help="Override agent max_iterations.")
     parser.add_argument("--max-runtime-hours", type=float, default=None, help="Optional runtime cap.")
     parser.add_argument("--poll-seconds", type=int, default=None, help="Sleep between successful iterations.")
-    parser.add_argument("--resume", action="store_true", help="Resume orchestrator state from research/.state.")
+    parser.add_argument("--resume", action="store_true", help="Resume orchestrator state from research/.state (default behavior).")
+    parser.add_argument(
+        "--fresh-state",
+        action="store_true",
+        help="Reset only this orchestrator lane's state file before starting.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Generate and validate only; do not write files/tasks.")
     parser.add_argument("--lane", type=str, default=None, help="Lane ID (e.g. A, B, C) for parallel execution. Namespaces state and log files.")
     args = parser.parse_args()
+    if args.resume and args.fresh_state:
+        parser.error("Use at most one of --resume or --fresh-state.")
 
     lane_id: str | None = None
     if args.lane is not None:
@@ -1943,7 +1929,20 @@ def main() -> int:
     session_filter = str(mission.get("session_filter", "eth")).lower()
     feature_group = str(mission.get("feature_group", "all")).lower()
 
-    state_paths = _ensure_runtime_state(root, resume=bool(args.resume), mission_name=mission_name, lane_id=lane_id)
+    state_mode = _state_mode(fresh_state=bool(args.fresh_state))
+    shared_paths = ensure_shared_state(root, mission_name=mission_name)
+    orchestrator_state_file = (
+        reset_orchestrator_state(root, mission_name=mission_name, lane_id=lane_id)
+        if state_mode == "fresh"
+        else ensure_orchestrator_state(root, mission_name=mission_name, lane_id=lane_id)
+    )
+    state_paths = {
+        "queue": shared_paths["queue"],
+        "queue_lock": shared_paths["queue_lock"],
+        "handoffs": shared_paths["handoffs"],
+        "handoffs_lock": shared_paths["handoffs_lock"],
+        "orchestrator": orchestrator_state_file,
+    }
     orchestrator_state = _read_json(state_paths["orchestrator"])
     iterations_done = int(orchestrator_state.get("iterations_completed", 0))
     total_tasks = int(orchestrator_state.get("total_tasks_enqueued", 0))
@@ -2061,6 +2060,7 @@ def main() -> int:
         f"models=thinker:{thinker_role['model']} coder:{coder_role['model']}",
     )
     print(f"split={split} session_filter={session_filter} feature_group={feature_group}")
+    print(f"state_mode={state_mode}")
     print(f"max_iterations={max_iterations} dry_run={bool(args.dry_run)}")
 
     stop_reason = "max_iterations_reached"
@@ -2071,7 +2071,7 @@ def main() -> int:
                 stop_reason = "max_runtime_reached"
                 break
 
-        queue_counts = _queue_counts(state_paths["queue"])
+        queue_counts = _queue_counts(state_paths["queue"], state_paths["queue_lock"])
         queued = queue_counts["pending"] + queue_counts["in_progress"]
         if _should_wait_for_validation(queue_counts):
             print(
@@ -2084,6 +2084,7 @@ def main() -> int:
         existing = _existing_signal_names(signals_dir)
         feedback_items = _build_merged_feedback_items(
             handoffs_path=handoffs_path,
+            handoffs_lock_path=state_paths["handoffs_lock"],
             research_log_path=research_log_path,
             orchestrator_log_path=orchestrator_log_path,
         )
@@ -2476,7 +2477,7 @@ def main() -> int:
         if iterations_done < max_iterations:
             time.sleep(max(1, poll_seconds))
 
-    final_counts = _queue_counts(state_paths["queue"])
+    final_counts = _queue_counts(state_paths["queue"], state_paths["queue_lock"])
     summary = {
         "run_id": run_id,
         "mission_name": mission_name,

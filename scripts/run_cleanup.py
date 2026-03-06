@@ -16,21 +16,22 @@ ROOT = Path(__file__).resolve().parent.parent
 # Signal files to KEEP (never touch these)
 SIGNAL_KEEP = {"__init__.py", "example_ema_turn.py"}
 
-# State files to reset (written fresh on next run)
-STATE_RESET = [
+# State/log patterns to reset (written fresh on next run)
+STATE_PATTERNS = [
     "research/.state/experiment_queue.json",
     "research/.state/experiment_queue.lock",
     "research/.state/handoffs.json",
     "research/.state/handoffs.lock",
-    "research/.state/llm_orchestrator.json",
     "research/.state/mission_budget.json",
+    "research/.state/mission_budget.lock",
+    "research/.state/llm_orchestrator*.json",
 ]
 
 # Log files to delete
-LOG_FILES = [
-    "results/logs/llm_orchestrator.jsonl",
-    "results/logs/llm_orchestrator.lock",
-    "results/logs/llm_orchestrator.out",
+LOG_PATTERNS = [
+    "results/logs/llm_orchestrator*.jsonl",
+    "results/logs/llm_orchestrator*.lock",
+    "results/logs/llm_orchestrator*.out",
     "results/logs/research_experiments.jsonl",
     "results/logs/research_experiments.lock",
     "results/logs/research_worker.out",
@@ -46,6 +47,26 @@ def collect_signal_files() -> list[Path]:
         p for p in sorted(signals_dir.glob("*.py"))
         if p.name not in SIGNAL_KEEP
     ]
+
+
+def _collect_existing(patterns: list[str]) -> list[Path]:
+    seen: set[Path] = set()
+    items: list[Path] = []
+    for pattern in patterns:
+        for path in sorted(ROOT.glob(pattern)):
+            if path in seen:
+                continue
+            seen.add(path)
+            items.append(path)
+    return items
+
+
+def collect_state_files() -> list[Path]:
+    return _collect_existing(STATE_PATTERNS)
+
+
+def collect_log_files() -> list[Path]:
+    return _collect_existing(LOG_PATTERNS)
 
 
 def main() -> None:
@@ -72,27 +93,23 @@ def main() -> None:
         print("Signal files: none to remove")
 
     # State files
-    print(f"\nState files:")
-    for rel in STATE_RESET:
-        p = ROOT / rel
-        if p.exists():
-            print(f"  {rel}")
-            total += 1
-            if not dry:
-                p.unlink()
+    print("\nState files:")
+    for path in collect_state_files():
+        print(f"  {path.relative_to(ROOT)}")
+        total += 1
+        if not dry:
+            path.unlink()
 
     # Log files
-    print(f"\nLog files:")
-    for rel in LOG_FILES:
-        p = ROOT / rel
-        if p.exists():
-            print(f"  {rel}")
-            total += 1
-            if not dry:
-                p.unlink()
+    print("\nLog files:")
+    for path in collect_log_files():
+        print(f"  {path.relative_to(ROOT)}")
+        total += 1
+        if not dry:
+            path.unlink()
 
     # Run directories
-    print(f"\nRun directories:")
+    print("\nRun directories:")
     for run_root in RUN_DIRS:
         if run_root.exists():
             subdirs = sorted(run_root.iterdir())

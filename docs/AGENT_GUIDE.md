@@ -75,12 +75,14 @@ set -a && source .env && set +a
 claude auth login  # one-time setup for Claude Max subscription
 
 # Recommended: launch both in tmux with one command + live dashboard
-uv run python scripts/launch_autonomy.py
+uv run python scripts/launch_autonomy.py --lane-count 2
 # By default Ctrl+C shuts down both workers gracefully (use --keep-running to detach).
+# Use --fresh-state only when you explicitly want a new runtime state.
 
 # Process 1: LLM generator (writes research/signals + enqueues tasks)
 uv run python scripts/llm_orchestrator.py \
   --mission configs/missions/alpha-discovery.yaml \
+  --lane A \
   --resume
 
 # Process 2: validator worker (claims tasks and evaluates)
@@ -100,7 +102,7 @@ The generator calls Claude through the local `claude` CLI (`provider: claude_cli
 rather than direct API billing.
 
 It uses lock-safe queue updates and writes audit logs to
-`results/logs/llm_orchestrator.jsonl`.
+`results/logs/llm_orchestrator*.jsonl`.
 Role models and temperatures are configured in
 `configs/agents/llm_orchestrator.yaml`.
 Stage retries, JSON-repair attempts, and backoff windows are also configured in

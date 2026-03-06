@@ -129,7 +129,11 @@ def test_collect_feedback_items_from_handoffs_reads_completed_results(tmp_path: 
         encoding="utf-8",
     )
 
-    out = mod._collect_feedback_items_from_handoffs(handoffs, max_items=4)
+    out = mod._collect_feedback_items_from_handoffs(
+        handoffs,
+        handoffs.with_suffix(".lock"),
+        max_items=4,
+    )
     assert len(out) == 1
     assert out[0]["event"] == "validation_result"
     assert out[0]["strategy_name"] == "alpha_x"
@@ -507,6 +511,7 @@ def test_merged_feedback_includes_all_sources(tmp_path: Path):
 
     out = mod._build_merged_feedback_items(
         handoffs_path=handoffs,
+        handoffs_lock_path=handoffs.with_suffix(".lock"),
         research_log_path=research_log,
         orchestrator_log_path=orch_log,
         max_items=40,
@@ -529,6 +534,7 @@ def test_merged_feedback_works_when_some_sources_empty(tmp_path: Path):
     )
     out = mod._build_merged_feedback_items(
         handoffs_path=tmp_path / "missing_handoffs.json",
+        handoffs_lock_path=tmp_path / "missing_handoffs.lock",
         research_log_path=research_log,
         orchestrator_log_path=tmp_path / "missing_orch.jsonl",
         max_items=40,

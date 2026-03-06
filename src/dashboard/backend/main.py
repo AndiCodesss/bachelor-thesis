@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 
+import yaml
+
 # Fix path to import from src
 project_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -59,6 +61,29 @@ class CleanupRunRequest(BaseModel):
     force: bool = False
 
 runs = {}
+
+
+def _load_mission_name(mission_ref: str) -> str:
+    mission_path = Path(mission_ref)
+    if not mission_path.is_absolute():
+        mission_path = project_root / mission_path
+    mission_path = mission_path.resolve()
+    if not mission_path.exists():
+        return mission_path.stem
+    try:
+        payload = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    except Exception:
+        return mission_path.stem
+    if isinstance(payload, dict):
+        return str(payload.get("mission_name", mission_path.stem))
+    return mission_path.stem
+
+
+def _reset_runtime_state(mission_name: str) -> None:
+    from research.lib.runtime_state import clear_orchestrator_state, reset_shared_state
+
+    reset_shared_state(project_root, mission_name=mission_name)
+    clear_orchestrator_state(project_root)
 
 # --- Cache Config ---
 @app.get("/api/config/cache")
@@ -532,13 +557,20 @@ async def start_autonomy_run(req: AutonomyRunRequest):
     run_id = f"autonomy-{uuid.uuid4().hex[:8]}"
 
     commands = []
-    resume_flag = [] if req.no_resume else ["--resume"]
+    fresh_state = bool(req.no_resume)
+    state_flag = ["--resume"]
 
     if req.validator_only and req.orchestrator_only:
         raise HTTPException(status_code=400, detail="Cannot request validator-only and orchestrator-only at the same time.")
+    if fresh_state and req.orchestrator_only:
+        raise HTTPException(status_code=400, detail="Fresh state requires launching the validator or running cleanup first.")
+
+    if fresh_state:
+        mission_name = _load_mission_name(req.mission)
+        _reset_runtime_state(mission_name)
 
     if not req.orchestrator_only:
-        val_cmd = [sys.executable, "-u", "scripts/research.py", "--mission", req.mission, "--auto-mode", "--worker-agent", "validator"] + resume_flag
+        val_cmd = [sys.executable, "-u", "scripts/research.py", "--mission", req.mission, "--auto-mode", "--worker-agent", "validator"] + state_flag
         if not req.allow_bootstrap:
             val_cmd.append("--no-bootstrap")
         commands.append({"name": "Validator", "cmd": val_cmd})
@@ -547,7 +579,7 @@ async def start_autonomy_run(req: AutonomyRunRequest):
         lane_count = max(1, min(10, req.lane_count))
         for i in range(lane_count):
             lane_letter = chr(ord('A') + i)
-            orch_cmd = [sys.executable, "-u", "scripts/llm_orchestrator.py", "--mission", req.mission, "--agent-config", req.agent_config, "--lane", lane_letter] + resume_flag
+            orch_cmd = [sys.executable, "-u", "scripts/llm_orchestrator.py", "--mission", req.mission, "--agent-config", req.agent_config, "--lane", lane_letter] + state_flag
             commands.append({"name": f"Orchestrator-{lane_letter}", "cmd": orch_cmd})
 
     if not commands:

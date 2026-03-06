@@ -49,6 +49,10 @@
 - `estimate_effective_trials(...)` computes correlation-adjusted effective trials
   via a conservative sqrt-family aggregation to reduce sweep overcounting
 
+Discovery missions can optionally enforce these stronger checks at research time
+via `mission.advanced_validation` gates (DSR floor, allowed alpha-decay verdicts,
+and allowed factor-attribution verdicts).
+
 ## Validation Gauntlet (7 tests)
 
 `src/framework/backtest/validators.py`:

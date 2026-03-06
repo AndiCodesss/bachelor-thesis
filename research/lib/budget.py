@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import portalocker
+
 from research.lib.atomic_io import atomic_json_write
+
+
+DEFAULT_LOCK_TIMEOUT_SECONDS = 30
 
 
 def _utc_now() -> str:
@@ -19,41 +24,58 @@ class MissionBudget:
     max_experiments: int
     kill_criteria: dict[str, int]
     state_file: Path
+    lock_file: Path | None = None
     mission_name: str | None = None
     reset_on_mission_change: bool = True
 
     def __post_init__(self) -> None:
         self.state_file = Path(self.state_file)
+        self.lock_file = (
+            Path(self.lock_file)
+            if self.lock_file is not None
+            else self.state_file.with_suffix(".lock")
+        )
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
         self.started_at = _utc_now()
-        if self.state_file.exists():
-            import json
+        self.experiments_run = 0
+        self.failures_by_type: dict[str, int] = {}
 
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            saved_mission = payload.get("mission_name")
-            if (
-                self.reset_on_mission_change
-                and self.mission_name
-                and saved_mission
-                and str(saved_mission) != str(self.mission_name)
-            ):
-                self.experiments_run = 0
-                self.failures_by_type = {}
-                self.started_at = _utc_now()
-                self._save()
+        with portalocker.Lock(
+            self.lock_file,
+            mode="a",
+            timeout=DEFAULT_LOCK_TIMEOUT_SECONDS,
+        ):
+            if self.state_file.exists():
+                payload = self._read_payload_unlocked()
+                saved_mission = payload.get("mission_name")
+                if (
+                    self.reset_on_mission_change
+                    and self.mission_name
+                    and saved_mission
+                    and str(saved_mission) != str(self.mission_name)
+                ):
+                    self.started_at = _utc_now()
+                    self._write_payload_unlocked()
+                else:
+                    self.experiments_run = int(payload.get("experiments_run", 0))
+                    self.failures_by_type = {
+                        str(k): int(v) for k, v in dict(payload.get("failures_by_type", {})).items()
+                    }
+                    self.started_at = str(payload.get("started_at") or self.started_at)
             else:
-                self.experiments_run = int(payload.get("experiments_run", 0))
-                self.failures_by_type = {
-                    str(k): int(v) for k, v in dict(payload.get("failures_by_type", {})).items()
-                }
-                self.started_at = str(payload.get("started_at") or self.started_at)
-        else:
-            self.experiments_run = 0
-            self.failures_by_type: dict[str, int] = {}
-            self._save()
+                self._write_payload_unlocked()
 
-    def _save(self) -> None:
-        payload = {
+    def _read_payload_unlocked(self) -> dict[str, Any]:
+        import json
+
+        with open(self.state_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid mission budget payload at {self.state_file}")
+        return payload
+
+    def _payload(self) -> dict[str, Any]:
+        return {
             "schema_version": "1.0",
             "mission_name": self.mission_name,
             "experiments_run": int(self.experiments_run),
@@ -61,7 +83,17 @@ class MissionBudget:
             "started_at": self.started_at,
             "last_updated": _utc_now(),
         }
-        atomic_json_write(self.state_file, payload)
+
+    def _write_payload_unlocked(self) -> None:
+        atomic_json_write(self.state_file, self._payload())
+
+    def _save(self) -> None:
+        with portalocker.Lock(
+            self.lock_file,
+            mode="a",
+            timeout=DEFAULT_LOCK_TIMEOUT_SECONDS,
+        ):
+            self._write_payload_unlocked()
 
     def check_budget(self) -> tuple[bool, str]:
         if self.experiments_run >= int(self.max_experiments):

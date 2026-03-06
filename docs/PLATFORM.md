@@ -50,7 +50,10 @@ This separation keeps generation and evaluation responsibilities isolated.
 - lease + heartbeat renewal
 - watchdog timeout reclaim/fail
 
-`research/lib/budget.py` persists mission budget across restarts.
+`research/lib/budget.py` persists mission budget across restarts with its own sidecar lock.
+
+Worker entrypoints are resume-safe by default. Explicit fresh starts use `--fresh-state`
+instead of implicit state resets.
 
 ## Candidate Immutability
 

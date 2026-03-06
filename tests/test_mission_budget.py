@@ -25,6 +25,7 @@ def test_mission_budget_persists_state(tmp_path: Path):
     assert snap["experiments_run"] == 3
     assert snap["failures_by_type"]["FAIL"] == 1
     assert snap["failures_by_type"]["ERROR"] == 1
+    assert state_file.with_suffix(".lock").exists()
 
 
 def test_mission_budget_limits(tmp_path: Path):

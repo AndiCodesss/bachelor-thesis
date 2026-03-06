@@ -14,9 +14,14 @@ import subprocess
 import sys
 import time
 from statistics import mean
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from research.lib.runtime_state import clear_orchestrator_state, reset_shared_state
 
 
 RESET = "\033[0m"
@@ -26,6 +31,13 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 RED = "\033[31m"
 CYAN = "\033[36m"
+
+
+class OrchestratorWorker(NamedTuple):
+    lane_id: str | None
+    session_name: str
+    out_path: Path
+    log_path: Path
 
 
 def _now_utc() -> str:
@@ -172,6 +184,34 @@ def _recent_json_events(path: Path, *, event_names: set[str], limit: int, scan_l
     return list(reversed(out))
 
 
+def _last_json_event_across(paths: list[Path], event_names: set[str] | None = None) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    latest_ts = ""
+    for path in paths:
+        row = _last_json_event(path, event_names)
+        if not isinstance(row, dict):
+            continue
+        ts = str(row.get("timestamp", ""))
+        if latest is None or ts >= latest_ts:
+            latest = row
+            latest_ts = ts
+    return latest
+
+
+def _recent_json_events_across(
+    paths: list[Path],
+    *,
+    event_names: set[str],
+    limit: int,
+    scan_lines: int = 3000,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for path in paths:
+        merged.extend(_recent_json_events(path, event_names=event_names, limit=limit, scan_lines=scan_lines))
+    merged.sort(key=lambda row: str(row.get("timestamp", "")), reverse=True)
+    return list(reversed(merged[:limit]))
+
+
 def _last_nonempty_line(path: Path) -> str:
     for raw in reversed(_tail_lines(path, max_lines=200)):
         if raw.strip():
@@ -181,6 +221,29 @@ def _last_nonempty_line(path: Path) -> str:
 
 def _status_tag(up: bool) -> str:
     return f"{GREEN}UP{RESET}" if up else f"{RED}DOWN{RESET}"
+
+
+def _lane_ids(lane_count: int) -> list[str | None]:
+    count = max(1, min(10, int(lane_count)))
+    if count == 1:
+        return [None]
+    return [chr(ord("A") + i) for i in range(count)]
+
+
+def _orchestrator_workers(*, session_prefix: str, logs_dir: Path, lane_count: int) -> list[OrchestratorWorker]:
+    workers: list[OrchestratorWorker] = []
+    for lane_id in _lane_ids(lane_count):
+        suffix = f"_{lane_id}" if lane_id else ""
+        session_name = f"{session_prefix}_orchestrator{suffix.lower()}"
+        workers.append(
+            OrchestratorWorker(
+                lane_id=lane_id,
+                session_name=session_name,
+                out_path=logs_dir / f"llm_orchestrator{suffix}.out",
+                log_path=logs_dir / f"llm_orchestrator{suffix}.jsonl",
+            )
+        )
+    return workers
 
 
 def _fmt_num(value: Any, digits: int = 2) -> str:
@@ -279,8 +342,8 @@ def _gauntlet_snapshot(last_task_result: dict[str, Any] | None) -> dict[str, Any
 def _render_dashboard(
     *,
     root: Path,
-    orch_session: str,
-    val_session: str,
+    orchestrator_workers: list[OrchestratorWorker],
+    validator_session: str,
     mission: Path,
     agent_config: Path,
     mission_max_experiments: int | None,
@@ -292,9 +355,8 @@ def _render_dashboard(
     queue_path = state_dir / "experiment_queue.json"
     budget_path = state_dir / "mission_budget.json"
     exp_log = logs_dir / "research_experiments.jsonl"
-    llm_log = logs_dir / "llm_orchestrator.jsonl"
     worker_out = logs_dir / "research_worker.out"
-    orch_out = logs_dir / "llm_orchestrator.out"
+    orchestrator_log_paths = [worker.log_path for worker in orchestrator_workers]
 
     queue = _read_json(queue_path, {"tasks": []})
     tasks = queue.get("tasks", []) if isinstance(queue, dict) else []
@@ -324,13 +386,16 @@ def _render_dashboard(
 
     last_task = _last_json_event(exp_log, {"task_result", "task_error"})
     last_run_end = _last_json_event(exp_log, {"run_end"})
-    last_llm = _last_json_event(llm_log, {"generation_enqueued", "generation_rejected", "generation_error"})
+    last_llm = _last_json_event_across(
+        orchestrator_log_paths,
+        {"generation_enqueued", "generation_rejected", "generation_error"},
+    )
     last_task_result = _last_json_event(exp_log, {"task_result"})
     recent_task_results = _extract_recent_task_results(exp_log, limit=10)
     fin = _financial_snapshot(recent_task_results)
     gshot = _gauntlet_snapshot(last_task_result)
-    recent_hypotheses = _recent_json_events(
-        llm_log,
+    recent_hypotheses = _recent_json_events_across(
+        orchestrator_log_paths,
         event_names={"generation_enqueued", "generation_rejected", "generation_error"},
         limit=5,
         scan_lines=4000,
@@ -348,8 +413,11 @@ def _render_dashboard(
         if hypothesis_id:
             live_hypothesis_counts[hypothesis_id] = live_hypothesis_counts.get(hypothesis_id, 0) + 1
 
-    orch_up = _tmux_has_session(orch_session) if orchestrator_enabled else False
-    val_up = _tmux_has_session(val_session) if validator_enabled else False
+    orchestrator_statuses = {
+        worker.session_name: _tmux_has_session(worker.session_name)
+        for worker in orchestrator_workers
+    }
+    val_up = _tmux_has_session(validator_session) if validator_enabled else False
 
     print("\033[2J\033[H", end="")
     print(f"{BOLD}{CYAN}Autonomy Launcher Dashboard{RESET}")
@@ -360,9 +428,14 @@ def _render_dashboard(
     print("")
     print(f"{BOLD}Sessions{RESET}")
     if orchestrator_enabled:
-        print(f"  LLM orchestrator [{orch_session}]: {_status_tag(orch_up)}")
+        for worker in orchestrator_workers:
+            lane_label = worker.lane_id or "default"
+            print(
+                f"  LLM orchestrator [{worker.session_name}] lane={lane_label}: "
+                f"{_status_tag(orchestrator_statuses.get(worker.session_name, False))}"
+            )
     if validator_enabled:
-        print(f"  Validator      [{val_session}]: {_status_tag(val_up)}")
+        print(f"  Validator      [{validator_session}]: {_status_tag(val_up)}")
     print("")
     print(f"{BOLD}Queue{RESET}")
     print(f"  pending={pending}  in_progress={in_progress}  completed={completed}  failed={failed}")
@@ -492,7 +565,9 @@ def _render_dashboard(
     print("")
     print(f"{BOLD}Recent Output{RESET}")
     if orchestrator_enabled:
-        print(f"  llm_orchestrator.out: {_last_nonempty_line(orch_out)}")
+        for worker in orchestrator_workers:
+            label = f"llm_orchestrator_{worker.lane_id}.out" if worker.lane_id else "llm_orchestrator.out"
+            print(f"  {label}: {_last_nonempty_line(worker.out_path)}")
     if validator_enabled:
         print(f"  research_worker.out:  {_last_nonempty_line(worker_out)}")
     if isinstance(last_run_end, dict):
@@ -508,11 +583,12 @@ def _render_dashboard(
     attach_cmds: list[str] = []
     stop_cmds: list[str] = []
     if orchestrator_enabled:
-        attach_cmds.append(f"tmux attach -t {orch_session}")
-        stop_cmds.append(f"tmux kill-session -t {orch_session}")
+        for worker in orchestrator_workers:
+            attach_cmds.append(f"tmux attach -t {worker.session_name}")
+            stop_cmds.append(f"tmux kill-session -t {worker.session_name}")
     if validator_enabled:
-        attach_cmds.append(f"tmux attach -t {val_session}")
-        stop_cmds.append(f"tmux kill-session -t {val_session}")
+        attach_cmds.append(f"tmux attach -t {validator_session}")
+        stop_cmds.append(f"tmux kill-session -t {validator_session}")
     if attach_cmds:
         print(f"{DIM}Attach: {' | '.join(attach_cmds)}{RESET}")
     if stop_cmds:
@@ -541,7 +617,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not kill existing tmux sessions with the same names before launch.",
     )
-    parser.add_argument("--no-resume", action="store_true", help="Start workers without --resume.")
+    parser.add_argument(
+        "--fresh-state",
+        action="store_true",
+        help="Reset runtime state before launching workers.",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--keep-running",
         action="store_true",
@@ -554,6 +639,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--validator-only", action="store_true", help="Launch only validator worker.")
     parser.add_argument("--orchestrator-only", action="store_true", help="Launch only LLM orchestrator worker.")
+    parser.add_argument("--lane-count", type=int, default=1, help="Number of orchestrator lanes to launch (1-10).")
     return parser
 
 
@@ -596,7 +682,9 @@ def main() -> int:
 
     mission_payload = _read_yaml(mission, default={})
     mission_max_experiments: int | None = None
+    mission_name = mission.stem
     if isinstance(mission_payload, dict):
+        mission_name = str(mission_payload.get("mission_name", mission.stem))
         raw = mission_payload.get("max_experiments")
         try:
             mission_max_experiments = int(raw) if raw is not None else None
@@ -606,16 +694,35 @@ def main() -> int:
     logs_dir = root / "results" / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    orch_session = f"{args.session_prefix}_orchestrator"
+    fresh_state = bool(args.fresh_state or args.no_resume)
+    if fresh_state and args.no_restart:
+        parser.error("--fresh-state cannot be combined with --no-restart.")
+    if fresh_state and not launch_validator:
+        parser.error("--fresh-state requires launching the validator or running scripts/run_cleanup.py --force.")
+
+    lane_count = max(1, min(10, int(args.lane_count)))
+    orchestrator_workers = (
+        _orchestrator_workers(
+            session_prefix=args.session_prefix,
+            logs_dir=logs_dir,
+            lane_count=lane_count,
+        )
+        if launch_orchestrator
+        else []
+    )
     val_session = f"{args.session_prefix}_validator"
 
     if not args.no_restart:
-        if launch_orchestrator:
-            _tmux_kill_session(orch_session)
+        for worker in orchestrator_workers:
+            _tmux_kill_session(worker.session_name)
         if launch_validator:
             _tmux_kill_session(val_session)
 
-    resume_flag = "" if args.no_resume else " --resume"
+    if fresh_state:
+        reset_shared_state(root, mission_name=mission_name)
+        clear_orchestrator_state(root)
+
+    state_flag = " --resume"
     bootstrap_flag = "" if args.allow_bootstrap else " --no-bootstrap"
     mission_q = shlex.quote(str(mission))
     agent_q = shlex.quote(str(agent_cfg))
@@ -626,22 +733,27 @@ def main() -> int:
             f"cd {root_q}; "
             "set -a; source .env; set +a; "
             f"uv run python -u scripts/research.py --mission {mission_q} --auto-mode "
-            f"--worker-agent validator{resume_flag}{bootstrap_flag} 2>&1 | tee -a results/logs/research_worker.out"
+            f"--worker-agent validator{state_flag}{bootstrap_flag} 2>&1 | tee -a results/logs/research_worker.out"
         )
         _tmux_new_session(val_session, validator_cmd)
 
-    if launch_orchestrator and not _tmux_has_session(orch_session):
+    for worker in orchestrator_workers:
+        if _tmux_has_session(worker.session_name):
+            continue
+        lane_flag = f" --lane {worker.lane_id}" if worker.lane_id else ""
         orchestrator_cmd = (
             f"cd {root_q}; "
             "set -a; source .env; set +a; "
             f"uv run python -u scripts/llm_orchestrator.py --mission {mission_q} "
-            f"--agent-config {agent_q}{resume_flag} 2>&1 | tee -a results/logs/llm_orchestrator.out"
+            f"--agent-config {agent_q}{state_flag}{lane_flag} 2>&1 | tee -a {shlex.quote(str(worker.out_path))}"
         )
-        _tmux_new_session(orch_session, orchestrator_cmd)
+        _tmux_new_session(worker.session_name, orchestrator_cmd)
 
     print(f"{GREEN}Launched workers successfully.{RESET}")
     if launch_orchestrator:
-        print(f"  orchestrator session: {orch_session}")
+        for worker in orchestrator_workers:
+            lane_label = worker.lane_id or "default"
+            print(f"  orchestrator session ({lane_label}): {worker.session_name}")
     if launch_validator:
         print(f"  validator session:    {val_session}")
     print("")
@@ -656,15 +768,19 @@ def main() -> int:
         while True:
             _render_dashboard(
                 root=root,
-                orch_session=orch_session,
-                val_session=val_session,
+                orchestrator_workers=orchestrator_workers,
+                validator_session=val_session,
                 mission=mission,
                 agent_config=agent_cfg,
                 mission_max_experiments=mission_max_experiments,
                 validator_enabled=launch_validator,
                 orchestrator_enabled=launch_orchestrator,
             )
-            orch_up = _tmux_has_session(orch_session) if launch_orchestrator else False
+            orch_up = (
+                any(_tmux_has_session(worker.session_name) for worker in orchestrator_workers)
+                if launch_orchestrator
+                else False
+            )
             val_up = _tmux_has_session(val_session) if launch_validator else False
             all_down = (not launch_orchestrator or not orch_up) and (not launch_validator or not val_up)
             if all_down:
@@ -684,7 +800,7 @@ def main() -> int:
 
         sessions_to_stop: list[str] = []
         if launch_orchestrator:
-            sessions_to_stop.append(orch_session)
+            sessions_to_stop.extend(worker.session_name for worker in orchestrator_workers)
         if launch_validator:
             sessions_to_stop.append(val_session)
 
