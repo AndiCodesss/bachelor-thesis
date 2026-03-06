@@ -586,7 +586,7 @@ export default function App() {
             </div>
           </div>
           
-          {thinkerView === 'thinker' && activeTab === 'autonomy' ? (
+          {thinkerView === 'thinker' ? (
             <div className="thinker-feed" ref={thinkerFeedRef}>
               {thinkerData && thinkerData.events.length > 0 ? (
                 thinkerData.events.map((ev, i) => {
@@ -600,7 +600,7 @@ export default function App() {
                   if (ev.type === 'tool_call') {
                     return (
                       <div key={i} className="thinker-event thinker-event-tool">
-                        <span><span className="thinker-tool-badge">{ev.tool}</span></span>
+                        <span className="thinker-tool-badge">{ev.tool}</span>
                         <span className="thinker-summary">{ev.summary}</span>
                       </div>
                     )

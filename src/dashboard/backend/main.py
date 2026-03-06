@@ -7,6 +7,8 @@ import uuid
 import os
 import sys
 import json
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 
@@ -104,9 +106,6 @@ def _get_sessions_dir() -> Path:
     slug = str(project_root).replace("/", "-").replace(" ", "-").lstrip("-")
     return projects_dir / slug
 
-SESSIONS_DIR = _get_sessions_dir()
-
-
 def _summarize_tool_input(tool_name: str, input_data: dict) -> str:
     """Compact human-readable summary of a tool call's input."""
     if tool_name == "Grep":
@@ -192,7 +191,6 @@ def _parse_thinker_events(jsonl_path: Path, max_events: int = 40) -> list[dict]:
 
 def _find_thinker_session_file() -> Optional[Path]:
     """Find JSONL open by an active 'claude -p' (thinker) process."""
-    import subprocess
     try:
         result = subprocess.run(
             ["ps", "aux"], capture_output=True, text=True, timeout=5
@@ -211,7 +209,7 @@ def _find_thinker_session_file() -> Optional[Path]:
                     try:
                         target = fd.resolve()
                         if (target.suffix == ".jsonl"
-                                and str(SESSIONS_DIR) in str(target)
+                                and str(_get_sessions_dir()) in str(target)
                                 and target.exists()):
                             return target
                     except (PermissionError, OSError):
@@ -225,9 +223,10 @@ def _find_thinker_session_file() -> Optional[Path]:
 
 def _find_fallback_session_file() -> Optional[Path]:
     """Most recently modified JSONL in sessions directory."""
-    if not SESSIONS_DIR.exists():
+    sessions_dir = _get_sessions_dir()
+    if not sessions_dir.exists():
         return None
-    files = list(SESSIONS_DIR.glob("*.jsonl"))
+    files = list(sessions_dir.glob("*.jsonl"))
     if not files:
         return None
     return max(files, key=lambda f: f.stat().st_mtime)
@@ -235,8 +234,6 @@ def _find_fallback_session_file() -> Optional[Path]:
 
 @app.get("/api/autonomy/thinker")
 def get_thinker_activity():
-    from datetime import datetime, timezone
-
     session_file = _find_thinker_session_file()
     is_active = session_file is not None
 

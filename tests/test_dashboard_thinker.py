@@ -1,11 +1,13 @@
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
+from fastapi.testclient import TestClient
 
 # Allow importing from project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.dashboard.backend.main import _summarize_tool_input, _parse_thinker_events
+from src.dashboard.backend.main import _summarize_tool_input, _parse_thinker_events, app
 
 
 def test_summarize_grep():
@@ -141,11 +143,6 @@ def test_summarize_edit():
     assert "main.py" in result
 
 
-from unittest.mock import patch
-from fastapi.testclient import TestClient
-from src.dashboard.backend.main import app
-
-
 def test_thinker_endpoint_no_active_session(tmp_path):
     """Returns empty events when no thinker session found."""
     with patch("src.dashboard.backend.main._find_thinker_session_file", return_value=None), \
@@ -162,7 +159,6 @@ def test_thinker_endpoint_no_active_session(tmp_path):
 def test_thinker_endpoint_with_session(tmp_path):
     """Returns parsed events from an identified session file."""
     f = tmp_path / "abc123.jsonl"
-    import json as _json
     entry = {
         "type": "assistant",
         "message": {
@@ -170,7 +166,7 @@ def test_thinker_endpoint_with_session(tmp_path):
             "content": [{"type": "text", "text": "Analyzing value area features."}]
         }
     }
-    f.write_text(_json.dumps(entry) + "\n")
+    f.write_text(json.dumps(entry) + "\n")
 
     with patch("src.dashboard.backend.main._find_thinker_session_file", return_value=f):
         client = TestClient(app)
