@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from src.framework.features_canonical.ohlcv_indicators import (
     compute_ohlcv_indicators,
     OHLCV_INDICATOR_COLUMNS,
+    OBV_SLOPE_PERIOD,
 )
 
 
@@ -480,3 +481,20 @@ def test_obv_slope_scale_invariant_directional_flow():
     if len(valid) > 0:
         tail = valid.tail(10)["obv_slope_14"]
         assert (tail > 0.9).all(), "OBV slope should remain near +1 under persistent buy flow"
+
+
+def test_obv_slope_resets_each_session():
+    """Day-two OBV slope should not become valid from prior-session accumulation."""
+    n_per_session = max(2, OBV_SLOPE_PERIOD - 1)
+    day1 = [datetime(2024, 7, 15, 13, 30) + timedelta(minutes=5 * i) for i in range(n_per_session)]
+    day2 = [datetime(2024, 7, 16, 13, 30) + timedelta(minutes=5 * i) for i in range(n_per_session)]
+    timestamps = day1 + day2
+    closes = [100.0 + i for i in range(len(timestamps))]
+    bars = _make_bars(timestamps, closes, volumes=[1000] * len(timestamps))
+    result = compute_ohlcv_indicators(bars)
+
+    day2_values = result.tail(n_per_session)["obv_slope_14"].to_list()
+    assert all(abs(float(v)) < 1e-12 for v in day2_values), (
+        "Session-local OBV slope should stay neutral until the current session "
+        "has enough bars for its own lookback"
+    )

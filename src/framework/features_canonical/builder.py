@@ -95,7 +95,9 @@ RAW_PRICE_COLUMNS = [
     "or_high", "or_low",
 ]
 
-# Session-level VP features — use full-day data = lookahead bias for bars before session end
+# Session-level VP shape features. These are causal expanding-session metrics,
+# so they are valid ML features even though the raw VP price levels remain
+# excluded as non-stationary prices.
 SESSION_VP_COLUMNS = [
     "poc_distance", "poc_distance_raw", "va_width", "position_in_va",
     "vp_skew", "vp_kurtosis", "hvn_count",
@@ -127,7 +129,6 @@ NON_FEATURE_COLUMNS = (
     + BAR_META_COLUMNS
     + RAW_FLOW_COLUMNS
     + RAW_PRICE_COLUMNS
-    + SESSION_VP_COLUMNS
     + LABEL_COLUMNS
 )
 

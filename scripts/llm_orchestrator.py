@@ -34,6 +34,7 @@ from research.lib.llm_client import (
     extract_json_object,
 )
 from research.lib.mission_splits import resolve_research_splits
+from research.lib.notebook_audit import notebook_audit_context, summarize_notebook_queries
 from research.lib.runtime_state import (
     ensure_orchestrator_state,
     ensure_shared_state,
@@ -502,8 +503,13 @@ def _collect_feedback_items_from_handoffs(
                 "pass_count": result.get("pass_count"),
                 "fail_count": result.get("fail_count"),
                 "error_count": result.get("error_count"),
+                "pass_fraction": result.get("pass_fraction"),
                 "avg_sharpe_ratio": result.get("avg_sharpe_ratio"),
                 "avg_trade_count": result.get("avg_trade_count"),
+                "passing_bar_configs": result.get("passing_bar_configs"),
+                "failing_bar_configs": result.get("failing_bar_configs"),
+                "best_bar_config": result.get("best_bar_config"),
+                "best_sharpe_ratio": result.get("best_sharpe_ratio"),
             },
         )
         if len(items) >= max_items:
@@ -640,6 +646,20 @@ def _extract_factor_verdict(advanced_validation: dict[str, Any]) -> str | None:
     return verdict or None
 
 
+def _default_notebook_summary(*, configured: bool) -> dict[str, Any]:
+    return {
+        "configured": bool(configured),
+        "used": False,
+        "query_count": 0,
+        "success_count": 0,
+        "error_count": 0,
+        "modes_used": [],
+        "mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
+        "imported_sources": 0,
+        "question_previews": [],
+    }
+
+
 def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
     """Format raw feedback items into a compact results table for the thinker."""
     if not feedback_items:
@@ -678,6 +698,13 @@ def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
             failed_checks = [str(x) for x in (r.get("failed_checks") or []) if str(x)]
             if failed_checks:
                 diagnostics.append("fails=" + ",".join(failed_checks[:3]))
+            pass_count = r.get("pass_count")
+            task_count = r.get("task_count")
+            if isinstance(pass_count, (int, float)) and isinstance(task_count, (int, float)) and float(task_count) > 1:
+                diagnostics.append(f"bars={int(pass_count)}/{int(task_count)}")
+            best_bar_config = str(r.get("best_bar_config", "")).strip()
+            if best_bar_config:
+                diagnostics.append(f"best={best_bar_config}")
             dsr = r.get("dsr")
             if dsr is not None:
                 diagnostics.append(f"dsr={float(dsr):.2f}")
@@ -1086,7 +1113,7 @@ def _build_runtime_context(
             "shuffle",
             "walk_forward",
             "regime",
-            "param_sensitivity",
+            "signal_perturbation",
             "cost_sensitivity",
             "decay",
             "trade_count",
@@ -1198,7 +1225,7 @@ def _build_thinker_system_prompt() -> str:
         "- Do not assume ETH, validate-only, or any fixed month range unless the runtime context explicitly says so.\n\n"
         "PASS CRITERIA:\n"
         "- Satisfy the mission target_sharpe and min_trade_count from the runtime context, plus a gauntlet pass.\n"
-        "- Gauntlet coverage includes shuffle, walk-forward, regime, parameter sensitivity, cost sensitivity, decay, and trade-count checks.\n\n"
+        "- Gauntlet coverage includes shuffle, walk-forward, regime, signal perturbation, cost sensitivity, decay, and trade-count checks.\n\n"
         "ANTI-LOOKAHEAD RULES (non-negotiable):\n"
         "- Never reference bar N+1 or later. Only use current bar (index i) and past bars.\n"
         "- shift(1) means shift FORWARD in time (previous bar value) — safe. shift(-1) means FUTURE — forbidden.\n"
@@ -2079,6 +2106,7 @@ def main() -> int:
     print(f"max_iterations={max_iterations} dry_run={bool(args.dry_run)}")
 
     stop_reason = "max_iterations_reached"
+    notebooklm_configured = bool(str(mission.get("notebooklm_notebook_url", "")).strip())
     while iterations_done < max_iterations:
         if max_runtime_hours is not None:
             elapsed = (time.monotonic() - start_monotonic) / 3600.0
@@ -2106,6 +2134,7 @@ def main() -> int:
 
         iteration_no = iterations_done + 1
         print(f"[iteration {iteration_no}/{max_iterations}] running thinker->coder pipeline")
+        notebook_summary = _default_notebook_summary(configured=notebooklm_configured)
 
         try:
             thinker_user_prompt = _build_thinker_user_prompt(
@@ -2115,46 +2144,62 @@ def main() -> int:
                 runtime_context=runtime_context,
                 feature_knowledge=feature_knowledge,
             )
-            thinker_generation = _call_stage_json(
-                stage_name="quant_thinker",
-                schema_hint=(
-                    "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
-                    "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
-                ),
-                client=thinker_client,
-                system_prompt=_build_thinker_system_prompt(),
-                user_prompt=thinker_user_prompt,
-                temperature=float(thinker_role["temperature"]),
-                max_output_tokens=int(thinker_role["max_output_tokens"]),
-                max_attempts=stage_max_attempts,
-                json_repair_attempts=json_repair_attempts,
-                stage_backoff_seconds=stage_backoff_seconds,
-                quota_backoff_seconds=quota_backoff_seconds,
-                max_backoff_seconds=max_backoff_seconds,
-            )
-            thinker_brief, thinker_generation = _normalize_with_semantic_retry(
-                stage_name="quant_thinker",
-                stage_result=thinker_generation,
-                normalize_fn=lambda payload: _normalize_thinker_brief(
-                    payload,
-                    mission_bar_configs=mission_bar_configs,
-                ),
-                client=thinker_client,
-                system_prompt=_build_thinker_system_prompt(),
-                base_user_prompt=thinker_user_prompt,
-                temperature=float(thinker_role["temperature"]),
-                max_output_tokens=int(thinker_role["max_output_tokens"]),
-                max_semantic_retries=semantic_retry_attempts,
-                max_attempts=stage_max_attempts,
-                json_repair_attempts=json_repair_attempts,
-                stage_backoff_seconds=stage_backoff_seconds,
-                quota_backoff_seconds=quota_backoff_seconds,
-                max_backoff_seconds=max_backoff_seconds,
-                schema_hint=(
-                    "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
-                    "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
-                ),
-            )
+            with notebook_audit_context(
+                run_id=run_id,
+                iteration=iteration_no,
+                stage="quant_thinker",
+                lane_id=lane_id,
+            ):
+                thinker_generation = _call_stage_json(
+                    stage_name="quant_thinker",
+                    schema_hint=(
+                        "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                        "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
+                    ),
+                    client=thinker_client,
+                    system_prompt=_build_thinker_system_prompt(),
+                    user_prompt=thinker_user_prompt,
+                    temperature=float(thinker_role["temperature"]),
+                    max_output_tokens=int(thinker_role["max_output_tokens"]),
+                    max_attempts=stage_max_attempts,
+                    json_repair_attempts=json_repair_attempts,
+                    stage_backoff_seconds=stage_backoff_seconds,
+                    quota_backoff_seconds=quota_backoff_seconds,
+                    max_backoff_seconds=max_backoff_seconds,
+                )
+                thinker_brief, thinker_generation = _normalize_with_semantic_retry(
+                    stage_name="quant_thinker",
+                    stage_result=thinker_generation,
+                    normalize_fn=lambda payload: _normalize_thinker_brief(
+                        payload,
+                        mission_bar_configs=mission_bar_configs,
+                    ),
+                    client=thinker_client,
+                    system_prompt=_build_thinker_system_prompt(),
+                    base_user_prompt=thinker_user_prompt,
+                    temperature=float(thinker_role["temperature"]),
+                    max_output_tokens=int(thinker_role["max_output_tokens"]),
+                    max_semantic_retries=semantic_retry_attempts,
+                    max_attempts=stage_max_attempts,
+                    json_repair_attempts=json_repair_attempts,
+                    stage_backoff_seconds=stage_backoff_seconds,
+                    quota_backoff_seconds=quota_backoff_seconds,
+                    max_backoff_seconds=max_backoff_seconds,
+                    schema_hint=(
+                        "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                        "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
+                    ),
+                )
+            if notebooklm_configured:
+                notebook_summary = _default_notebook_summary(configured=True)
+                notebook_summary.update(
+                    summarize_notebook_queries(
+                        run_id=run_id,
+                        iteration=iteration_no,
+                        stage="quant_thinker",
+                        lane_id=lane_id,
+                    ),
+                )
             thinker_hash = _sha256_text(
                 json.dumps(thinker_brief, sort_keys=True, separators=(",", ":")),
             )[:16]
@@ -2360,6 +2405,7 @@ def main() -> int:
                             "repaired": bool(_last_coder_generation.repaired),
                             "payload_hash": _sha256_text(_last_coder_generation.raw_text),
                         },
+                        "notebooklm": notebook_summary,
                     },
                     experiments_path=orchestrator_log_path,
                     lock_path=orchestrator_log_lock,
@@ -2450,6 +2496,7 @@ def main() -> int:
                             "repaired": bool(_last_coder_generation.repaired),
                             "payload_hash": _sha256_text(_last_coder_generation.raw_text),
                         },
+                        "notebooklm": notebook_summary,
                         "feature_knowledge_hash": feature_knowledge_hash,
                         "code_hash": code_hash,
                         "dry_run": bool(args.dry_run),
@@ -2464,6 +2511,16 @@ def main() -> int:
 
         except (LLMClientError, ValueError, RuntimeError) as exc:
             trace = traceback.format_exc()
+            if notebooklm_configured:
+                notebook_summary = _default_notebook_summary(configured=True)
+                notebook_summary.update(
+                    summarize_notebook_queries(
+                        run_id=run_id,
+                        iteration=iteration_no,
+                        stage="quant_thinker",
+                        lane_id=lane_id,
+                    ),
+                )
             log_experiment(
                 {
                     "run_id": run_id,
@@ -2472,6 +2529,7 @@ def main() -> int:
                     "iteration": iteration_no,
                     "error": f"{type(exc).__name__}: {exc}",
                     "traceback": trace,
+                    "notebooklm": notebook_summary,
                 },
                 experiments_path=orchestrator_log_path,
                 lock_path=orchestrator_log_lock,

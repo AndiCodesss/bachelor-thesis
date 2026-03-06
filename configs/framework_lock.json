@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-05T09:16:58.850057+00:00",
+  "generated_at": "2026-03-06T18:48:15.895291+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 28,
   "files": [
@@ -16,18 +16,18 @@
     },
     {
       "path": "src/framework/backtest/engine.py",
-      "sha256": "4a532b408fd14a14e4640d49e55f22f3f93d8b2b447739c78495b0f316e6d23b",
-      "size_bytes": 15480
+      "sha256": "d2e073c988ff700e9cc2b1361d12b16e804fb778348ddf1635c7f04c775005ce",
+      "size_bytes": 15575
     },
     {
       "path": "src/framework/backtest/metrics.py",
-      "sha256": "dfec9a2b1b4c5d07af4089c5506663d8215264440bd2575c813998e7016c3255",
-      "size_bytes": 6572
+      "sha256": "fcb88043099b938ea24cd16de500c706e154f1339a171a3c72113388df3b5354",
+      "size_bytes": 7083
     },
     {
       "path": "src/framework/backtest/validators.py",
-      "sha256": "a2d70361b3e58a27dc2e8949ca5b94268b0b33ad89e0253c29e594ba96f79ce3",
-      "size_bytes": 16155
+      "sha256": "fb63eca732a166a7b23843d61a333a46b3d9ec6e59fe903e24b7d7bebdfe1678",
+      "size_bytes": 17843
     },
     {
       "path": "src/framework/data/bars.py",
@@ -61,8 +61,8 @@
     },
     {
       "path": "src/framework/features_canonical/builder.py",
-      "sha256": "d5a5253b990c637ed6ea74bfe29bd036ee9df5581749417a7ca7c903123b44f2",
-      "size_bytes": 27030
+      "sha256": "148f1f24957680748d39b2d4e2b7e67ec87d0042e788ae65c4c5229b582c75f9",
+      "size_bytes": 26669
     },
     {
       "path": "src/framework/features_canonical/footprint.py",
@@ -91,8 +91,8 @@
     },
     {
       "path": "src/framework/features_canonical/ohlcv_indicators.py",
-      "sha256": "0a11e4994e728825e85115856da201700b0d79e72408870e5f9449785bd29e71",
-      "size_bytes": 9985
+      "sha256": "9b44aaae5c55b11d969cdecaeceb61a3c77992900be7207915eea8a4b177c967",
+      "size_bytes": 10393
     },
     {
       "path": "src/framework/features_canonical/opening_range.py",
@@ -106,8 +106,8 @@
     },
     {
       "path": "src/framework/features_canonical/pipeline.py",
-      "sha256": "f2bb8adc25c36b4d42f2c1e450a5975b015dd0e7d4fb3664b63311d8a187b6c4",
-      "size_bytes": 22252
+      "sha256": "2c5d2c98f06246b075c3826431c9dddb86038d6d30c0b1a0af16609d235695ee",
+      "size_bytes": 23209
     },
     {
       "path": "src/framework/features_canonical/statistical.py",
@@ -131,13 +131,13 @@
     },
     {
       "path": "src/framework/validation/alpha_decay.py",
-      "sha256": "423dc49462b51a1164582afc827578893795955ce467798cdf02d10aa98b52b4",
-      "size_bytes": 5310
+      "sha256": "98ae9aefce5d9d9ed8c0f3977661a994e0c5a3f9806b30c2c080d77c9eadc5e7",
+      "size_bytes": 5219
     },
     {
       "path": "src/framework/validation/factor_attribution.py",
-      "sha256": "27e960d90ad6b65c571092333874d66bd7ac23eb607d5b4d7c5f75150ba25986",
-      "size_bytes": 6810
+      "sha256": "8326a0d3590ca388c645d00a2a4d524c26376b4f111f3e460db0db76a8546b65",
+      "size_bytes": 7741
     },
     {
       "path": "src/framework/validation/robustness.py",

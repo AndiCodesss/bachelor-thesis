@@ -45,20 +45,42 @@ def compute_pipeline_features(df: pl.DataFrame) -> pl.DataFrame:
         .alias("regime_vol_relative")
     )
 
-    # Regime autocorrelation: rolling correlation of returns with lagged returns
-    # Positive = trending, negative = mean-reverting/choppy
-    df = df.with_columns(
-        pl.col("return_1bar").shift(1).alias("_return_lag1")
-    )
-    df = df.with_columns(
-        pl.rolling_corr(
-            pl.col("return_1bar"),
-            pl.col("_return_lag1"),
-            window_size=REGIME_AUTOCORR_WINDOW,
-            min_samples=REGIME_AUTOCORR_MIN_SAMPLES,
-        ).alias("regime_autocorr")
-    )
-    df = df.drop("_return_lag1")
+    # Regime autocorrelation: rolling correlation of returns with lagged returns.
+    # When timestamps are available, keep the lag/window session-local so the
+    # first bar of a new session does not inherit overnight returns.
+    if "ts_event" in df.columns:
+        df = df.with_columns(
+            pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_regime_date")
+        )
+        df = df.with_columns(
+            pl.col("return_1bar").shift(1).over("_regime_date").alias("_return_lag1")
+        )
+        df = df.with_columns(
+            pl.rolling_corr(
+                pl.col("return_1bar"),
+                pl.col("_return_lag1"),
+                window_size=REGIME_AUTOCORR_WINDOW,
+                min_samples=REGIME_AUTOCORR_MIN_SAMPLES,
+            )
+            .over("_regime_date")
+            .alias("regime_autocorr")
+        )
+        df = df.drop(["_return_lag1", "_regime_date"])
+    else:
+        # Synthetic/unit-test inputs may omit timestamps; fall back to
+        # whole-frame behavior in that case.
+        df = df.with_columns(
+            pl.col("return_1bar").shift(1).alias("_return_lag1")
+        )
+        df = df.with_columns(
+            pl.rolling_corr(
+                pl.col("return_1bar"),
+                pl.col("_return_lag1"),
+                window_size=REGIME_AUTOCORR_WINDOW,
+                min_samples=REGIME_AUTOCORR_MIN_SAMPLES,
+            ).alias("regime_autocorr")
+        )
+        df = df.drop("_return_lag1")
 
     # Interaction cross-terms
     # ix_ofi_x_vol: flow matters more in high vol

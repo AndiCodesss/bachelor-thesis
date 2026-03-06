@@ -166,3 +166,24 @@ def test_signal_causality_stateful_strategies_receive_fresh_state_per_invocation
         min_prefix_bars=8,
     )
     assert errors == []
+
+
+def test_signal_causality_requires_deepcopyable_state() -> None:
+    class _NonDeepcopyable(dict):
+        def __deepcopy__(self, memo):
+            raise RuntimeError("cannot clone")
+
+    def _stateful_signal(df: pl.DataFrame, _params: dict, model_state: dict) -> np.ndarray:
+        model_state["seen"] = len(df)
+        return np.zeros(len(df), dtype=np.int8)
+
+    errors = check_signal_causality(
+        generate_fn=_stateful_signal,
+        df=_df(96),
+        params={},
+        accepts_state=True,
+        model_state=_NonDeepcopyable(),
+        mode="strict",
+        min_prefix_bars=8,
+    )
+    assert errors == ["model_state must be deepcopyable for causality checks"]

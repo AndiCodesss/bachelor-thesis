@@ -161,6 +161,33 @@ def test_regime_autocorr_alternating():
     assert last_val < 0, f"Expected negative autocorr for alternating returns, got {last_val}"
 
 
+def test_regime_autocorr_resets_at_session_boundary():
+    """Lagged-return autocorr must not borrow samples from the prior session."""
+    day1 = [datetime(2024, 7, 15, 13, 30 + 5 * i) for i in range(6)]
+    day2 = [datetime(2024, 7, 16, 13, 30 + 5 * i) for i in range(6)]
+    returns = [0.001, 0.0012, 0.0014, 0.0016, 0.0018, 0.0020, 0.001, -0.001, 0.001, -0.001, 0.001, -0.001]
+    df = pl.DataFrame({
+        "ts_event": day1 + day2,
+        "open": [21000.0 + i for i in range(12)],
+        "high": [21001.0 + i for i in range(12)],
+        "low": [20999.0 + i for i in range(12)],
+        "close": [21000.5 + i for i in range(12)],
+        "range_ma5": [0.001] * 12,
+        "return_1bar": returns,
+        "order_flow_imbalance": [100.0] * 12,
+        "spread_bps": [1.5] * 12,
+        "book_imbalance": [0.2] * 12,
+        "volume_delta": [50] * 12,
+    }).with_columns(
+        pl.col("ts_event").dt.replace_time_zone("UTC"),
+    )
+
+    result = compute_pipeline_features(df)
+
+    assert result["regime_autocorr"][6] is None, "First bar of a new session must reset autocorr lag"
+    assert result["regime_autocorr"][-1] < 0, "Day-two autocorr should reflect only day-two returns"
+
+
 def test_ix_ofi_x_vol_product():
     """ix_ofi_x_vol = order_flow_imbalance * range_ma5."""
     df = _make_matrix(5, order_flow_imbalance=[200.0] * 5, range_ma5=[0.002] * 5)

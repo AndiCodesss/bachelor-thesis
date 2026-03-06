@@ -852,6 +852,25 @@ def test_entry_on_next_open_pending_signal_expires_without_next_bar():
     assert len(trades) == 0
 
 
+def test_exit_bars_counts_fill_bar_in_next_open_mode():
+    """In next-open mode, exit_bars counts bars while the trade is live."""
+    start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(6)]
+    opens = [18000.0, 18010.0, 18020.0, 18030.0, 18040.0, 18050.0]
+    closes = [18005.0, 18015.0, 18025.0, 18035.0, 18045.0, 18055.0]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+    signals = [1, 1, 1, 1, 0, 0]
+
+    df = create_test_df(timestamps, closes, signals, highs=highs, lows=lows, opens=opens)
+    trades = run_backtest(df, entry_on_next_open=True, exit_bars=3)
+
+    assert len(trades) == 1
+    trade = trades.row(0, named=True)
+    assert trade["entry_time"] == timestamps[1]
+    assert trade["exit_time"] == timestamps[3]
+
+
 def test_default_mode_does_not_open_new_position_on_session_last_bar():
     """entry_on_next_open=False must not open on the terminal bar and carry overnight."""
     day1_start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)

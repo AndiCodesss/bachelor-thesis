@@ -140,6 +140,53 @@ def test_collect_feedback_items_from_handoffs_reads_completed_results(tmp_path: 
     assert out[0]["overall_verdict"] == "FAIL"
 
 
+def test_collect_feedback_items_from_handoffs_preserves_family_summary_fields(tmp_path: Path):
+    mod = _load_module()
+    handoffs = tmp_path / "handoffs.json"
+    handoffs.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "pending": [],
+                "completed": [
+                    {
+                        "handoff_type": "validation_request",
+                        "payload": {
+                            "strategy_name": "alpha_mix",
+                            "hypothesis_id": "h_mix",
+                        },
+                        "result": {
+                            "overall_verdict": "MIXED",
+                            "task_count": 3,
+                            "pass_count": 1,
+                            "fail_count": 2,
+                            "error_count": 0,
+                            "pass_fraction": 1 / 3,
+                            "avg_sharpe_ratio": 0.4,
+                            "avg_trade_count": 18,
+                            "passing_bar_configs": ["tick_610"],
+                            "failing_bar_configs": ["time_1m", "volume_2000"],
+                            "best_bar_config": "tick_610",
+                            "best_sharpe_ratio": 1.2,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = mod._collect_feedback_items_from_handoffs(
+        handoffs,
+        handoffs.with_suffix(".lock"),
+        max_items=4,
+    )
+    assert out[0]["overall_verdict"] == "MIXED"
+    assert out[0]["pass_count"] == 1
+    assert out[0]["task_count"] == 3
+    assert out[0]["best_bar_config"] == "tick_610"
+
+
 def test_choose_module_path_versions_when_content_differs(tmp_path: Path):
     mod = _load_module()
     signals_dir = tmp_path
@@ -407,6 +454,7 @@ def test_thinker_system_prompt_uses_runtime_context_not_stale_session_claims():
     assert "prior session volume. VAH = va_high" not in prompt
     assert "Do not assume ETH" in prompt
     assert "target_sharpe and min_trade_count" in prompt
+    assert "signal perturbation" in prompt
 
 
 def test_thinker_user_prompt_omits_notebook_command_when_no_url():
@@ -520,6 +568,16 @@ def test_merged_feedback_includes_all_sources(tmp_path: Path):
     assert "validation_result" in events
     assert "task_error" in events
     assert "generation_rejected" in events
+
+
+def test_default_notebook_summary_marks_configuration_state():
+    mod = _load_module()
+    configured = mod._default_notebook_summary(configured=True)
+    unconfigured = mod._default_notebook_summary(configured=False)
+    assert configured["configured"] is True
+    assert configured["used"] is False
+    assert configured["query_count"] == 0
+    assert unconfigured["configured"] is False
 
 
 def test_merged_feedback_works_when_some_sources_empty(tmp_path: Path):

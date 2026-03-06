@@ -529,6 +529,80 @@ def test_finalize_ready_validation_handoffs_uses_search_feedback_not_final_selec
     assert resolved[0]["result"]["tasks"][0]["final_verdict"] == "FAIL"
 
 
+def test_finalize_ready_validation_handoffs_marks_mixed_multi_bar_results(
+    tmp_path: Path,
+):
+    mod = _load_runner_module()
+    queue_path = tmp_path / "queue.json"
+    queue_lock = tmp_path / "queue.lock"
+    handoffs_path = tmp_path / "handoffs.json"
+    handoffs_lock = tmp_path / "handoffs.lock"
+
+    queue_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "t1",
+                        "state": "completed",
+                        "verdict": "PASS",
+                        "strategy_name": "alpha_mix",
+                        "bar_config": "tick_610",
+                        "completed_at": "2026-01-01T00:01:00+00:00",
+                        "details": {"metrics": {"sharpe_ratio": 1.6, "trade_count": 32, "net_pnl": 150.0}},
+                    },
+                    {
+                        "task_id": "t2",
+                        "state": "failed",
+                        "verdict": "FAIL",
+                        "strategy_name": "alpha_mix",
+                        "bar_config": "time_1m",
+                        "completed_at": "2026-01-01T00:02:00+00:00",
+                        "details": {"metrics": {"sharpe_ratio": -0.2, "trade_count": 18, "net_pnl": -20.0}},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handoffs_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "pending": [
+                    {
+                        "handoff_id": "h_mix",
+                        "handoff_type": "validation_request",
+                        "payload": {
+                            "strategy_name": "alpha_mix",
+                            "hypothesis_id": "h_mix",
+                            "task_ids": ["t1", "t2"],
+                        },
+                    }
+                ],
+                "completed": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = mod._finalize_ready_validation_handoffs(
+        queue_path=queue_path,
+        queue_lock=queue_lock,
+        handoffs_path=handoffs_path,
+        handoffs_lock=handoffs_lock,
+    )
+
+    assert len(resolved) == 1
+    summary = resolved[0]["result"]
+    assert summary["overall_verdict"] == "MIXED"
+    assert summary["pass_fraction"] == 0.5
+    assert summary["passing_bar_configs"] == ["tick_610"]
+    assert summary["failing_bar_configs"] == ["time_1m"]
+    assert summary["best_bar_config"] == "tick_610"
+
+
 def test_execute_claimed_task_gauntlet_respects_metric_thresholds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -232,11 +232,17 @@ def regime_test(df: pl.DataFrame, signal_col: str = "signal", **backtest_kwargs)
     }
 
 
-def param_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", perturbation: float = 0.1, **backtest_kwargs) -> dict:
-    """Test if small parameter changes break the signal (overfitting detection).
+def signal_perturbation_test(
+    df: pl.DataFrame,
+    signal_col: str = "signal",
+    perturbation: float = 0.1,
+    **backtest_kwargs,
+) -> dict:
+    """Test whether small signal perturbations destroy observed edge.
 
-    Perturbs only non-zero signal bars (the actual trades) to avoid injecting
-    noise trades into sparse signals. Flips 10% of active signal bars.
+    This is intentionally a signal-fragility stress test, not a parameter-rerun
+    stability test. It perturbs only non-zero signal bars (the actual trades)
+    to avoid injecting noise trades into sparse signals.
 
     Args:
         df: DataFrame with ts_event, close, and signal columns
@@ -303,6 +309,21 @@ def param_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", perturb
         "perturbed_std": perturbed_std,
         "degradation_pct": float(degradation_pct),
     }
+
+
+def param_sensitivity_test(
+    df: pl.DataFrame,
+    signal_col: str = "signal",
+    perturbation: float = 0.1,
+    **backtest_kwargs,
+) -> dict:
+    """Backward-compatible alias for the renamed signal perturbation test."""
+    return signal_perturbation_test(
+        df,
+        signal_col=signal_col,
+        perturbation=perturbation,
+        **backtest_kwargs,
+    )
 
 
 def cost_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", **backtest_kwargs) -> dict:
@@ -445,7 +466,7 @@ def run_validation_gauntlet(
         "shuffle": shuffle_test(df, signal_col, **backtest_kwargs),
         "walk_forward": walk_forward_test(df, signal_col, **backtest_kwargs),
         "regime": regime_test(df, signal_col, **backtest_kwargs),
-        "param_sensitivity": param_sensitivity_test(df, signal_col, **backtest_kwargs),
+        "signal_perturbation": signal_perturbation_test(df, signal_col, **backtest_kwargs),
         "cost_sensitivity": cost_sensitivity_test(df, signal_col, **backtest_kwargs),
         "decay": decay_test(df, signal_col, **backtest_kwargs),
         "trade_count": trade_count_test(df, signal_col, min_trades=min_trades, **backtest_kwargs),

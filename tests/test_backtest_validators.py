@@ -10,6 +10,7 @@ from src.framework.backtest.validators import (
     walk_forward_test,
     regime_test,
     param_sensitivity_test,
+    signal_perturbation_test,
     cost_sensitivity_test,
     decay_test,
     trade_count_test,
@@ -236,10 +237,10 @@ def test_regime_test_excludes_sparse_days_from_regime_buckets(monkeypatch: pytes
         assert sparse_date not in bucket_dates
 
 
-def test_param_sensitivity_test_perfect_signal():
-    """Perfect signal should PASS param sensitivity test."""
+def test_signal_perturbation_test_perfect_signal():
+    """Perfect signal should PASS signal perturbation test."""
     df = create_synthetic_data(n_bars=500, n_days=3, perfect_signal=True)
-    result = param_sensitivity_test(df, signal_col="signal", perturbation=0.1)
+    result = signal_perturbation_test(df, signal_col="signal", perturbation=0.1)
 
     assert result["verdict"] == "PASS", "Perfect signal should degrade gracefully"
     assert result["perturbed_mean"] >= 0.5 * result["baseline_sharpe"], "Perturbed mean should be >= 50% of baseline"
@@ -247,7 +248,7 @@ def test_param_sensitivity_test_perfect_signal():
     assert isinstance(result["perturbed_std"], float)
 
 
-def test_param_sensitivity_handles_nan_sharpe_values(monkeypatch: pytest.MonkeyPatch):
+def test_signal_perturbation_handles_nan_sharpe_values(monkeypatch: pytest.MonkeyPatch):
     df = create_synthetic_data(n_bars=20, n_days=2, perfect_signal=False)
     calls = {"n": 0}
 
@@ -263,10 +264,17 @@ def test_param_sensitivity_handles_nan_sharpe_values(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
     monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
 
-    result = validators_mod.param_sensitivity_test(df, signal_col="signal", perturbation=0.1)
+    result = validators_mod.signal_perturbation_test(df, signal_col="signal", perturbation=0.1)
     assert np.isfinite(result["perturbed_mean"])
     assert np.isfinite(result["perturbed_std"])
     assert np.isfinite(result["degradation_pct"])
+
+
+def test_param_sensitivity_alias_matches_signal_perturbation():
+    df = create_synthetic_data(n_bars=200, n_days=2, perfect_signal=True)
+    aliased = param_sensitivity_test(df, signal_col="signal", perturbation=0.1)
+    renamed = signal_perturbation_test(df, signal_col="signal", perturbation=0.1)
+    assert aliased == renamed
 
 
 def test_cost_sensitivity_test_perfect_signal():
@@ -373,7 +381,7 @@ def test_run_validation_gauntlet_structure():
     assert "shuffle" in result
     assert "walk_forward" in result
     assert "regime" in result
-    assert "param_sensitivity" in result
+    assert "signal_perturbation" in result
     assert "cost_sensitivity" in result
     assert "decay" in result
     assert "trade_count" in result
@@ -386,7 +394,7 @@ def test_run_validation_gauntlet_structure():
     assert 0 <= result["pass_count"] <= 7
 
     # All validators should return verdict
-    for key in ["shuffle", "walk_forward", "regime", "param_sensitivity", "cost_sensitivity", "decay", "trade_count"]:
+    for key in ["shuffle", "walk_forward", "regime", "signal_perturbation", "cost_sensitivity", "decay", "trade_count"]:
         assert "verdict" in result[key]
         assert result[key]["verdict"] in ["PASS", "FAIL"]
 

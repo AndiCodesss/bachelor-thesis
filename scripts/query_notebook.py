@@ -24,8 +24,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 import sys
 import time
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from research.lib.notebook_audit import log_notebook_query
 
 _RESEARCH_POLL_INTERVAL = 5    # seconds between status polls
 _FAST_RESEARCH_TIMEOUT = 300   # seconds max for fast mode (5 min)
@@ -36,15 +42,23 @@ def _notebook_id_from_url(url: str) -> str:
     return url.rstrip("/").split("/")[-1]
 
 
-async def _ask(notebook_id: str, question: str) -> str:
+async def _ask(notebook_id: str, question: str) -> tuple[str, dict[str, int | bool]]:
     from notebooklm import NotebookLMClient
 
     async with await NotebookLMClient.from_storage() as client:
         result = await client.chat.ask(notebook_id, question)
-        return result.answer
+        return result.answer, {
+            "imported_sources": 0,
+            "fallback_to_plain": False,
+        }
 
 
-async def _research_and_ask(notebook_id: str, question: str, *, mode: str) -> str:
+async def _research_and_ask(
+    notebook_id: str,
+    question: str,
+    *,
+    mode: str,
+) -> tuple[str, dict[str, int | bool]]:
     """Search the web for new sources, import them, then ask the question."""
     from notebooklm import NotebookLMClient
 
@@ -58,7 +72,10 @@ async def _research_and_ask(notebook_id: str, question: str, *, mode: str) -> st
             print("[NotebookLM: research failed to start, falling back to plain query]",
                   file=sys.stderr)
             result = await client.chat.ask(notebook_id, question)
-            return result.answer
+            return result.answer, {
+                "imported_sources": 0,
+                "fallback_to_plain": True,
+            }
 
         # 2. Poll until completed
         deadline = time.monotonic() + timeout
@@ -73,7 +90,10 @@ async def _research_and_ask(notebook_id: str, question: str, *, mode: str) -> st
             print(f"[NotebookLM: research timed out after {timeout}s, querying existing sources]",
                   file=sys.stderr)
             result = await client.chat.ask(notebook_id, question)
-            return result.answer
+            return result.answer, {
+                "imported_sources": 0,
+                "fallback_to_plain": True,
+            }
 
         # 3. Import all found sources (filter URL-less entries; deep research may produce some)
         sources = [s for s in status.get("sources", []) if s.get("url")]
@@ -82,12 +102,17 @@ async def _research_and_ask(notebook_id: str, question: str, *, mode: str) -> st
             imported = await client.research.import_sources(notebook_id, task_id, sources)
             print(f"[NotebookLM: imported {len(imported)} new source(s) into notebook]",
                   file=sys.stderr)
+            imported_count = len(imported)
         else:
             print("[NotebookLM: no new sources found to import]", file=sys.stderr)
+            imported_count = 0
 
         # 4. Ask now that sources are enriched
         result = await client.chat.ask(notebook_id, question)
-        return result.answer
+        return result.answer, {
+            "imported_sources": int(imported_count),
+            "fallback_to_plain": False,
+        }
 
 
 def main() -> None:
@@ -108,22 +133,63 @@ def main() -> None:
     args = parser.parse_args()
 
     notebook_id = _notebook_id_from_url(args.notebook_url)
+    mode = "plain"
+    if args.research:
+        mode = "research"
+    elif args.deep_research:
+        mode = "deep_research"
+    start = time.monotonic()
 
     try:
         if args.research:
-            answer = asyncio.run(_research_and_ask(notebook_id, args.question, mode="fast"))
+            answer, meta = asyncio.run(_research_and_ask(notebook_id, args.question, mode="fast"))
         elif args.deep_research:
-            answer = asyncio.run(_research_and_ask(notebook_id, args.question, mode="deep"))
+            answer, meta = asyncio.run(_research_and_ask(notebook_id, args.question, mode="deep"))
         else:
-            answer = asyncio.run(_ask(notebook_id, args.question))
+            answer, meta = asyncio.run(_ask(notebook_id, args.question))
+        try:
+            log_notebook_query(
+                notebook_id=notebook_id,
+                mode=mode,
+                question=args.question,
+                status="success",
+                duration_seconds=time.monotonic() - start,
+                answer_chars=len(answer),
+                imported_sources=int(meta.get("imported_sources", 0)),
+                fallback_to_plain=bool(meta.get("fallback_to_plain", False)),
+            )
+        except Exception:
+            pass
         print(answer)
     except FileNotFoundError:
+        try:
+            log_notebook_query(
+                notebook_id=notebook_id,
+                mode=mode,
+                question=args.question,
+                status="error",
+                duration_seconds=time.monotonic() - start,
+                error="auth_not_found",
+            )
+        except Exception:
+            pass
         print(
             "[NotebookLM: auth not found. Run 'uv run notebooklm login' to authenticate.]",
             file=sys.stderr,
         )
         sys.exit(1)
     except Exception as e:
+        try:
+            log_notebook_query(
+                notebook_id=notebook_id,
+                mode=mode,
+                question=args.question,
+                status="error",
+                duration_seconds=time.monotonic() - start,
+                error=str(e),
+            )
+        except Exception:
+            pass
         print(f"[NotebookLM query failed: {e}]", file=sys.stderr)
         sys.exit(1)
 

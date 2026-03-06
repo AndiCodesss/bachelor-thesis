@@ -51,8 +51,9 @@ def run_backtest(
         signal_col: Name of signal column
         max_daily_loss: Max loss per day in dollars, stop trading if exceeded
         exit_bars: If set, close position after N bars regardless of signal.
-            exit_bars=3 means the position is held for 3 full bars after
-            entry and exits on the close of bar T+3 (entry at bar T).
+            exit_bars counts bars while the position is live. In same-bar entry
+            mode, exit_bars=3 entered at bar T exits on the close of bar T+3.
+            In entry_on_next_open mode, the fill bar counts as bar 1 in-market.
         profit_target: If set, close when unrealized PnL (points) exceeds this.
             If DataFrame has high/low columns, checks intra-bar price action
             first. Falls back to close-based check otherwise.

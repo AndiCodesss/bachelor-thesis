@@ -9,6 +9,8 @@ import polars as pl
 
 from src.framework.data.constants import TOTAL_COST_RT
 from src.framework.validation.factor_attribution import (
+    _factor_verdict,
+    _holm_bonferroni_adjust,
     compute_factor_returns,
     factor_attribution,
 )
@@ -231,13 +233,41 @@ class TestFactorAttribution:
 
         expected_keys = {
             "available", "alpha_daily", "alpha_annualized", "alpha_t_stat",
-            "alpha_pvalue", "factor_betas", "factor_t_stats", "factor_pvalues",
+            "alpha_pvalue", "alpha_pvalue_adjusted",
+            "factor_betas", "factor_t_stats", "factor_pvalues", "factor_pvalues_adjusted",
             "r_squared", "residual_sharpe", "n_days", "verdict",
         }
         assert expected_keys.issubset(result.keys())
         assert set(result["factor_betas"].keys()) == {"market", "volatility", "momentum"}
         assert set(result["factor_t_stats"].keys()) == {"market", "volatility", "momentum"}
         assert set(result["factor_pvalues"].keys()) == {"market", "volatility", "momentum"}
+        assert set(result["factor_pvalues_adjusted"].keys()) == {"market", "volatility", "momentum"}
+        assert result["alpha_pvalue_adjusted"] >= result["alpha_pvalue"]
+
+
+def test_holm_bonferroni_adjustment_is_monotonic():
+    raw = np.array([0.01, 0.02, 0.03, 0.04])
+    adjusted = _holm_bonferroni_adjust(raw)
+    assert np.all(adjusted >= raw)
+    assert np.all(adjusted <= 1.0)
+
+
+def test_factor_verdict_returns_inconclusive_without_significant_alpha():
+    verdict = _factor_verdict(
+        r_squared=0.05,
+        alpha_pvalue_adjusted=0.25,
+        factor_pvalues_adjusted=np.array([0.4, 0.7, 0.9]),
+    )
+    assert verdict == "INCONCLUSIVE"
+
+
+def test_factor_verdict_returns_inconclusive_without_significant_factors():
+    verdict = _factor_verdict(
+        r_squared=0.35,
+        alpha_pvalue_adjusted=0.01,
+        factor_pvalues_adjusted=np.array([0.2, 0.3, 0.4]),
+    )
+    assert verdict == "INCONCLUSIVE"
 
 
 def test_factor_attribution_uses_exit_date_for_daily_pnl():

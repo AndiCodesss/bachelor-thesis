@@ -67,6 +67,8 @@ What happens:
 9. complete task with search feedback plus final selection-gated verdict/details
 10. write run summary under `results/runs/<run_id>/summary.json`
 
+Validation-request handoff summaries are search-feedback only and can resolve to `PASS`, `FAIL`, `MIXED`, or `ERROR` across multi-bar families.
+
 ## Full Autonomy (Generator + Validator)
 
 Run both processes:

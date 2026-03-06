@@ -18,15 +18,19 @@ SignalFn = Callable[..., np.ndarray]
 CAUSALITY_MIN_PREFIX_BARS = 32
 
 
+class ModelStateCloneError(TypeError):
+    """Raised when model_state cannot be isolated for causality checks."""
+
+
 def _clone_model_state(model_state: Any | None) -> Any | None:
     if model_state is None:
         return None
     try:
         return copy.deepcopy(model_state)
-    except Exception:
-        # Fallback for non-deepcopyable objects; callers should pass immutable
-        # or dict-like state for deterministic causality checks.
-        return model_state
+    except Exception as exc:
+        raise ModelStateCloneError(
+            "model_state must be deepcopyable for causality checks",
+        ) from exc
 
 
 def _invoke_generate_signal(
@@ -81,13 +85,16 @@ def check_signal_causality(
         return []
 
     if full_signal is None:
-        full_raw = _invoke_generate_signal(
-            generate_fn=generate_fn,
-            df=df,
-            params=params,
-            accepts_state=accepts_state,
-            model_state=_clone_model_state(model_state),
-        )
+        try:
+            full_raw = _invoke_generate_signal(
+                generate_fn=generate_fn,
+                df=df,
+                params=params,
+                accepts_state=accepts_state,
+                model_state=_clone_model_state(model_state),
+            )
+        except ModelStateCloneError as exc:
+            return [str(exc)]
     else:
         full_raw = np.asarray(full_signal, dtype=np.float64).reshape(-1)
 
@@ -114,13 +121,16 @@ def check_signal_causality(
 
     for cut in cuts:
         prefix_df = df[:cut]
-        prefix_raw = _invoke_generate_signal(
-            generate_fn=generate_fn,
-            df=prefix_df,
-            params=params,
-            accepts_state=accepts_state,
-            model_state=_clone_model_state(model_state),
-        )
+        try:
+            prefix_raw = _invoke_generate_signal(
+                generate_fn=generate_fn,
+                df=prefix_df,
+                params=params,
+                accepts_state=accepts_state,
+                model_state=_clone_model_state(model_state),
+            )
+        except ModelStateCloneError as exc:
+            return [str(exc)]
         if len(prefix_raw) != cut:
             return [f"prefix signal length {len(prefix_raw)} != expected {cut}"]
 

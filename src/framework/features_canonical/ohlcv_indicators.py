@@ -244,22 +244,29 @@ def compute_ohlcv_indicators(bars: pl.DataFrame) -> pl.DataFrame:
     )
 
     # --- OBV slope (rate of change over 14 bars) ---
+    # Reset OBV within each US/Eastern trading session so overnight gaps and
+    # prior-session cumulative volume do not leak into the current day.
     bars = bars.with_columns(
-        pl.when(pl.col("close") > pl.col("close").shift(1))
+        pl.col("ts_event").dt.convert_time_zone("US/Eastern").dt.date().alias("_session_date")
+    )
+    bars = bars.with_columns(
+        pl.when(pl.col("close") > pl.col("close").shift(1).over("_session_date"))
         .then(pl.col("volume").cast(pl.Float64))
-        .when(pl.col("close") < pl.col("close").shift(1))
+        .when(pl.col("close") < pl.col("close").shift(1).over("_session_date"))
         .then(-pl.col("volume").cast(pl.Float64))
         .otherwise(0.0)
         .alias("_signed_vol")
     )
     bars = bars.with_columns(
-        pl.col("_signed_vol").cum_sum().alias("_obv")
+        pl.col("_signed_vol").cum_sum().over("_session_date").alias("_obv")
     )
     bars = bars.with_columns([
-        (pl.col("_obv") - pl.col("_obv").shift(OBV_SLOPE_PERIOD)).alias("_obv_delta"),
+        (pl.col("_obv") - pl.col("_obv").shift(OBV_SLOPE_PERIOD).over("_session_date"))
+        .alias("_obv_delta"),
         pl.col("_signed_vol")
         .abs()
         .rolling_sum(window_size=OBV_SLOPE_PERIOD, min_samples=OBV_SLOPE_PERIOD)
+        .over("_session_date")
         .alias("_obv_abs_flow"),
     ])
     bars = bars.with_columns(

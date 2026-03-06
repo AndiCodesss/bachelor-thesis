@@ -20,6 +20,44 @@ def _normal_cdf(x: float) -> float:
     return 0.5 * math.erfc(-x / math.sqrt(2.0))
 
 
+def _holm_bonferroni_adjust(p_values: np.ndarray) -> np.ndarray:
+    """Return Holm-Bonferroni adjusted p-values."""
+    n = len(p_values)
+    if n == 0:
+        return p_values
+
+    order = np.argsort(p_values)
+    adjusted = np.empty(n, dtype=np.float64)
+    running_max = 0.0
+    for rank, idx in enumerate(order):
+        candidate = float(p_values[idx]) * (n - rank)
+        running_max = max(running_max, candidate)
+        adjusted[idx] = min(running_max, 1.0)
+    return adjusted
+
+
+def _significance_p_threshold() -> float:
+    """Two-sided p-value implied by the configured t-stat significance bar."""
+    return 2.0 * (1.0 - _normal_cdf(FACTOR_SIGNIFICANCE_THRESHOLD))
+
+
+def _factor_verdict(
+    *,
+    r_squared: float,
+    alpha_pvalue_adjusted: float,
+    factor_pvalues_adjusted: np.ndarray,
+) -> str:
+    """Classify attribution outcome from corrected significance and explained variance."""
+    alpha_significant = float(alpha_pvalue_adjusted) <= _significance_p_threshold()
+    any_factor_significant = np.any(factor_pvalues_adjusted <= _significance_p_threshold())
+
+    if r_squared < FACTOR_R2_THRESHOLD and alpha_significant:
+        return "PURE_ALPHA"
+    if r_squared >= FACTOR_R2_THRESHOLD and any_factor_significant:
+        return "FACTOR_EXPOSED"
+    return "INCONCLUSIVE"
+
+
 def compute_factor_returns(bars: pl.DataFrame) -> pl.DataFrame:
     """Compute daily factor returns from OHLCV bars.
 
@@ -144,6 +182,7 @@ def factor_attribution(
     # t-statistics and p-values
     t_stats = np.where(se > 1e-12, coeffs / se, 0.0)
     p_values = np.array([2.0 * (1.0 - _normal_cdf(abs(float(t)))) for t in t_stats])
+    p_values_adjusted = _holm_bonferroni_adjust(p_values)
 
     # Residual Sharpe (annualized)
     resid_std = float(np.std(resid, ddof=1)) if n_days > 1 else 0.0
@@ -153,16 +192,11 @@ def factor_attribution(
     # Annualized alpha
     alpha_annualized = alpha_daily * 252.0
 
-    # Verdict
-    alpha_t = float(t_stats[0])
-    any_factor_sig = any(abs(float(t_stats[i])) > FACTOR_SIGNIFICANCE_THRESHOLD for i in range(1, 4))
-
-    if r_squared < FACTOR_R2_THRESHOLD and abs(alpha_t) > FACTOR_SIGNIFICANCE_THRESHOLD:
-        verdict = "PURE_ALPHA"
-    elif r_squared >= FACTOR_R2_THRESHOLD and any_factor_sig:
-        verdict = "FACTOR_EXPOSED"
-    else:
-        verdict = "FACTOR_EXPOSED" if r_squared >= FACTOR_R2_THRESHOLD else "PURE_ALPHA"
+    verdict = _factor_verdict(
+        r_squared=r_squared,
+        alpha_pvalue_adjusted=float(p_values_adjusted[0]),
+        factor_pvalues_adjusted=p_values_adjusted[1:],
+    )
 
     factor_names = ["market", "volatility", "momentum"]
 
@@ -172,9 +206,13 @@ def factor_attribution(
         "alpha_annualized": alpha_annualized,
         "alpha_t_stat": float(t_stats[0]),
         "alpha_pvalue": float(p_values[0]),
+        "alpha_pvalue_adjusted": float(p_values_adjusted[0]),
         "factor_betas": {name: float(betas[i]) for i, name in enumerate(factor_names)},
         "factor_t_stats": {name: float(t_stats[i + 1]) for i, name in enumerate(factor_names)},
         "factor_pvalues": {name: float(p_values[i + 1]) for i, name in enumerate(factor_names)},
+        "factor_pvalues_adjusted": {
+            name: float(p_values_adjusted[i + 1]) for i, name in enumerate(factor_names)
+        },
         "r_squared": r_squared,
         "residual_sharpe": residual_sharpe,
         "n_days": n_days,

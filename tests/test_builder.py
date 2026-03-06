@@ -302,11 +302,10 @@ def test_build_feature_matrix_real_data_end_to_end():
     # No overlap between features and labels
     assert len(set(X_cols) & set(y_cols)) == 0, "Features and labels should not overlap"
 
-    # Together they should account for most columns (except ts_event + raw prices + session VP)
+    # Together they should account for all columns except metadata/raw passthroughs.
     from src.framework.features_canonical.builder import (
         RAW_PRICE_COLUMNS,
         RAW_FLOW_COLUMNS,
-        SESSION_VP_COLUMNS,
         BAR_META_COLUMNS,
     )
     all_cols = set(result.columns)
@@ -315,7 +314,6 @@ def test_build_feature_matrix_real_data_end_to_end():
         {"ts_event"}
         | set(RAW_PRICE_COLUMNS)
         | set(RAW_FLOW_COLUMNS)
-        | set(SESSION_VP_COLUMNS)
         | set(BAR_META_COLUMNS)
     )
     remaining = all_cols - feature_label_cols - excluded
@@ -414,8 +412,8 @@ def test_raw_prices_excluded_from_features():
 
 
 @pytest.mark.slow
-def test_session_vp_excluded_from_features():
-    """Verify session-level VP features (lookahead) are excluded from feature columns."""
+def test_session_vp_included_in_features():
+    """Causal session-level VP shape features should remain available to ML consumers."""
     files = get_parquet_files("train")
     lf = pl.scan_parquet(str(files[1]))  # files[0] may be Sunday (no bars)
 
@@ -425,7 +423,7 @@ def test_session_vp_excluded_from_features():
     from src.framework.features_canonical.builder import SESSION_VP_COLUMNS
     for col in SESSION_VP_COLUMNS:
         if col in result.columns:
-            assert col not in feature_cols, f"Session VP '{col}' should not be a feature"
+            assert col in feature_cols, f"Session VP '{col}' should be a feature"
 
 
 @pytest.mark.slow

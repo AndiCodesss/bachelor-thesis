@@ -28,7 +28,8 @@
 
 - `factor_attribution(trades, bars)` — OLS decomposition into market, volatility, momentum factors
 - `compute_factor_returns(bars)` — daily factor return series
-- Verdicts: PURE_ALPHA, FACTOR_EXPOSED, INSUFFICIENT_DATA
+- Verdicts: PURE_ALPHA, FACTOR_EXPOSED, INCONCLUSIVE, INSUFFICIENT_DATA
+- Uses Holm-Bonferroni-adjusted p-values before assigning exposure verdicts
 - Isolates true alpha from common factor exposure
 
 ## Adaptive Transaction Costs
@@ -60,7 +61,7 @@ and allowed factor-attribution verdicts).
 1. **Shuffle test** — random signal permutation baseline
 2. **Walk-forward** — rolling window out-of-sample
 3. **Regime stability** — performance across market regimes
-4. **Parameter sensitivity** — degradation under perturbation
+4. **Signal perturbation** — degradation when a small fraction of live signals are flipped
 5. **Cost sensitivity** — survival under 1.5x transaction costs
 6. **Alpha decay** — signal half-life estimation
 7. **Trade count** — minimum sample size threshold

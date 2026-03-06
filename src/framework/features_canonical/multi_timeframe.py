@@ -12,9 +12,6 @@ _EXCLUDE_COLUMNS = {
     # Raw prices (non-stationary)
     "open", "high", "low", "close", "vwap", "bid_price", "ask_price", "mid_price",
     "poc_price", "va_high", "va_low", "rolling_poc", "rolling_va_high", "rolling_va_low",
-    # Session-level VP features (lookahead bias — uses full-day data)
-    "poc_distance", "poc_distance_raw", "va_width", "position_in_va",
-    "vp_skew", "vp_kurtosis", "hvn_count",
     # Labels
     "fwd_return_1bar", "fwd_return_3bar", "fwd_return_5bar",
     "fwd_return_6bar", "fwd_return_10bar", "fwd_return_12bar",

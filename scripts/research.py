@@ -363,19 +363,33 @@ def _summarize_validation_request(task_rows: list[dict[str, Any]]) -> dict[str, 
     error_count = 0
     sharpe_vals: list[float] = []
     trade_counts: list[int] = []
+    passing_bar_configs: list[str] = []
+    failing_bar_configs: list[str] = []
+    best_row: dict[str, Any] | None = None
+    best_sharpe = float("-inf")
 
     for row in task_rows:
         verdict = str(row.get("verdict", "")).upper()
         if verdict == "PASS":
             pass_count += 1
+            bar_config = str(row.get("bar_config", "")).strip()
+            if bar_config:
+                passing_bar_configs.append(bar_config)
         elif verdict == "ERROR":
             error_count += 1
         else:
             fail_count += 1
+            bar_config = str(row.get("bar_config", "")).strip()
+            if bar_config:
+                failing_bar_configs.append(bar_config)
 
         sharpe = row.get("sharpe_ratio")
         if isinstance(sharpe, (int, float)):
-            sharpe_vals.append(float(sharpe))
+            sharpe_val = float(sharpe)
+            sharpe_vals.append(sharpe_val)
+            if sharpe_val > best_sharpe:
+                best_sharpe = sharpe_val
+                best_row = row
         trades = row.get("trade_count")
         if isinstance(trades, int):
             trade_counts.append(int(trades))
@@ -384,13 +398,20 @@ def _summarize_validation_request(task_rows: list[dict[str, Any]]) -> dict[str, 
 
     if error_count > 0:
         overall = "ERROR"
-    elif pass_count > 0:
+    elif pass_count == len(task_rows) and task_rows:
         overall = "PASS"
+    elif pass_count > 0:
+        overall = "MIXED"
     else:
         overall = "FAIL"
 
     avg_sharpe = (sum(sharpe_vals) / len(sharpe_vals)) if sharpe_vals else None
     avg_trades = (sum(trade_counts) / len(trade_counts)) if trade_counts else None
+    best_bar_config = (
+        str(best_row.get("bar_config", "")).strip()
+        if isinstance(best_row, dict)
+        else None
+    )
 
     return {
         "overall_verdict": overall,
@@ -398,8 +419,13 @@ def _summarize_validation_request(task_rows: list[dict[str, Any]]) -> dict[str, 
         "pass_count": pass_count,
         "fail_count": fail_count,
         "error_count": error_count,
+        "pass_fraction": (float(pass_count) / float(len(task_rows))) if task_rows else 0.0,
         "avg_sharpe_ratio": avg_sharpe,
         "avg_trade_count": avg_trades,
+        "passing_bar_configs": passing_bar_configs,
+        "failing_bar_configs": failing_bar_configs,
+        "best_bar_config": best_bar_config,
+        "best_sharpe_ratio": (best_sharpe if best_row is not None else None),
         "tasks": task_rows,
     }
 
