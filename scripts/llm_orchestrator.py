@@ -1545,8 +1545,23 @@ def _build_coder_repair_user_prompt(
     errors_blob = "\n".join(f"  - {e}" for e in validation_errors)
     cols_hint = ", ".join(common_columns[:40]) if common_columns else "(see feature knowledge)"
 
+    has_zero_rate = any("signal_rate=0" in e for e in validation_errors)
+    if has_zero_rate:
+        fix_instruction = (
+            "CRITICAL: Your strategy generated ZERO signals.\n"
+            "The column statistics in VALIDATION_ERRORS above show empirical firing rates "
+            "for the features your code references.\n"
+            "ACTION: RELAX the most restrictive threshold value(s) in DEFAULT_PARAMS so the "
+            "strategy fires at least 1 signal in the sample (target rate: 0.05–0.3% of bars).\n"
+            "Do NOT add new conditions — only loosen existing threshold values."
+        )
+    else:
+        fix_instruction = (
+            "Fix ONLY the validation errors above. Do not change the overall strategy logic."
+        )
+
     return (
-        "Your previously generated code FAILED validation. Fix ONLY the listed errors.\n\n"
+        "Your previously generated code FAILED validation.\n\n"
         "ORIGINAL_THINKER_HANDOFF_JSON_BEGIN\n"
         f"{json.dumps(thinker_handoff, indent=2, sort_keys=True, default=str)}\n"
         "ORIGINAL_THINKER_HANDOFF_JSON_END\n\n"
@@ -1555,8 +1570,8 @@ def _build_coder_repair_user_prompt(
         "PREVIOUS_CODE_END\n\n"
         f"VALIDATION_ERRORS:\n{errors_blob}\n\n"
         f"AVAILABLE_COLUMNS_HINT (common across bar configs): {cols_hint}\n\n"
-        "Return corrected JSON with same schema: strategy_name, bar_configs, params, code.\n"
-        "Fix ONLY the validation errors above. Do not change the overall strategy logic."
+        f"{fix_instruction}\n\n"
+        "Return corrected JSON with same schema: strategy_name, bar_configs, params, code."
     )
 
 
@@ -2076,6 +2091,7 @@ def main() -> int:
                     session_filter=session_filter,
                     feature_group=feature_group,
                     sample_cache=sample_cache,
+                    code=code,
                 )
 
             # Inline repair loop: retry coder with injected errors
@@ -2150,6 +2166,7 @@ def main() -> int:
                             session_filter=session_filter,
                             feature_group=feature_group,
                             sample_cache=sample_cache,
+                            code=code,
                         )
                         if not validation_errors:
                             print(f"  repair succeeded on attempt {repair_attempt + 1}")

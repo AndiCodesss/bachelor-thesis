@@ -724,3 +724,45 @@ def test_validate_generated_strategy_passes_for_healthy_signal_rate(tmp_path):
         code=code,
     )
     assert errors == []
+
+
+def test_repair_prompt_includes_signal_rate_guidance_on_zero_rate():
+    mod = _load_module()
+    thinker_handoff = {"hypothesis": {"hypothesis_id": "h001", "thesis": "test"}}
+    previous_code = (
+        'def generate_signal(df, params):\n'
+        '    cond = df["absorption_signal"] & (df["poc_distance"] > 0.5)\n'
+        '    return np.where(cond, 1, 0).astype(np.int8)\n'
+    )
+    validation_errors = [
+        "my_strat: signal_rate=0.0% for tick_610 (0/1200 bars non-zero — target 0.05–0.3%). "
+        "Column statistics for referenced features:\n"
+        "  absorption_signal (bool): True=0.08% (1/1200 bars)\n"
+        "  poc_distance: p10=0.0100 p25=0.0500 p50=0.1200 p75=0.2800 p90=0.4500\n"
+        "ACTION REQUIRED: Relax the most restrictive threshold(s) above "
+        "to produce at least 1 signal in this 1200-bar sample."
+    ]
+    prompt = mod._build_coder_repair_user_prompt(
+        thinker_handoff=thinker_handoff,
+        previous_code=previous_code,
+        validation_errors=validation_errors,
+        common_columns=["close", "absorption_signal", "poc_distance"],
+    )
+    assert "ZERO signals" in prompt
+    assert "RELAX" in prompt
+    assert "Do NOT add new conditions" in prompt
+
+
+def test_repair_prompt_uses_standard_instruction_for_non_rate_errors():
+    mod = _load_module()
+    validation_errors = [
+        "my_strat: non-causal for tick_610: signal at bar 5 changed when prefix window shrunk"
+    ]
+    prompt = mod._build_coder_repair_user_prompt(
+        thinker_handoff={},
+        previous_code="code",
+        validation_errors=validation_errors,
+        common_columns=[],
+    )
+    assert "Fix ONLY the validation errors" in prompt
+    assert "ZERO signals" not in prompt
