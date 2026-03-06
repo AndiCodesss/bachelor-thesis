@@ -364,7 +364,7 @@ def test_prompts_include_feature_knowledge_markers():
         feature_knowledge=feature_knowledge,
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in thinker_prompt
-    assert "KNOWLEDGE_BASE_COMMAND:" in thinker_prompt
+    assert "KNOWLEDGE_BASE_COMMAND" in thinker_prompt
     assert "https://notebooklm.google.com/notebook/test-id" in thinker_prompt
     assert "query_notebook.py" in thinker_prompt
     assert '"common_columns"' in thinker_prompt
@@ -570,3 +570,48 @@ def test_coder_system_prompt_forbids_negative_shift():
     mod = _load_module()
     prompt = mod._build_coder_system_prompt()
     assert "shift(-1)" in prompt
+
+
+def test_diagnose_zero_signal_shows_bool_firing_rate():
+    mod = _load_module()
+    df = pl.DataFrame({
+        "absorption_signal": [True, False, False, False, False],  # 20%
+        "close": [1.0, 2.0, 3.0, 4.0, 5.0],
+    })
+    code = 'df["absorption_signal"] & (df["close"] > 2.0)'
+    result = mod._diagnose_zero_signal(df, code)
+    assert "absorption_signal" in result
+    assert "20.00%" in result
+
+
+def test_diagnose_zero_signal_shows_float_percentiles():
+    mod = _load_module()
+    df = pl.DataFrame({
+        "cvd_price_divergence_3": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+    })
+    code = 'df["cvd_price_divergence_3"] > 0.8'
+    result = mod._diagnose_zero_signal(df, code)
+    assert "cvd_price_divergence_3" in result
+    assert "p50" in result
+
+
+def test_diagnose_zero_signal_skips_unreferenced_columns():
+    mod = _load_module()
+    df = pl.DataFrame({
+        "close": [1.0, 2.0],
+        "volume": [100.0, 200.0],
+        "absorption_signal": [True, False],
+    })
+    code = 'df["close"] > 1.5'
+    result = mod._diagnose_zero_signal(df, code)
+    assert "close" in result
+    assert "volume" not in result
+    assert "absorption_signal" not in result
+
+
+def test_diagnose_zero_signal_handles_no_referenced_columns():
+    mod = _load_module()
+    df = pl.DataFrame({"close": [1.0, 2.0]})
+    code = "some_var > threshold"  # no quoted column names
+    result = mod._diagnose_zero_signal(df, code)
+    assert "no referenced columns" in result

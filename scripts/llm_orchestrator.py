@@ -325,6 +325,65 @@ def _validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
     return errors
 
 
+def _diagnose_zero_signal(df: pl.DataFrame, code: str) -> str:
+    """Compute empirical firing rates for columns referenced in strategy code.
+
+    Called when a strategy generates zero signals. Returns a formatted string
+    showing per-column statistics so the coder knows which filter is the bottleneck.
+    """
+    n = len(df)
+    if n == 0:
+        return "  (empty sample frame — no statistics available)"
+
+    available = set(df.columns)
+    # Extract quoted identifiers that look like column names (≥3 chars, snake_case)
+    referenced = set(re.findall(r'"([a-z][a-z0-9_]{2,})"', code)) | \
+                 set(re.findall(r"'([a-z][a-z0-9_]{2,})'", code))
+    used_cols = sorted(referenced & available)
+
+    if not used_cols:
+        return "  (no referenced columns found in code — check column name spelling)"
+
+    lines: list[str] = []
+    for col in used_cols[:15]:  # cap to keep repair prompt compact
+        series = df[col]
+        dtype = series.dtype
+        try:
+            if dtype == pl.Boolean:
+                true_count = int(series.sum())
+                lines.append(
+                    f"  {col} (bool): True={100.0 * true_count / n:.2f}%"
+                    f" ({true_count}/{n} bars)"
+                )
+            elif dtype in (
+                pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+                pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
+            ):
+                uniq = series.n_unique()
+                if uniq <= 4:
+                    for val in sorted(series.unique().to_list()):
+                        pct = 100.0 * int((series == val).sum()) / n
+                        lines.append(f"  {col}=={val}: {pct:.2f}%")
+                else:
+                    p25 = series.quantile(0.25)
+                    p75 = series.quantile(0.75)
+                    lines.append(f"  {col} (int): p25={p25} p75={p75}")
+            elif dtype in (pl.Float32, pl.Float64):
+                p10 = series.quantile(0.10)
+                p25 = series.quantile(0.25)
+                p50 = series.quantile(0.50)
+                p75 = series.quantile(0.75)
+                p90 = series.quantile(0.90)
+                lines.append(
+                    f"  {col}: p10={p10:.4f} p25={p25:.4f}"
+                    f" p50={p50:.4f} p75={p75:.4f} p90={p90:.4f}"
+                )
+        except Exception:
+            lines.append(f"  {col}: (error computing stats)")
+
+    return "\n".join(lines) if lines else "  (could not compute stats for referenced columns)"
+
+
 def _ensure_runtime_state(root: Path, *, resume: bool, mission_name: str) -> dict[str, Path]:
     state_dir = root / "research" / ".state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -1186,10 +1245,12 @@ def _build_thinker_user_prompt(
         "Design exactly one hypothesis that is implementable by a separate coding model."
     )
     if notebooklm_url:
+        import os as _os
+        cwd = _os.getcwd()
         prompt += (
-            "\n\nKNOWLEDGE_BASE_COMMAND:\n"
-            f'  uv run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" "question"\n'
-            f'  uv run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --research "question"\n'
+            "\n\nKNOWLEDGE_BASE_COMMAND (copy these exact commands — do not modify the path):\n"
+            f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" "question"\n'
+            f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --research "question"\n'
             "Query your research handbook before designing the hypothesis. "
             "Start with the plain form; escalate to --research if the answer lacks concrete thresholds."
         )
