@@ -174,6 +174,68 @@ def test_walk_forward_test_perfect_signal():
     assert len(result["fold_sharpes"]) == 5
     assert len(result["fold_pnls"]) == 5
     assert all(isinstance(s, float) for s in result["fold_sharpes"])
+    assert result["mode"] == "expanding_history"
+
+
+def test_walk_forward_test_uses_expanding_history(monkeypatch: pytest.MonkeyPatch):
+    df = create_synthetic_data(n_bars=120, n_days=3, perfect_signal=True)
+    seen_lengths: list[int] = []
+
+    def _fake_run_backtest(chunk_df: pl.DataFrame, *args, **kwargs):
+        seen_lengths.append(len(chunk_df))
+        return pl.DataFrame(
+            {
+                "entry_time": chunk_df["ts_event"],
+                "exit_time": chunk_df["ts_event"],
+                "entry_price": chunk_df["close"],
+                "exit_price": chunk_df["close"],
+                "direction": pl.Series([1] * len(chunk_df), dtype=pl.Int8),
+                "size": pl.Series([1] * len(chunk_df), dtype=pl.Int32),
+            }
+        )
+
+    def _fake_compute_metrics(*args, **kwargs):
+        return {"sharpe_ratio": 1.0, "net_pnl": 1.0}
+
+    monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
+
+    result = walk_forward_test(df, signal_col="signal", n_folds=4)
+    assert result["verdict"] == "PASS"
+    assert seen_lengths == sorted(seen_lengths)
+    assert len(set(seen_lengths)) == 4
+
+
+def test_walk_forward_marks_cross_boundary_trades_to_fold_close(monkeypatch: pytest.MonkeyPatch):
+    df = create_synthetic_data(n_bars=60, n_days=1, perfect_signal=False)
+    seen_trade_counts: list[int] = []
+
+    def _fake_run_backtest(chunk_df: pl.DataFrame, *args, **kwargs):
+        ts = chunk_df["ts_event"]
+        close = chunk_df["close"]
+        if len(chunk_df) < 2:
+            return pl.DataFrame()
+        return pl.DataFrame(
+            {
+                "entry_time": [ts[-2]],
+                "exit_time": [ts[-1] + timedelta(minutes=5)],
+                "entry_price": [float(close[-2])],
+                "exit_price": [float(close[-1]) + 10.0],
+                "direction": [1],
+                "size": [1],
+            }
+        )
+
+    def _fake_compute_metrics(trades: pl.DataFrame, *args, **kwargs):
+        seen_trade_counts.append(len(trades))
+        return {"sharpe_ratio": 1.0, "net_pnl": float(len(trades))}
+
+    monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
+
+    result = walk_forward_test(df, signal_col="signal", n_folds=3)
+    assert result["verdict"] == "PASS"
+    assert any(count == 1 for count in seen_trade_counts), "Cross-boundary fold trade should be retained"
 
 
 def test_regime_test_perfect_signal():
@@ -321,6 +383,8 @@ def test_decay_test_perfect_signal():
     assert not result["is_declining"], "Sharpe should not be monotonically declining"
     assert len(result["chunk_sharpes"]) == 4
     assert all(isinstance(s, float) for s in result["chunk_sharpes"])
+    assert "trend_slope" in result
+    assert "trend_r_squared" in result
 
 
 def test_decay_test_uses_same_last_chunk_for_profitability_check(monkeypatch: pytest.MonkeyPatch):
@@ -340,6 +404,24 @@ def test_decay_test_uses_same_last_chunk_for_profitability_check(monkeypatch: py
     validators_mod.decay_test(df, signal_col="signal", n_chunks=4)
     # n=103, n_chunks=4 => chunk sizes: 25,25,25,28. Last call should use 28-row last chunk.
     assert seen_lengths[-1] == 28
+
+
+def test_decay_test_flags_trend_decline_without_strict_monotonicity(monkeypatch: pytest.MonkeyPatch):
+    df = create_synthetic_data(n_bars=80, n_days=2, perfect_signal=False)
+    sharpe_vals = iter([1.5, 1.5, 1.4, 1.3, 1.0])
+
+    def _fake_run_backtest(*args, **kwargs):
+        return pl.DataFrame()
+
+    def _fake_compute_metrics(*args, **kwargs):
+        return {"sharpe_ratio": next(sharpe_vals), "net_pnl": 1.0}
+
+    monkeypatch.setattr(validators_mod, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(validators_mod, "compute_metrics", _fake_compute_metrics)
+
+    result = decay_test(df, signal_col="signal", n_chunks=4)
+    assert result["is_declining"] is True
+    assert result["trend_slope"] < 0
 
 
 def test_trade_count_test_pass():

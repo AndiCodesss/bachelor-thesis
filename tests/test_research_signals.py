@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import polars as pl
+import pytest
 
-from research.signals import check_signal_causality, compute_strategy_id, discover_signals
+from research.signals import (
+    check_signal_causality,
+    compute_strategy_id,
+    discover_signals,
+    load_signal_module,
+)
 
 
 def _df(n: int = 32) -> pl.DataFrame:
@@ -187,3 +194,44 @@ def test_signal_causality_requires_deepcopyable_state() -> None:
         min_prefix_bars=8,
     )
     assert errors == ["model_state must be deepcopyable for causality checks"]
+
+
+def test_load_signal_module_rejects_disallowed_import(tmp_path: Path) -> None:
+    (tmp_path / "bad_signal.py").write_text(
+        "import os\n"
+        "import numpy as np\n"
+        "def generate_signal(df, params):\n"
+        "    return np.zeros(len(df), dtype=np.int8)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="disallowed import"):
+        load_signal_module("bad_signal", signals_dir=tmp_path)
+
+
+def test_load_signal_module_rejects_disallowed_file_io_call(tmp_path: Path) -> None:
+    (tmp_path / "bad_io_signal.py").write_text(
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "def generate_signal(df, params):\n"
+        "    pl.read_parquet('secret.parquet')\n"
+        "    return np.zeros(len(df), dtype=np.int8)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="disallowed call"):
+        load_signal_module("bad_io_signal", signals_dir=tmp_path)
+
+
+def test_load_signal_module_rejects_mutable_module_scope_state(tmp_path: Path) -> None:
+    (tmp_path / "bad_state_signal.py").write_text(
+        "import numpy as np\n"
+        "CACHE = []\n"
+        "def generate_signal(df, params):\n"
+        "    CACHE.append(len(df))\n"
+        "    return np.zeros(len(df), dtype=np.int8)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AttributeError):
+        load_signal_module("bad_state_signal", signals_dir=tmp_path).generate_signal(_df(), {})

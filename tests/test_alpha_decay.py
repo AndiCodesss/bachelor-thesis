@@ -196,6 +196,7 @@ def test_fit_alpha_decay_returns_rolling_sharpes():
     assert "rolling_sharpes" in result
     assert isinstance(result["rolling_sharpes"], list)
     assert len(result["rolling_sharpes"]) >= 5
+    assert "terminal_sharpe" in result
 
 
 def test_fit_alpha_decay_uses_adaptive_costs_when_present():
@@ -207,3 +208,53 @@ def test_fit_alpha_decay_uses_adaptive_costs_when_present():
     result = fit_alpha_decay(trades, window_days=15, step_days=3, min_windows=5)
     assert result["available"] is True
     assert result["verdict"] == "DEAD"
+
+
+def test_fit_alpha_decay_does_not_mark_zeroed_tail_as_stable():
+    """Signals that decay through zero must not look stable just because the tail is dropped."""
+    n_days = 120
+    rng = np.random.default_rng(123)
+    daily_pnls = [
+        1200.0 * math.exp(-0.06 * d) - 120.0 + rng.normal(0, 40)
+        for d in range(n_days)
+    ]
+
+    trades = _make_trades(daily_pnls)
+    result = fit_alpha_decay(trades, window_days=20, step_days=5, min_windows=5)
+
+    assert result["available"] is True
+    assert result["verdict"] in {"DECAYING", "DEAD"}
+    assert result["verdict"] != "STABLE"
+    assert result["terminal_sharpe"] <= 0
+
+
+def test_fit_alpha_decay_mixed_negative_tail_is_not_stable():
+    """Mixed-sign tails should still count as decaying once the edge collapses."""
+    n_days = 120
+    rng = np.random.default_rng(7)
+    daily_pnls = [
+        900.0 * math.exp(-0.05 * d) - 40.0 + rng.normal(0, 60)
+        for d in range(n_days)
+    ]
+
+    trades = _make_trades(daily_pnls)
+    result = fit_alpha_decay(trades, window_days=20, step_days=5, min_windows=5)
+
+    assert result["available"] is True
+    assert result["verdict"] != "STABLE"
+    assert result["tail_nonpositive_fraction"] > 0
+
+
+def test_fit_alpha_decay_early_dead_uses_tail_terminal_sharpe():
+    """All-negative series should report terminal_sharpe from the same tail definition."""
+    n_days = 80
+    rng = np.random.default_rng(42)
+    daily_pnls = [-300.0 + rng.normal(0, 10) for _ in range(n_days)]
+
+    trades = _make_trades(daily_pnls)
+    result = fit_alpha_decay(trades, window_days=15, step_days=3, min_windows=5)
+
+    rolling = np.array([s for _, s in result["rolling_sharpes"]], dtype=np.float64)
+    tail = rolling[-max(1, len(rolling) // 3):]
+    assert result["verdict"] == "DEAD"
+    assert abs(result["terminal_sharpe"] - float(np.median(tail))) < 1e-12

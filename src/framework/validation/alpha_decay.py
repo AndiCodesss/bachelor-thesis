@@ -106,21 +106,25 @@ def fit_alpha_decay(
     if len(rolling) < min_windows:
         return {"available": False, "verdict": "INSUFFICIENT_DATA"}
 
-    # Filter to positive Sharpe values for log-linear fit
-    positive = [(t, s) for t, s in rolling if s > 0]
+    sharpe_arr = np.array([s for _, s in rolling], dtype=np.float64)
+    tail_size = max(1, len(sharpe_arr) // 3)
+    tail_sharpes = sharpe_arr[-tail_size:]
+    terminal_sharpe = float(np.median(tail_sharpes))
 
+    if np.all(sharpe_arr <= 0):
+        return {
+            "available": True,
+            "half_life_days": 0.0,
+            "decay_rate": float("inf"),
+            "initial_sharpe": 0.0,
+            "terminal_sharpe": terminal_sharpe,
+            "r_squared": 0.0,
+            "rolling_sharpes": rolling,
+            "verdict": "DEAD",
+        }
+
+    positive = [(t, s) for t, s in rolling if s > 0]
     if len(positive) < min_windows:
-        # Check if all are non-positive
-        if all(s <= 0 for _, s in rolling):
-            return {
-                "available": True,
-                "half_life_days": 0.0,
-                "decay_rate": float("inf"),
-                "initial_sharpe": 0.0,
-                "r_squared": 0.0,
-                "rolling_sharpes": rolling,
-                "verdict": "DEAD",
-            }
         return {"available": False, "verdict": "INSUFFICIENT_DATA"}
 
     t_arr = np.array([t for t, _ in positive], dtype=np.float64)
@@ -144,8 +148,14 @@ def fit_alpha_decay(
     else:
         half_life = float("inf")
 
+    tail_nonpositive_fraction = float(np.mean(tail_sharpes <= 0.0)) if tail_sharpes.size else 0.0
+
     # Verdict logic
-    if lam <= 0 or half_life > ALPHA_DECAY_STABLE_HALFLIFE:
+    if np.all(tail_sharpes <= 0):
+        verdict = "DEAD"
+    elif terminal_sharpe <= 0.0 or tail_nonpositive_fraction >= 0.5:
+        verdict = "DECAYING"
+    elif lam <= 0 or half_life > ALPHA_DECAY_STABLE_HALFLIFE:
         verdict = "STABLE"
     elif r_squared > 0.3:
         verdict = "DECAYING"
@@ -157,6 +167,8 @@ def fit_alpha_decay(
         "half_life_days": float(half_life),
         "decay_rate": float(lam),
         "initial_sharpe": float(a),
+        "terminal_sharpe": terminal_sharpe,
+        "tail_nonpositive_fraction": tail_nonpositive_fraction,
         "r_squared": float(r_squared),
         "rolling_sharpes": rolling,
         "verdict": verdict,

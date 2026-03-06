@@ -53,6 +53,8 @@ def _factor_verdict(
 
     if r_squared < FACTOR_R2_THRESHOLD and alpha_significant:
         return "PURE_ALPHA"
+    if r_squared >= FACTOR_R2_THRESHOLD and alpha_significant and any_factor_significant:
+        return "ALPHA_WITH_BETA_EXPOSURE"
     if r_squared >= FACTOR_R2_THRESHOLD and any_factor_significant:
         return "FACTOR_EXPOSED"
     return "INCONCLUSIVE"
@@ -148,18 +150,30 @@ def factor_attribution(
 
     # Extract arrays for OLS
     y = joined["strategy_pnl"].to_numpy().astype(np.float64)
-    x_mkt = joined["market_return"].to_numpy().astype(np.float64)
-    x_vol = joined["volatility_change"].to_numpy().astype(np.float64)
-    x_mom = joined["momentum"].to_numpy().astype(np.float64)
+    factor_names = ["market", "volatility", "momentum"]
+    factor_matrix = np.column_stack([
+        joined["market_return"].to_numpy().astype(np.float64),
+        joined["volatility_change"].to_numpy().astype(np.float64),
+        joined["momentum"].to_numpy().astype(np.float64),
+    ])
 
-    # Design matrix: [intercept, market, volatility, momentum]
-    X = np.column_stack([np.ones(n_days), x_mkt, x_vol, x_mom])
+    # Drop factor columns with effectively zero variance. This keeps the design
+    # full-rank in low-vol or short-sample regimes without inventing spurious
+    # significance for inactive factors.
+    factor_std = np.std(factor_matrix, axis=0)
+    active_mask = np.isfinite(factor_std) & (factor_std > 1e-12)
+    active_factors = [name for i, name in enumerate(factor_names) if bool(active_mask[i])]
+
+    # Design matrix: [intercept, active factors]
+    X = np.column_stack([np.ones(n_days), factor_matrix[:, active_mask]])
 
     # OLS via least squares
     coeffs, residuals_arr, rank, sv = np.linalg.lstsq(X, y, rcond=None)
 
     alpha_daily = float(coeffs[0])
-    betas = coeffs[1:]
+    betas = np.zeros(len(factor_names), dtype=np.float64)
+    if active_factors:
+        betas[active_mask] = coeffs[1:]
 
     # Fitted values and residuals
     y_hat = X @ coeffs
@@ -170,18 +184,30 @@ def factor_attribution(
     ss_tot = float(np.sum((y - np.mean(y)) ** 2))
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    # Standard errors: se = sqrt(diag(sigma^2 * (X'X)^-1))
+    # Standard errors: se = sqrt(diag(sigma^2 * (X'X)^-1)).
+    # If the design is rank-deficient or numerically unstable, keep coefficient
+    # diagnostics but disable significance-based verdicting.
     dof = max(n_days - X.shape[1], 1)
     sigma2 = ss_res / dof
-    try:
-        cov = sigma2 * np.linalg.inv(X.T @ X)
-        se = np.sqrt(np.maximum(np.diag(cov), 0.0))
-    except np.linalg.LinAlgError:
-        se = np.ones(X.shape[1])
-
-    # t-statistics and p-values
-    t_stats = np.where(se > 1e-12, coeffs / se, 0.0)
-    p_values = np.array([2.0 * (1.0 - _normal_cdf(abs(float(t)))) for t in t_stats])
+    regression_stable = bool(rank == X.shape[1])
+    t_stats = np.zeros(len(factor_names) + 1, dtype=np.float64)
+    p_values = np.ones(len(factor_names) + 1, dtype=np.float64)
+    if regression_stable:
+        try:
+            cov = sigma2 * np.linalg.inv(X.T @ X)
+            se = np.sqrt(np.maximum(np.diag(cov), 0.0))
+            active_t_stats = np.where(se > 1e-12, coeffs / se, 0.0)
+            active_p_values = np.array([
+                2.0 * (1.0 - _normal_cdf(abs(float(t)))) for t in active_t_stats
+            ])
+            t_stats[0] = active_t_stats[0]
+            p_values[0] = active_p_values[0]
+            if active_factors:
+                active_idx = np.flatnonzero(active_mask)
+                t_stats[active_idx + 1] = active_t_stats[1:]
+                p_values[active_idx + 1] = active_p_values[1:]
+        except np.linalg.LinAlgError:
+            regression_stable = False
     p_values_adjusted = _holm_bonferroni_adjust(p_values)
 
     # Residual Sharpe (annualized)
@@ -192,13 +218,14 @@ def factor_attribution(
     # Annualized alpha
     alpha_annualized = alpha_daily * 252.0
 
-    verdict = _factor_verdict(
-        r_squared=r_squared,
-        alpha_pvalue_adjusted=float(p_values_adjusted[0]),
-        factor_pvalues_adjusted=p_values_adjusted[1:],
-    )
-
-    factor_names = ["market", "volatility", "momentum"]
+    if regression_stable:
+        verdict = _factor_verdict(
+            r_squared=r_squared,
+            alpha_pvalue_adjusted=float(p_values_adjusted[0]),
+            factor_pvalues_adjusted=p_values_adjusted[1:],
+        )
+    else:
+        verdict = "INCONCLUSIVE"
 
     return {
         "available": True,
@@ -213,6 +240,9 @@ def factor_attribution(
         "factor_pvalues_adjusted": {
             name: float(p_values_adjusted[i + 1]) for i, name in enumerate(factor_names)
         },
+        "active_factors": active_factors,
+        "design_rank": int(rank),
+        "regression_stable": regression_stable,
         "r_squared": r_squared,
         "residual_sharpe": residual_sharpe,
         "n_days": n_days,

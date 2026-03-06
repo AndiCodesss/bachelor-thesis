@@ -34,6 +34,7 @@ advanced_validation:
     - INSUFFICIENT_DATA
   allowed_factor_verdicts:
     - PURE_ALPHA
+    - ALPHA_WITH_BETA_EXPOSURE
     - INSUFFICIENT_DATA
 
 notebooklm_notebook_url: "https://notebooklm.google.com/notebook/c59b7dcc-ffeb-431a-b2a8-dbf5bf9cde58"

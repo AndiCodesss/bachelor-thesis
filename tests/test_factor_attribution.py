@@ -152,6 +152,7 @@ class TestFactorAttribution:
         # Both alpha and market beta should be present
         assert abs(result["alpha_daily"]) > 50.0
         assert abs(result["factor_betas"]["market"]) > 1000.0
+        assert result["verdict"] == "ALPHA_WITH_BETA_EXPOSURE"
 
     def test_insufficient_data(self):
         """Less than min_days should return INSUFFICIENT_DATA."""
@@ -235,6 +236,7 @@ class TestFactorAttribution:
             "available", "alpha_daily", "alpha_annualized", "alpha_t_stat",
             "alpha_pvalue", "alpha_pvalue_adjusted",
             "factor_betas", "factor_t_stats", "factor_pvalues", "factor_pvalues_adjusted",
+            "active_factors", "design_rank", "regression_stable",
             "r_squared", "residual_sharpe", "n_days", "verdict",
         }
         assert expected_keys.issubset(result.keys())
@@ -268,6 +270,28 @@ def test_factor_verdict_returns_inconclusive_without_significant_factors():
         factor_pvalues_adjusted=np.array([0.2, 0.3, 0.4]),
     )
     assert verdict == "INCONCLUSIVE"
+
+
+def test_factor_verdict_returns_alpha_with_beta_exposure_when_both_are_significant():
+    verdict = _factor_verdict(
+        r_squared=0.35,
+        alpha_pvalue_adjusted=0.01,
+        factor_pvalues_adjusted=np.array([0.01, 0.4, 0.6]),
+    )
+    assert verdict == "ALPHA_WITH_BETA_EXPOSURE"
+
+
+def test_factor_attribution_singular_design_is_inconclusive():
+    bars = _make_bars(5, seed=123)
+    factors = compute_factor_returns(bars).drop_nulls()
+    daily_pnls = {row["date"]: 100.0 for row in factors.iter_rows(named=True)}
+    trades = _make_trades(daily_pnls)
+
+    result = factor_attribution(trades, bars, min_days=3)
+
+    assert result["available"] is True
+    assert result["regression_stable"] is False
+    assert result["verdict"] == "INCONCLUSIVE"
 
 
 def test_factor_attribution_uses_exit_date_for_daily_pnl():

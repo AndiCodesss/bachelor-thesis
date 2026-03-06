@@ -28,7 +28,7 @@
 
 - `factor_attribution(trades, bars)` — OLS decomposition into market, volatility, momentum factors
 - `compute_factor_returns(bars)` — daily factor return series
-- Verdicts: PURE_ALPHA, FACTOR_EXPOSED, INCONCLUSIVE, INSUFFICIENT_DATA
+- Verdicts: PURE_ALPHA, ALPHA_WITH_BETA_EXPOSURE, FACTOR_EXPOSED, INCONCLUSIVE, INSUFFICIENT_DATA
 - Uses Holm-Bonferroni-adjusted p-values before assigning exposure verdicts
 - Isolates true alpha from common factor exposure
 

@@ -2,24 +2,190 @@
 
 from __future__ import annotations
 
+import ast
+import builtins as py_builtins
 import copy
 import hashlib
-import importlib.util
 import inspect
 import json
 from pathlib import Path
 from types import ModuleType
+from types import MappingProxyType
 from typing import Any, Callable
+from collections.abc import Mapping
 
 import numpy as np
 import polars as pl
 
 SignalFn = Callable[..., np.ndarray]
 CAUSALITY_MIN_PREFIX_BARS = 32
+_SAFE_IMPORT_ROOTS = {"__future__", "math", "numpy", "polars", "typing"}
+_BANNED_CALL_ROOTS = {
+    "__import__",
+    "breakpoint",
+    "compile",
+    "delattr",
+    "eval",
+    "exec",
+    "getattr",
+    "globals",
+    "input",
+    "locals",
+    "open",
+    "setattr",
+    "vars",
+}
+_BANNED_ATTR_CALLS = {
+    "dump",
+    "dumps",
+    "load",
+    "read_csv",
+    "read_database",
+    "read_excel",
+    "read_ipc",
+    "read_json",
+    "read_ndjson",
+    "read_parquet",
+    "save",
+    "savez",
+    "savez_compressed",
+    "scan_csv",
+    "scan_ipc",
+    "scan_ndjson",
+    "scan_parquet",
+}
+_SAFE_BUILTIN_NAMES = (
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "dict",
+    "enumerate",
+    "Exception",
+    "float",
+    "int",
+    "isinstance",
+    "len",
+    "list",
+    "max",
+    "min",
+    "range",
+    "round",
+    "set",
+    "sorted",
+    "str",
+    "sum",
+    "tuple",
+    "ValueError",
+    "zip",
+)
 
 
 class ModelStateCloneError(TypeError):
     """Raised when model_state cannot be isolated for causality checks."""
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_name(node.value)
+        if base is None:
+            return None
+        return f"{base}.{node.attr}"
+    return None
+
+
+def _is_mutable_default(node: ast.AST | None) -> bool:
+    return isinstance(node, (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, ast.SetComp))
+
+
+def _freeze_constant(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType({k: _freeze_constant(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_constant(v) for v in value)
+    if isinstance(value, set):
+        return frozenset(_freeze_constant(v) for v in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_constant(v) for v in value)
+    return value
+
+
+def _restricted_import(
+    name: str,
+    globals_dict: dict[str, Any] | None = None,
+    locals_dict: dict[str, Any] | None = None,
+    fromlist: tuple[str, ...] = (),
+    level: int = 0,
+):
+    if level != 0:
+        raise ImportError("relative imports are not allowed in strategy modules")
+    root = name.split(".", 1)[0]
+    if root not in _SAFE_IMPORT_ROOTS:
+        raise ImportError(f"disallowed import root '{root}' in strategy module")
+    return py_builtins.__import__(name, globals_dict, locals_dict, fromlist, level)
+
+
+def _safe_builtins() -> dict[str, Any]:
+    safe = {name: getattr(py_builtins, name) for name in _SAFE_BUILTIN_NAMES}
+    safe["__import__"] = _restricted_import
+    return safe
+
+
+def _validate_signal_source(source: str, path: Path) -> None:
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid strategy syntax in {path}: {exc.msg}") from exc
+
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root not in _SAFE_IMPORT_ROOTS:
+                    raise ValueError(f"Strategy module {path} uses disallowed import '{alias.name}'")
+            continue
+        if isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".", 1)[0]
+            if node.level != 0 or root not in _SAFE_IMPORT_ROOTS:
+                raise ValueError(f"Strategy module {path} uses disallowed import from '{node.module}'")
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if isinstance(node, ast.AsyncFunctionDef):
+                raise ValueError(f"Strategy module {path} may not define async functions")
+            defaults = list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]
+            if any(_is_mutable_default(default) for default in defaults):
+                raise ValueError(f"Strategy module {path} uses mutable default arguments")
+            continue
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        else:
+            raise ValueError(f"Strategy module {path} uses unsupported top-level statement '{type(node).__name__}'")
+
+        for target in targets:
+            if not isinstance(target, ast.Name) or not target.id.isupper():
+                raise ValueError(
+                    f"Strategy module {path} may only assign uppercase constants at module scope",
+                )
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            raise ValueError(f"Strategy module {path} may not mutate module/global scope")
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and node not in tree.body:
+            raise ValueError(f"Strategy module {path} may only import at module scope")
+        if isinstance(node, ast.Call):
+            call_name = _dotted_name(node.func)
+            if call_name is None:
+                continue
+            root = call_name.split(".", 1)[0]
+            leaf = call_name.rsplit(".", 1)[-1]
+            if root in _BANNED_CALL_ROOTS or call_name in _BANNED_CALL_ROOTS or leaf in _BANNED_ATTR_CALLS:
+                raise ValueError(f"Strategy module {path} uses disallowed call '{call_name}'")
 
 
 def _clone_model_state(model_state: Any | None) -> Any | None:
@@ -160,11 +326,18 @@ def load_signal_module(strategy_name: str, signals_dir: Path | None = None) -> M
     path = directory / f"{strategy_name}.py"
     if not path.exists():
         raise FileNotFoundError(f"Strategy module not found: {path}")
-    spec = importlib.util.spec_from_file_location(f"research.signals.{strategy_name}", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load module spec for {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    source = path.read_text(encoding="utf-8")
+    _validate_signal_source(source, path)
+    module = ModuleType(f"research.signals.{strategy_name}")
+    module.__file__ = str(path)
+    module.__package__ = "research.signals"
+    module.__dict__["__builtins__"] = _safe_builtins()
+    exec(compile(source, str(path), "exec"), module.__dict__)
+    for name, value in list(module.__dict__.items()):
+        if name.startswith("__") or callable(value) or isinstance(value, ModuleType):
+            continue
+        if name.isupper():
+            module.__dict__[name] = _freeze_constant(value)
     return module
 
 
@@ -188,7 +361,7 @@ def get_strategy_metadata(strategy_name: str, signals_dir: Path | None = None) -
     """Return strategy metadata if present, else empty dict."""
     module = load_signal_module(strategy_name, signals_dir)
     raw = getattr(module, "STRATEGY_METADATA", {})
-    return raw if isinstance(raw, dict) else {}
+    return dict(raw) if isinstance(raw, Mapping) else {}
 
 
 def compute_strategy_id(

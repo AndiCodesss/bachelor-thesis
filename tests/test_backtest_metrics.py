@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 import numpy as np
 from datetime import datetime, timedelta
-from src.framework.backtest.metrics import compute_metrics
+from src.framework.backtest.metrics import compute_daily_pnl_series, compute_metrics
 from src.framework.data.constants import TOTAL_COST_RT
 
 
@@ -304,6 +304,29 @@ def test_sharpe_sparse_trading_diluted():
     daily[9] = pnl_per_trade   # Fri Feb 14
     expected_sharpe = (daily.mean() / daily.std(ddof=1)) * np.sqrt(252)
     assert abs(metrics["sharpe_ratio"] - expected_sharpe) < 1e-6
+
+
+def test_daily_pnl_series_excludes_weekends_but_keeps_friday():
+    """Zero-filled daily series should include Friday and skip Saturday/Sunday."""
+    friday = datetime(2025, 2, 7, 10, 0, 0)
+    monday = datetime(2025, 2, 10, 10, 0, 0)
+
+    trades = pl.DataFrame({
+        "entry_time": [friday, monday],
+        "exit_time": [friday + timedelta(minutes=30), monday + timedelta(minutes=30)],
+        "entry_price": [18000.0, 18000.0],
+        "exit_price": [18010.0, 18010.0],
+        "direction": [1, 1],
+        "size": [1, 1],
+    })
+
+    daily = compute_daily_pnl_series(trades)
+    dates = daily["_date"].to_list()
+
+    assert dates == [
+        datetime(2025, 2, 7).date(),
+        datetime(2025, 2, 10).date(),
+    ]
 
 
 def test_drawdown_specific_sequence():

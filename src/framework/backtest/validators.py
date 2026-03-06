@@ -37,6 +37,67 @@ def _compute_eval_metrics(trades: pl.DataFrame, bars: pl.DataFrame) -> tuple[pl.
     return scored, metrics
 
 
+def _empty_trade_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "entry_time": pl.Datetime("ns", "UTC"),
+            "exit_time": pl.Datetime("ns", "UTC"),
+            "entry_price": pl.Float64,
+            "exit_price": pl.Float64,
+            "direction": pl.Int8,
+            "size": pl.Int32,
+        }
+    )
+
+
+def _linear_trend(values: list[float]) -> tuple[float, float]:
+    """Return least-squares slope and R-squared for equally spaced observations."""
+    if len(values) < 2:
+        return 0.0, 0.0
+    x = np.arange(len(values), dtype=np.float64)
+    y = np.asarray(values, dtype=np.float64)
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = slope * x + intercept
+    ss_res = float(np.sum((y - fitted) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r_squared = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+    return float(slope), float(r_squared)
+
+
+def _extract_walk_forward_fold_trades(
+    history_trades: pl.DataFrame,
+    test_df: pl.DataFrame,
+) -> pl.DataFrame:
+    """Keep trades opened in the test fold and mark open positions to the fold close."""
+    if len(history_trades) == 0 or len(test_df) == 0:
+        return _empty_trade_frame()
+
+    test_start_ts = test_df["ts_event"][0]
+    test_end_ts = test_df["ts_event"][-1]
+    fold_close = float(test_df["close"][-1])
+
+    realized = history_trades.filter(
+        (pl.col("entry_time") >= test_start_ts)
+        & (pl.col("entry_time") <= test_end_ts)
+        & (pl.col("exit_time") <= test_end_ts)
+    )
+    carry = history_trades.filter(
+        (pl.col("entry_time") >= test_start_ts)
+        & (pl.col("entry_time") <= test_end_ts)
+        & (pl.col("exit_time") > test_end_ts)
+    )
+    if len(carry) > 0:
+        carry = carry.with_columns(
+            pl.lit(test_end_ts).alias("exit_time"),
+            pl.lit(fold_close).alias("exit_price"),
+        )
+
+    frames = [frame for frame in (realized, carry) if len(frame) > 0]
+    if not frames:
+        return _empty_trade_frame()
+    return pl.concat(frames)
+
+
 def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int = 100, **backtest_kwargs) -> dict:
     """Randomize signal assignment to test if performance is due to chance.
 
@@ -80,19 +141,17 @@ def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int
     if len(shuffle_sharpes) == 0:
         shuffle_mean = 0.0
         shuffle_std = 0.0
-        percentile_95 = 0.0
     else:
         shuffle_mean = float(np.mean(shuffle_sharpes))
         shuffle_std = float(np.std(shuffle_sharpes, ddof=1)) if len(shuffle_sharpes) > 1 else 0.0
-        percentile_95 = float(np.percentile(shuffle_sharpes, 95))
 
     # Compute where real_sharpe ranks
     if len(shuffle_sharpes) == 0:
         percentile = 0.0
     else:
-        percentile = float(np.sum(np.array(shuffle_sharpes) < real_sharpe) / len(shuffle_sharpes) * 100)
+        percentile = float(np.sum(np.array(shuffle_sharpes) <= real_sharpe) / len(shuffle_sharpes) * 100)
 
-    verdict = "PASS" if real_sharpe > percentile_95 else "FAIL"
+    verdict = "PASS" if percentile >= 95.0 else "FAIL"
 
     return {
         "verdict": verdict,
@@ -105,7 +164,7 @@ def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int
 
 
 def walk_forward_test(df: pl.DataFrame, signal_col: str = "signal", n_folds: int = 5, **backtest_kwargs) -> dict:
-    """Time-series cross-validation to check out-of-sample performance.
+    """Expanding-history walk-forward evaluation over sequential out-of-sample folds.
 
     Args:
         df: DataFrame with ts_event, close, and signal columns
@@ -116,28 +175,42 @@ def walk_forward_test(df: pl.DataFrame, signal_col: str = "signal", n_folds: int
     Returns:
         dict with verdict (PASS/FAIL), fold_sharpes, fold_pnls, profitable_folds
     """
-    # Split data into n_folds sequential chunks
     total_rows = len(df)
-    fold_size = total_rows // n_folds
+    if n_folds <= 0 or total_rows < 4:
+        return {
+            "verdict": "FAIL",
+            "fold_sharpes": [],
+            "fold_pnls": [],
+            "profitable_folds": 0,
+            "threshold": "majority_profitable",
+            "mode": "expanding_history",
+        }
+
+    # Partition into one initial training segment plus n_folds test segments.
+    boundaries = np.linspace(0, total_rows, n_folds + 2, dtype=int)
 
     fold_sharpes = []
     fold_pnls = []
     profitable_folds = 0
 
     for i in range(n_folds):
-        start_idx = i * fold_size
-        end_idx = (i + 1) * fold_size if i < n_folds - 1 else total_rows
-
-        fold_df = df[start_idx:end_idx]
-
-        if len(fold_df) == 0:
+        train_end = int(boundaries[i + 1])
+        test_start = train_end
+        test_end = int(boundaries[i + 2])
+        if test_end <= test_start or train_end <= 0:
             continue
 
-        fold_trades = run_backtest(fold_df, signal_col=signal_col, **backtest_kwargs)
-        _, fold_metrics = _compute_eval_metrics(fold_trades, fold_df)
+        history_df = df[:test_end]
+        test_df = df[test_start:test_end]
+        if len(test_df) == 0:
+            continue
 
-        fold_sharpes.append(fold_metrics["sharpe_ratio"])
-        fold_pnls.append(fold_metrics["net_pnl"])
+        history_trades = run_backtest(history_df, signal_col=signal_col, **backtest_kwargs)
+        fold_trades = _extract_walk_forward_fold_trades(history_trades, test_df)
+        _, fold_metrics = _compute_eval_metrics(fold_trades, test_df)
+
+        fold_sharpes.append(_sanitize_sharpe(fold_metrics["sharpe_ratio"]))
+        fold_pnls.append(float(fold_metrics["net_pnl"]))
 
         if fold_metrics["net_pnl"] > 0:
             profitable_folds += 1
@@ -150,6 +223,7 @@ def walk_forward_test(df: pl.DataFrame, signal_col: str = "signal", n_folds: int
         "fold_pnls": fold_pnls,
         "profitable_folds": profitable_folds,
         "threshold": "majority_profitable",
+        "mode": "expanding_history",
     }
 
 
@@ -396,8 +470,15 @@ def decay_test(df: pl.DataFrame, signal_col: str = "signal", n_chunks: int = 4, 
         chunk_sharpes.append(_sanitize_sharpe(chunk_metrics["sharpe_ratio"]))
         last_chunk_df = chunk_df
 
-    # Check if monotonically declining
-    is_declining = all(chunk_sharpes[i] >= chunk_sharpes[i+1] for i in range(len(chunk_sharpes) - 1))
+    trend_slope, trend_r_squared = _linear_trend(chunk_sharpes)
+    midpoint = max(1, len(chunk_sharpes) // 2)
+    early_mean = float(np.mean(chunk_sharpes[:midpoint])) if chunk_sharpes else 0.0
+    late_mean = float(np.mean(chunk_sharpes[midpoint:])) if len(chunk_sharpes) > midpoint else early_mean
+    is_declining = bool(
+        trend_slope < 0
+        and trend_r_squared >= 0.5
+        and late_mean <= (early_mean * 0.9)
+    )
 
     # Check if last chunk is profitable
     if len(last_chunk_df) == 0:
@@ -405,6 +486,8 @@ def decay_test(df: pl.DataFrame, signal_col: str = "signal", n_chunks: int = 4, 
             "verdict": "FAIL",
             "chunk_sharpes": chunk_sharpes,
             "is_declining": is_declining,
+            "trend_slope": trend_slope,
+            "trend_r_squared": trend_r_squared,
         }
     last_chunk_trades = run_backtest(last_chunk_df, signal_col=signal_col, **backtest_kwargs)
     _, last_chunk_metrics = _compute_eval_metrics(last_chunk_trades, last_chunk_df)
@@ -417,6 +500,8 @@ def decay_test(df: pl.DataFrame, signal_col: str = "signal", n_chunks: int = 4, 
         "verdict": verdict,
         "chunk_sharpes": chunk_sharpes,
         "is_declining": is_declining,
+        "trend_slope": trend_slope,
+        "trend_r_squared": trend_r_squared,
     }
 
 
