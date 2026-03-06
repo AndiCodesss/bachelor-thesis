@@ -615,3 +615,112 @@ def test_diagnose_zero_signal_handles_no_referenced_columns():
     code = "some_var > threshold"  # no quoted column names
     result = mod._diagnose_zero_signal(df, code)
     assert "no referenced columns" in result
+
+
+def test_validate_generated_strategy_errors_on_zero_signal_rate(tmp_path):
+    mod = _load_module()
+
+    code = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "import numpy as np\n"
+        "import polars as pl\n"
+        'DEFAULT_PARAMS: dict = {"absorption_threshold": 0.9999}\n'
+        "def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray:\n"
+        '    cfg = dict(DEFAULT_PARAMS); cfg.update(params or {})\n'
+        '    _ = df["absorption_signal"].to_numpy() if "absorption_signal" in df.columns else None\n'
+        "    return np.zeros(len(df), dtype=np.int8)\n"
+        'STRATEGY_METADATA = {"name": "zero_strat", "version": "1.0",'
+        ' "features_required": ["close"], "description": "test"}\n'
+    )
+    (tmp_path / "zero_strat.py").write_text(code, encoding="utf-8")
+
+    sample_df = pl.DataFrame({
+        "close": [float(i) for i in range(100)],
+        "absorption_signal": [i % 20 == 0 for i in range(100)],
+    })
+
+    errors = mod._validate_generated_strategy(
+        strategy_name="zero_strat",
+        signals_dir=tmp_path,
+        params={},
+        bar_configs=["tick_610"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        sample_cache={"tick_610": sample_df},
+        code=code,
+    )
+    assert len(errors) == 1
+    assert "signal_rate=0.0%" in errors[0]
+    assert "absorption_signal" in errors[0]
+    assert "ACTION REQUIRED" in errors[0]
+
+
+def test_validate_generated_strategy_errors_on_high_signal_rate(tmp_path):
+    mod = _load_module()
+
+    code = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "DEFAULT_PARAMS: dict = {}\n"
+        "def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray:\n"
+        "    return np.ones(len(df), dtype=np.int8)\n"
+        'STRATEGY_METADATA = {"name": "always_long", "version": "1.0",'
+        ' "features_required": [], "description": "test"}\n'
+    )
+    (tmp_path / "always_long.py").write_text(code, encoding="utf-8")
+
+    sample_df = pl.DataFrame({"close": [float(i) for i in range(100)]})
+
+    errors = mod._validate_generated_strategy(
+        strategy_name="always_long",
+        signals_dir=tmp_path,
+        params={},
+        bar_configs=["tick_610"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        sample_cache={"tick_610": sample_df},
+        code=code,
+    )
+    assert len(errors) == 1
+    assert "signal_rate=" in errors[0]
+    assert "cost destruction" in errors[0]
+
+
+def test_validate_generated_strategy_passes_for_healthy_signal_rate(tmp_path):
+    mod = _load_module()
+
+    code = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "DEFAULT_PARAMS: dict = {}\n"
+        "def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray:\n"
+        "    out = np.zeros(len(df), dtype=np.int8)\n"
+        "    if len(df) > 10:\n"
+        "        out[5] = 1\n"
+        "    return out\n"
+        'STRATEGY_METADATA = {"name": "sparse_strat", "version": "1.0",'
+        ' "features_required": [], "description": "test"}\n'
+    )
+    (tmp_path / "sparse_strat.py").write_text(code, encoding="utf-8")
+
+    sample_df = pl.DataFrame({"close": [float(i) for i in range(100)]})
+
+    errors = mod._validate_generated_strategy(
+        strategy_name="sparse_strat",
+        signals_dir=tmp_path,
+        params={},
+        bar_configs=["tick_610"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        sample_cache={"tick_610": sample_df},
+        code=code,
+    )
+    assert errors == []

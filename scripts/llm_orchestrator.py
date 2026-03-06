@@ -384,15 +384,22 @@ def _diagnose_zero_signal(df: pl.DataFrame, code: str) -> str:
     return "\n".join(lines) if lines else "  (could not compute stats for referenced columns)"
 
 
-def _ensure_runtime_state(root: Path, *, resume: bool, mission_name: str) -> dict[str, Path]:
+def _ensure_runtime_state(
+    root: Path,
+    *,
+    resume: bool,
+    mission_name: str,
+    lane_id: str | None = None,
+) -> dict[str, Path]:
     state_dir = root / "research" / ".state"
     state_dir.mkdir(parents=True, exist_ok=True)
+    orch_filename = f"llm_orchestrator_{lane_id}.json" if lane_id else "llm_orchestrator.json"
     paths = {
         "queue": state_dir / "experiment_queue.json",
         "queue_lock": state_dir / "experiment_queue.lock",
         "handoffs": state_dir / "handoffs.json",
         "handoffs_lock": state_dir / "handoffs.lock",
-        "orchestrator": state_dir / "llm_orchestrator.json",
+        "orchestrator": state_dir / orch_filename,
     }
 
     defaults = {
@@ -993,6 +1000,7 @@ def _validate_generated_strategy(
     session_filter: str,
     feature_group: str,
     sample_cache: dict[str, pl.DataFrame],
+    code: str = "",
 ) -> list[str]:
     module = load_signal_module(strategy_name, signals_dir=signals_dir)
     strategy_fn = getattr(module, "generate_signal", None)
@@ -1036,6 +1044,25 @@ def _validate_generated_strategy(
         signal_errors = _validate_signal_array(raw, len(strategy_df))
         if signal_errors:
             errors.append(f"{strategy_name}: contract failed for {bar_config}: {signal_errors[0]}")
+        else:
+            nonzero = int(np.count_nonzero(raw))
+            total = len(raw)
+            rate_pct = 100.0 * nonzero / total if total > 0 else 0.0
+            if nonzero == 0:
+                diag = _diagnose_zero_signal(strategy_df, code)
+                errors.append(
+                    f"{strategy_name}: signal_rate=0.0% for {bar_config} "
+                    f"(0/{total} bars non-zero — target 0.05–0.3%). "
+                    f"Column statistics for referenced features:\n{diag}\n"
+                    f"ACTION REQUIRED: Relax the most restrictive threshold(s) above "
+                    f"to produce at least 1 signal in this {total}-bar sample."
+                )
+            elif rate_pct > 2.0:
+                errors.append(
+                    f"{strategy_name}: signal_rate={rate_pct:.2f}% for {bar_config} "
+                    f"({nonzero}/{total} bars non-zero — target 0.05–0.3%). "
+                    f"Tighten entry filters to avoid cost destruction."
+                )
 
     return errors
 
@@ -1737,7 +1764,14 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=int, default=None, help="Sleep between successful iterations.")
     parser.add_argument("--resume", action="store_true", help="Resume orchestrator state from research/.state.")
     parser.add_argument("--dry-run", action="store_true", help="Generate and validate only; do not write files/tasks.")
+    parser.add_argument("--lane", type=str, default=None, help="Lane ID (e.g. A, B, C) for parallel execution. Namespaces state and log files.")
     args = parser.parse_args()
+
+    lane_id: str | None = None
+    if args.lane is not None:
+        lane_id = re.sub(r"[^a-zA-Z0-9]", "", str(args.lane)).upper() or None
+        if not lane_id:
+            raise ValueError("--lane must contain at least one alphanumeric character")
 
     root = Path(__file__).resolve().parent.parent
     mission_path = args.mission.resolve()
@@ -1765,7 +1799,7 @@ def main() -> int:
     session_filter = str(mission.get("session_filter", "eth")).lower()
     feature_group = str(mission.get("feature_group", "all")).lower()
 
-    state_paths = _ensure_runtime_state(root, resume=bool(args.resume), mission_name=mission_name)
+    state_paths = _ensure_runtime_state(root, resume=bool(args.resume), mission_name=mission_name, lane_id=lane_id)
     orchestrator_state = _read_json(state_paths["orchestrator"])
     iterations_done = int(orchestrator_state.get("iterations_completed", 0))
     total_tasks = int(orchestrator_state.get("total_tasks_enqueued", 0))
@@ -1844,9 +1878,10 @@ def main() -> int:
     signals_dir = root / "research" / "signals"
     handoffs_path = state_paths["handoffs"]
     research_log_path = root / "results" / "logs" / "research_experiments.jsonl"
-    orchestrator_log_path = root / "results" / "logs" / "llm_orchestrator.jsonl"
-    orchestrator_log_lock = root / "results" / "logs" / "llm_orchestrator.lock"
-    run_id = f"llm_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{_slug(mission_name)}"
+    log_suffix = f"_{lane_id}" if lane_id else ""
+    orchestrator_log_path = root / "results" / "logs" / f"llm_orchestrator{log_suffix}.jsonl"
+    orchestrator_log_lock = root / "results" / "logs" / f"llm_orchestrator{log_suffix}.lock"
+    run_id = f"llm_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{_slug(mission_name)}{log_suffix}"
     start_monotonic = time.monotonic()
 
     set_execution_mode(ExecutionMode.RESEARCH)
