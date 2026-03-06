@@ -93,6 +93,25 @@ OHLCV_FEATURE_COLUMNS = frozenset({
     "volatility_compression_1bar",
 })
 
+# Columns that strategies are allowed to see in the OHLCV-only arm.
+# These are raw bar primitives or session/context levels derivable from OHLCV.
+OHLCV_STRATEGY_INPUT_COLUMNS = (
+    OHLCV_FEATURE_COLUMNS
+    | frozenset({
+        "ts_event",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "prev_day_high",
+        "prev_day_low",
+        "prev_day_close",
+        "or_high",
+        "or_low",
+    })
+)
+
 
 def filter_feature_group(
     df: pl.DataFrame,
@@ -138,3 +157,35 @@ def filter_feature_group(
         # else: MBP1 feature → drop
 
     return df.select(cols_to_keep)
+
+
+def filter_strategy_inputs(
+    df: pl.DataFrame,
+    group: str,
+) -> pl.DataFrame:
+    """Return the strategy-visible column set for an experiment arm.
+
+    This differs from `filter_feature_group()`:
+    - it always strips forward labels before strategy execution
+    - the `ohlcv` arm exposes only OHLCV-derived columns plus raw OHLCV bars
+    - the `all` arm preserves the full strategy-visible surface
+
+    The evaluator still keeps access to the full frame for backtesting/cost
+    estimation; this function is only for the strategy's input matrix.
+    """
+    if group not in VALID_FEATURE_GROUPS:
+        raise ValueError(
+            f"Unknown feature_group '{group}'. Valid: {sorted(VALID_FEATURE_GROUPS)}"
+        )
+
+    from src.framework.features_canonical.builder import LABEL_COLUMNS
+
+    label_set = set(LABEL_COLUMNS)
+    if group == "all":
+        return df.select([c for c in df.columns if c not in label_set])
+
+    allowed = OHLCV_STRATEGY_INPUT_COLUMNS
+    return df.select([
+        c for c in df.columns
+        if c in allowed and c not in label_set
+    ])

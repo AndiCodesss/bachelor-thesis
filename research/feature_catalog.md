@@ -73,19 +73,26 @@ high_low_vol_ratio  | (vol_at_high + vol_at_low) / total_vol   | >0.4 = activity
 
 ## AMT (VOLUME PROFILE & OPENING RANGE)
 # See thinker system prompt for full AMT framework description
-va_high             | value area high (prior session ~70% vol)  | VAH; price above = out of value; rejection here = short
-va_low              | value area low (prior session ~70% vol)   | VAL; price below = out of value; rejection here = long
-position_in_va      | (close - va_low) / (va_high - va_low)    | <0=below VA, 0-1=inside VA, >1=above VA; use for VA rejection signal
-va_width            | va_high - va_low (points)                 | wide VA = balance day, narrow VA = trending day
-poc_price           | price with highest prior-session volume   | POC; magnet for price; fade moves away from POC
-poc_distance        | (close - poc_price) / poc_price           | normalised; >0=above POC, <0=below POC; fade extremes
+va_high             | current-session expanding value area high | causal VAH; updates bar-by-bar within session
+va_low              | current-session expanding value area low  | causal VAL; updates bar-by-bar within session
+position_in_va      | (close - va_low) / (va_high - va_low)    | <0=below VA, 0-1=inside VA, >1=above VA; use for session VA rejection/acceptance
+va_width            | (va_high - va_low) / close               | normalised current-session VA width; wide = balance, narrow = directional auction
+poc_price           | current-session expanding POC price       | session POC; magnet for price when auction is balanced
+poc_distance        | (close - poc_price) / ATR_session        | ATR-normalised distance from session POC; >0=above, <0=below
 poc_distance_raw    | close - poc_price (points)                | raw distance from POC; use for tick-based threshold
 poc_slope_6         | slope of rolling_poc over 6 bars          | positive = POC drifting up = upward value migration
+prev_day_poc        | previous session final POC                | prior-session reference level for failed auction / rotation setups
+prev_day_vah        | previous session final value area high    | prior-session VAH
+prev_day_val        | previous session final value area low     | prior-session VAL
+dist_prev_poc       | (close - prev_day_poc) / ATR_session      | ATR-normalised distance to prior-session POC
+dist_prev_vah       | (close - prev_day_vah) / ATR_session      | ATR-normalised distance to prior-session VAH
+dist_prev_val       | (close - prev_day_val) / ATR_session      | ATR-normalised distance to prior-session VAL
+prev_day_va_position| (close - prev_day_val) / (prev_day_vah - prev_day_val) | prior-session VA position; <0 below value, >1 above value
 rolling_va_high     | intraday rolling value area high          | intraday VAH equivalent
 rolling_va_low      | intraday rolling value area low           | intraday VAL equivalent
 rolling_va_position | (close - rolling_va_low) / rolling_va_width | intraday position within rolling VA
 rolling_poc         | intraday rolling point of control         | intraday POC
-rolling_poc_distance| close - rolling_poc (points)              | distance from intraday POC
+rolling_poc_distance| (close - rolling_poc) / ATR_session       | ATR-normalised distance from rolling intraday POC
 or_broken_up        | 1 when price first breaks above OR high  | IB breakout long signal; state machine: arm on this, wait for pullback
 or_broken_down      | 1 when price first breaks below OR low   | IB breakout short signal; failed version = fade back inside OR
 or_width            | opening range high - low (points)         | <4pts = too narrow (whipsaw); >30pts = too wide (exhaustion)

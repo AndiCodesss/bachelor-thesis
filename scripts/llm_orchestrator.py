@@ -26,7 +26,7 @@ if __package__ is None or __package__ == "":
 from research.lib.atomic_io import atomic_json_write
 from research.lib.coordination import append_handoff, enqueue_task
 from research.lib.experiments import log_experiment
-from research.lib.feature_groups import filter_feature_group
+from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.llm_client import (
     ClaudeCodeCLIClient,
     LLMClientError,
@@ -41,7 +41,6 @@ from src.framework.api import (
     set_execution_mode,
 )
 from src.framework.data.constants import TICK_SIZE
-from src.framework.features_canonical.builder import LABEL_COLUMNS
 
 
 def _utc_now() -> str:
@@ -458,6 +457,8 @@ def _collect_feedback_items(log_path: Path, limit: int = 6000, max_items: int = 
         event = str(row.get("event", ""))
         if event == "task_result":
             metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            gauntlet = row.get("gauntlet") if isinstance(row.get("gauntlet"), dict) else {}
+            advanced = row.get("advanced_validation") if isinstance(row.get("advanced_validation"), dict) else {}
             items.append(
                 {
                     "event": "task_result",
@@ -466,6 +467,10 @@ def _collect_feedback_items(log_path: Path, limit: int = 6000, max_items: int = 
                     "verdict": str(row.get("verdict", "")),
                     "sharpe_ratio": metrics.get("sharpe_ratio"),
                     "trade_count": metrics.get("trade_count"),
+                    "failed_checks": _failed_gauntlet_checks(gauntlet),
+                    "dsr": _extract_dsr(advanced),
+                    "alpha_decay_verdict": _extract_alpha_decay_verdict(advanced),
+                    "factor_verdict": _extract_factor_verdict(advanced),
                 },
             )
         elif event == "task_error":
@@ -618,6 +623,43 @@ def _as_str_list(value: Any, max_items: int = 8, max_len: int = 220) -> list[str
     return out
 
 
+def _failed_gauntlet_checks(gauntlet: dict[str, Any]) -> list[str]:
+    failed: list[str] = []
+    for name, payload in gauntlet.items():
+        if name in {"overall_verdict", "pass_count", "total_tests"}:
+            continue
+        if isinstance(payload, dict) and str(payload.get("verdict", "")).upper() == "FAIL":
+            failed.append(str(name))
+    return failed
+
+
+def _extract_dsr(advanced_validation: dict[str, Any]) -> float | None:
+    dsr_payload = advanced_validation.get("deflated_sharpe")
+    if not isinstance(dsr_payload, dict):
+        return None
+    dsr = dsr_payload.get("dsr")
+    try:
+        return float(dsr) if dsr is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_alpha_decay_verdict(advanced_validation: dict[str, Any]) -> str | None:
+    payload = advanced_validation.get("alpha_decay")
+    if not isinstance(payload, dict):
+        return None
+    verdict = str(payload.get("verdict", "")).strip()
+    return verdict or None
+
+
+def _extract_factor_verdict(advanced_validation: dict[str, Any]) -> str | None:
+    payload = advanced_validation.get("factor_attribution")
+    if not isinstance(payload, dict):
+        return None
+    verdict = str(payload.get("verdict", "")).strip()
+    return verdict or None
+
+
 def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
     """Format raw feedback items into a compact results table for the thinker."""
     if not feedback_items:
@@ -652,11 +694,28 @@ def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
             trades_str = str(int(float(trades))) if trades is not None else "N/A"
             bar_str = f" [{bar}]" if bar else ""
 
+            diagnostics: list[str] = []
+            failed_checks = [str(x) for x in (r.get("failed_checks") or []) if str(x)]
+            if failed_checks:
+                diagnostics.append("fails=" + ",".join(failed_checks[:3]))
+            dsr = r.get("dsr")
+            if dsr is not None:
+                diagnostics.append(f"dsr={float(dsr):.2f}")
+            alpha_decay = r.get("alpha_decay_verdict")
+            if alpha_decay:
+                diagnostics.append(f"decay={alpha_decay}")
+            factor_verdict = r.get("factor_verdict")
+            if factor_verdict:
+                diagnostics.append(f"factor={factor_verdict}")
+            diag_str = f" [{' | '.join(diagnostics)}]" if diagnostics else ""
+
             note = ""
             if sharpe is not None and float(sharpe) > 0 and verdict not in ("PASS",):
                 note = f"  ← NEAR-MISS: read research/signals/{name}.py"
 
-            lines.append(f"  {name}{bar_str}: {verdict} sharpe={sharpe_str} trades={trades_str}{note}")
+            lines.append(
+                f"  {name}{bar_str}: {verdict} sharpe={sharpe_str} trades={trades_str}{diag_str}{note}",
+            )
 
     if errors:
         lines.append("\nGENERATION/VALIDATION ERRORS:")
@@ -883,9 +942,7 @@ def _load_sample_strategy_df(
             continue
         if len(df) == 0:
             continue
-        df = filter_feature_group(df, feature_group)
-        label_cols = [c for c in LABEL_COLUMNS if c in df.columns]
-        strategy_df = df.drop(label_cols) if label_cols else df
+        strategy_df = filter_strategy_inputs(df, feature_group)
         if len(strategy_df) == 0:
             continue
         last_non_empty = strategy_df.head(max_rows)
@@ -906,6 +963,9 @@ FEATURE_COMPUTATION_NOTES = [
     "VWAP-style cumulative metrics reset at session/day boundaries in canonical builders.",
     "Opening-range fields are session-aware; OR-dependent fields are null before OR is ready.",
     "Orderflow/toxicity/footprint features are bar-causal and derived only from events up to each bar close.",
+    "Volume-profile session fields (`poc_price`, `va_high`, `va_low`, `position_in_va`) are expanding-session and causal within the active session.",
+    "Previous-session profile levels are separate columns (`prev_day_poc`, `prev_day_vah`, `prev_day_val`, `dist_prev_*`, `prev_day_va_position`).",
+    "Profile distance features such as `poc_distance` and `rolling_poc_distance` are ATR-normalized; `*_raw` variants stay in points.",
 ]
 
 _FEATURE_CATALOG_PATH = Path(__file__).resolve().parent.parent / "research" / "feature_catalog.md"
@@ -987,6 +1047,67 @@ def _build_feature_knowledge(
         "computation_notes": list(FEATURE_COMPUTATION_NOTES),
         "feature_catalog": FEATURE_CATALOG_LINES,
         "errors": errors,
+    }
+
+
+def _sample_bar_context(df: pl.DataFrame) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "sample_rows": int(len(df)),
+        "columns": int(len(df.columns)),
+    }
+    if not {"high", "low"}.issubset(set(df.columns)) or len(df) == 0:
+        return context
+
+    high = np.asarray(df["high"].to_numpy(), dtype=np.float64)
+    low = np.asarray(df["low"].to_numpy(), dtype=np.float64)
+    range_ticks = (high - low) / float(TICK_SIZE)
+    range_ticks = range_ticks[np.isfinite(range_ticks) & (range_ticks >= 0.0)]
+    if range_ticks.size == 0:
+        return context
+
+    context["range_ticks"] = {
+        "median": float(np.percentile(range_ticks, 50)),
+        "p25": float(np.percentile(range_ticks, 25)),
+        "p75": float(np.percentile(range_ticks, 75)),
+        "p90": float(np.percentile(range_ticks, 90)),
+    }
+    return context
+
+
+def _build_runtime_context(
+    *,
+    mission: dict[str, Any],
+    mission_bar_configs: list[str],
+    split: str,
+    session_filter: str,
+    feature_group: str,
+    sample_cache: dict[str, pl.DataFrame],
+) -> dict[str, Any]:
+    bar_context: dict[str, Any] = {}
+    for bar_config in mission_bar_configs:
+        sample_df = sample_cache.get(bar_config)
+        if sample_df is not None:
+            bar_context[bar_config] = _sample_bar_context(sample_df)
+
+    return {
+        "schema_version": "1.0",
+        "objective": str(mission.get("objective", "")),
+        "split": split,
+        "session_filter": session_filter,
+        "feature_group": feature_group,
+        "allowed_bar_configs": list(mission_bar_configs),
+        "target_sharpe": float(mission.get("target_sharpe", 0.0)),
+        "min_trade_count": int(mission.get("min_trade_count", 1)),
+        "gauntlet_tests": [
+            "shuffle",
+            "walk_forward",
+            "regime",
+            "param_sensitivity",
+            "cost_sensitivity",
+            "decay",
+            "trade_count",
+        ],
+        "sample_bar_context": bar_context,
     }
 
 
@@ -1077,30 +1198,22 @@ def _build_thinker_system_prompt() -> str:
         "INSTRUMENT & COST REALITY:\n"
         "- Tick size: 0.25 pts = $5/tick. Total round-trip cost: $14.50 (commission + 1-tick slippage/side).\n"
         "- A strategy trading 100 times costs $1,450 in friction. At 500 trades it needs $7,250 gross to break even.\n"
-        "- TARGET: 30–150 total signals across the 7-month validate split (Sep 2024–Mar 2025).\n"
+        "- Use the active mission context from the user prompt for split, session filter, min_trade_count, and allowed bar configs.\n"
         "- Strategies firing >300 signals almost certainly lose to transaction costs. Design for precision, not frequency.\n"
-        "- Signal rate: target 0.05–0.3% of bars non-zero. time_1m has ~60,000 bars in validate; tick/volume bars similar.\n"
-        "  At 0.1% rate: ~60 signals total — ideal. At 1% rate: ~600 signals — cost destruction.\n"
-        "  Design thresholds to produce rare, high-conviction setups, not frequent noise.\n\n"
+        "- Signal rate: target roughly 0.05–0.3% of bars non-zero. Design thresholds for rare, high-conviction setups, not frequent noise.\n\n"
         "BAR RANGE REALITY — CRITICAL FOR STOP SIZING:\n"
         "The backtest engine evaluates stops INTRA-BAR. A stop smaller than the bar's typical noise range\n"
-        "will be hit within the same bar the trade enters — producing avg_bars_held=0 and 100% stop-outs.\n"
-        "Measured median high-low range per bar type (ETH session, validate split):\n"
-        "  tick_610  : median=56t  p25=42t  p75=73t  p90=78t  → MIN viable SL: 30–40 ticks\n"
-        "  volume_2000: median=94t  p25=83t  p75=109t p90=150t → MIN viable SL: 50–80 ticks\n"
-        "  time_1m   : median~12t  p25~8t   p75~18t  p90~25t  → MIN viable SL: 8–15 ticks\n"
-        "RULE: sl_ticks MUST be at least half the p25 bar range for the chosen bar type.\n"
-        "  tick_610 → sl_ticks >= 20 (30+ strongly preferred)\n"
-        "  volume_2000 → sl_ticks >= 40 (60+ strongly preferred)\n"
-        "  time_1m → sl_ticks >= 4 (8–15 typical)\n"
+        "will be hit within the same bar the trade enters — producing avg_bars_held=0 and stop-out clusters.\n"
+        "Use the sample bar-range statistics in the runtime context JSON for the chosen bar config.\n"
+        "RULE: sl_ticks should be at least half the sample p25 bar range, and usually closer to the sample median.\n"
         "With 1.5:1 RR minimum: pt_ticks >= 1.5 × sl_ticks.\n"
-        "Example for tick_610: sl_ticks=32, pt_ticks=48 → PT=$240, SL=$160 — viable at 42%+ WR.\n"
-        "Example for time_1m: sl_ticks=10, pt_ticks=16 → PT=$80, SL=$50 — viable at 40%+ WR.\n\n"
-        "VALIDATE SPLIT CONTEXT (Sep 2024 – Mar 2025):\n"
-        "- Includes: US presidential election (Nov 2024), multiple Fed rate decisions, Q4 2024 rally, early 2025 volatility.\n"
-        "- ETH session: 03:00–16:00 ET. Signals must respect session boundaries.\n\n"
+        "Example: sl_ticks=32, pt_ticks=48 → PT=$240, SL=$160 — viable at 42%+ WR.\n\n"
+        "ACTIVE CONTEXT:\n"
+        "- Respect the split and session filter supplied in the runtime context JSON.\n"
+        "- Do not assume ETH, validate-only, or any fixed month range unless the runtime context explicitly says so.\n\n"
         "PASS CRITERIA:\n"
-        "- Sharpe ratio >= 1.5, trade count >= 30, gauntlet pass (walk-forward + permutation + day-of-week tests).\n\n"
+        "- Satisfy the mission target_sharpe and min_trade_count from the runtime context, plus a gauntlet pass.\n"
+        "- Gauntlet coverage includes shuffle, walk-forward, regime, parameter sensitivity, cost sensitivity, decay, and trade-count checks.\n\n"
         "ANTI-LOOKAHEAD RULES (non-negotiable):\n"
         "- Never reference bar N+1 or later. Only use current bar (index i) and past bars.\n"
         "- shift(1) means shift FORWARD in time (previous bar value) — safe. shift(-1) means FUTURE — forbidden.\n"
@@ -1138,15 +1251,17 @@ def _build_thinker_system_prompt() -> str:
         "AUCTION MARKET THEORY (AMT) — HIGH PRIORITY FOCUS:\n"
         "AMT is a first-principles framework for NQ and is strongly encouraged as a basis for hypotheses.\n"
         "Core AMT concepts and their EXACT precomputed column names:\n"
-        "- Value Area (VA): ~70% of prior session volume. VAH = va_high, VAL = va_low.\n"
+        "- Current-session Value Area (VA): expanding causal session profile. VAH = va_high, VAL = va_low.\n"
         "  position_in_va: current price position within VA (0=at VAL, 1=at VAH, <0=below VA, >1=above VA)\n"
         "  va_width: total width of value area in points\n"
-        "  rolling_va_high, rolling_va_low, rolling_va_position: rolling (intraday) equivalents\n"
+        "  rolling_va_high, rolling_va_low, rolling_va_position: 24-bar rolling intraday equivalents\n"
         "  Edge: price entering VA from outside rotates to opposite boundary. Price rejecting VA boundary\n"
         "  signals continuation. Use position_in_va < 0 for 'price below VA' condition.\n"
-        "- Point of Control (POC): highest-volume price level.\n"
+        "- Previous-session profile levels are separate fields: prev_day_poc, prev_day_vah, prev_day_val,\n"
+        "  plus dist_prev_poc, dist_prev_vah, dist_prev_val, and prev_day_va_position.\n"
+        "- Point of Control (POC): highest-volume price level in the expanding current-session profile.\n"
         "  poc_price: actual price level of POC\n"
-        "  poc_distance: normalised distance of close from POC (positive = above, negative = below)\n"
+        "  poc_distance: ATR-normalised distance of close from POC (positive = above, negative = below)\n"
         "  poc_distance_raw: distance in raw points\n"
         "  poc_slope_6: 6-bar slope of rolling POC — positive means POC drifting up\n"
         "  rolling_poc, rolling_poc_distance: intraday rolling POC equivalents\n"
@@ -1250,6 +1365,7 @@ def _build_thinker_user_prompt(
     mission: dict[str, Any],
     existing_strategies: list[str],
     feedback_items: list[dict[str, Any]],
+    runtime_context: dict[str, Any] | None = None,
     feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
     bar_configs = mission.get("bar_configs", ["tick_610"])
@@ -1271,6 +1387,13 @@ def _build_thinker_user_prompt(
         f"Recent experiment results:\n{results_table}\n\n"
         "Design exactly one hypothesis that is implementable by a separate coding model."
     )
+    if runtime_context:
+        prompt += (
+            "\n\nRUNTIME_MISSION_CONTEXT_JSON_BEGIN\n"
+            f"{json.dumps(runtime_context, indent=2, sort_keys=True, default=str)}\n"
+            "RUNTIME_MISSION_CONTEXT_JSON_END\n"
+            "Treat this JSON as the source of truth for the active split, session filter, thresholds, and sample bar stats."
+        )
     if notebooklm_url:
         import os as _os
         cwd = _os.getcwd()
@@ -1408,8 +1531,9 @@ Then inside the loop reset on new_session[i]:
 
 SIGNAL FREQUENCY — CRITICAL CALIBRATION WARNING:
 The pre-flight validation runs on a SMALL SAMPLE of ~1,200 bars (roughly 1-3 trading days).
-The full validate split has ~60,000 bars (7 months) for time_1m, similar for other configs.
-That is a 50x scale difference.
+The full research split is much larger than that sample.
+Use the mission_constraints in the thinker handoff for min_trade_count, session filter,
+and sample bar stats rather than hardcoding absolute signal counts from memory.
 
 NEVER embed raise ValueError or assert for signal count inside generate_signal.
 Reason: if you check "if signals < 30: raise ValueError", the repair loop will loosen
@@ -1438,6 +1562,7 @@ def _build_coder_handoff(
     thinker_brief: dict[str, Any],
     mission: dict[str, Any],
     thinker_payload_hash: str,
+    runtime_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(thinker_brief, dict):
         raise ValueError("thinker_brief must be a dict")
@@ -1480,6 +1605,10 @@ def _build_coder_handoff(
             "allowed_bar_configs": allowed_cfgs,
             "preferred_session_filter": str(mission.get("session_filter", "eth")),
             "feature_group": str(mission.get("feature_group", "all")),
+            "split": str((runtime_context or {}).get("split", mission.get("split", "validate"))),
+            "target_sharpe": float((runtime_context or {}).get("target_sharpe", mission.get("target_sharpe", 0.0))),
+            "min_trade_count": int((runtime_context or {}).get("min_trade_count", mission.get("min_trade_count", 1))),
+            "sample_bar_context": dict((runtime_context or {}).get("sample_bar_context", {})),
         },
         "hypothesis": {
             "hypothesis_id": hypothesis_id,
@@ -1908,6 +2037,14 @@ def main() -> int:
         feature_group=feature_group,
         sample_cache=sample_cache,
     )
+    runtime_context = _build_runtime_context(
+        mission=mission,
+        mission_bar_configs=mission_bar_configs,
+        split=split,
+        session_filter=session_filter,
+        feature_group=feature_group,
+        sample_cache=sample_cache,
+    )
     feature_knowledge_hash = _sha256_text(
         json.dumps(feature_knowledge, sort_keys=True, separators=(",", ":"), default=str),
     )[:16]
@@ -1959,6 +2096,7 @@ def main() -> int:
                 mission=mission,
                 existing_strategies=existing,
                 feedback_items=feedback_items,
+                runtime_context=runtime_context,
                 feature_knowledge=feature_knowledge,
             )
             thinker_generation = _call_stage_json(
@@ -2008,6 +2146,7 @@ def main() -> int:
                 thinker_brief=thinker_brief,
                 mission=mission,
                 thinker_payload_hash=thinker_hash,
+                runtime_context=runtime_context,
             )
 
             coder_user_prompt = _build_coder_user_prompt(

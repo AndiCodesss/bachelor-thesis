@@ -7,6 +7,7 @@ import math
 import numpy as np
 import polars as pl
 
+from src.framework.backtest.metrics import compute_trade_pnl_frame
 from src.framework.data.constants import (
     FACTOR_MIN_DAYS,
     FACTOR_R2_THRESHOLD,
@@ -76,22 +77,16 @@ def factor_attribution(
         assert "entry_time" in trades.columns, "trades missing exit_time/entry_time"
         date_col = "entry_time"
 
-    # Compute net PnL per trade if not already present
+    # Compute net PnL per trade if not already present.
+    cost_col = "adaptive_cost_rt" if "adaptive_cost_rt" in trades.columns else None
     if "pnl_dollars" in trades.columns:
         pnl_col = "pnl_dollars"
     else:
-        # Derive from entry/exit prices, direction, size (matches metrics.py pattern)
-        from src.framework.data.constants import TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
-
-        trades = trades.with_columns(
-            (
-                (pl.col("exit_price") - pl.col("entry_price"))
-                * pl.col("direction")
-                / TICK_SIZE
-                * TICK_VALUE
-                * pl.col("size")
-                - pl.col("size") * TOTAL_COST_RT
-            ).alias("_net_pnl")
+        trades = compute_trade_pnl_frame(
+            trades,
+            cost_override_col=cost_col,
+        ).with_columns(
+            pl.col("net_pnl").alias("_net_pnl")
         )
         pnl_col = "_net_pnl"
 

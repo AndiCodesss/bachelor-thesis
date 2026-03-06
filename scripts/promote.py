@@ -21,16 +21,18 @@ if __package__ is None or __package__ == "":
 
 from research.lib.atomic_io import atomic_json_write
 from research.lib.candidates import load_candidate
+from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.promotion import verify_candidate_artifacts
 from research.signals import check_signal_causality
 from research.lib.trial_counter import estimate_effective_trials
 from research.lib.promotion_gates import WalkForwardFold, WalkForwardValidator, evaluate_promotion_gates
 from src.framework import __version__ as framework_version
+from src.framework.backtest.costs import compute_adaptive_costs
 from src.framework.backtest.engine import TRADE_SCHEMA, run_backtest
-from src.framework.backtest.metrics import compute_metrics
-from src.framework.data.constants import RESULTS_DIR, TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
+from src.framework.backtest.metrics import compute_daily_pnl_series, compute_metrics
+from src.framework.data.constants import RESULTS_DIR
 from src.framework.data.loader import ExecutionMode, get_parquet_files, set_execution_mode
-from src.framework.features_canonical.builder import LABEL_COLUMNS, load_cached_matrix
+from src.framework.features_canonical.builder import load_cached_matrix
 from src.framework.security.framework_lock import verify_manifest
 
 
@@ -131,8 +133,11 @@ def _extract_candidate_params(candidate: dict[str, Any]) -> dict[str, Any]:
 def _parse_bar_config(candidate: dict[str, Any]) -> dict[str, Any]:
     bar_raw = str(candidate.get("bar_type") or candidate.get("bar_config") or "time_5m").strip().lower()
     session_filter = str(candidate.get("session_filter", "rth")).strip().lower()
+    feature_group = str(candidate.get("feature_group", "all")).strip().lower()
     if session_filter not in {"rth", "eth"}:
         session_filter = "rth"
+    if feature_group not in {"all", "ohlcv"}:
+        feature_group = "all"
 
     if bar_raw.startswith("eth_"):
         session_filter = "eth"
@@ -144,6 +149,7 @@ def _parse_bar_config(candidate: dict[str, Any]) -> dict[str, Any]:
             "bar_size": "5m",
             "bar_threshold": int(bar_raw.split("_", 1)[1]),
             "session_filter": session_filter,
+            "feature_group": feature_group,
         }
 
     if bar_raw.startswith("vol_"):
@@ -152,6 +158,7 @@ def _parse_bar_config(candidate: dict[str, Any]) -> dict[str, Any]:
             "bar_size": "5m",
             "bar_threshold": int(bar_raw.split("_", 1)[1]),
             "session_filter": session_filter,
+            "feature_group": feature_group,
         }
 
     if bar_raw.startswith("volume_"):
@@ -160,6 +167,7 @@ def _parse_bar_config(candidate: dict[str, Any]) -> dict[str, Any]:
             "bar_size": "5m",
             "bar_threshold": int(bar_raw.split("_", 1)[1]),
             "session_filter": session_filter,
+            "feature_group": feature_group,
         }
 
     if bar_raw.startswith("time_"):
@@ -176,6 +184,7 @@ def _parse_bar_config(candidate: dict[str, Any]) -> dict[str, Any]:
         "bar_size": bar_size,
         "bar_threshold": None,
         "session_filter": session_filter,
+        "feature_group": feature_group,
     }
 
 
@@ -243,34 +252,13 @@ def _split_lockbox_files(all_files: list[Path], lockbox_months: int) -> tuple[li
 def _daily_returns_from_trades(trades: pl.DataFrame, *, cost_multiplier: float = 1.0) -> list[float]:
     if len(trades) == 0:
         return []
-
-    pnl_df = trades.with_columns(
-        (
-            ((pl.col("exit_price") - pl.col("entry_price")) * pl.col("direction") / TICK_SIZE * TICK_VALUE)
-            * pl.col("size")
-            - (pl.col("size") * (TOTAL_COST_RT * float(cost_multiplier)))
-        ).alias("_net_pnl"),
-        pl.col("exit_time").dt.date().alias("_date"),
+    cost_col = "adaptive_cost_rt" if "adaptive_cost_rt" in trades.columns else None
+    daily = compute_daily_pnl_series(
+        trades,
+        cost_override_col=cost_col,
+        cost_multiplier=cost_multiplier,
     )
-
-    daily = pnl_df.group_by("_date").agg(pl.col("_net_pnl").sum()).sort("_date")
-    if len(daily) == 0:
-        return []
-
-    # Match backtest metrics logic: include non-trading weekdays as 0 PnL.
-    min_date = daily["_date"].min()
-    max_date = daily["_date"].max()
-    all_bdays = pl.DataFrame({
-        "_date": pl.date_range(min_date, max_date, "1d", eager=True),
-    }).filter(pl.col("_date").dt.weekday() <= 5)
-    # Include actual trade dates (covers weekend trades in tests/synthetic data).
-    all_dates = pl.concat([
-        all_bdays.select("_date"),
-        daily.select("_date"),
-    ]).unique().sort("_date")
-    daily = all_dates.join(daily, on="_date", how="left").fill_null(0.0)
-
-    return [float(v) for v in daily["_net_pnl"].to_list()]
+    return [float(v) for v in daily["net_pnl"].to_list()]
 
 
 def _daily_trade_counts_from_trades(trades: pl.DataFrame) -> list[int]:
@@ -389,27 +377,20 @@ def _fit_signal_state(
 
 def _generate_signal_array(
     runtime: SignalRuntime,
-    bars: pl.DataFrame,
+    strategy_bars: pl.DataFrame,
     params: dict[str, Any],
     model_state: Any | None,
 ) -> np.ndarray:
-    safe_bars = _safe_signal_bars(bars)
     if runtime.generate_accepts_state:
-        raw = runtime.generate_fn(safe_bars, params, model_state)
+        raw = runtime.generate_fn(strategy_bars, params, model_state)
     else:
-        raw = runtime.generate_fn(safe_bars, params)
+        raw = runtime.generate_fn(strategy_bars, params)
 
     arr = np.asarray(raw, dtype=np.float64).reshape(-1)
-    if len(arr) != len(bars):
-        raise ValueError(f"Signal length mismatch: expected {len(bars)}, got {len(arr)}")
+    if len(arr) != len(strategy_bars):
+        raise ValueError(f"Signal length mismatch: expected {len(strategy_bars)}, got {len(arr)}")
 
     return np.sign(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)).astype(np.int8)
-
-
-def _safe_signal_bars(bars: pl.DataFrame) -> pl.DataFrame:
-    """Remove forward-looking label columns before calling strategy code."""
-    _label_cols_present = [c for c in LABEL_COLUMNS if c in bars.columns]
-    return bars.drop(_label_cols_present) if _label_cols_present else bars
 
 
 def _run_signal_on_files(
@@ -420,6 +401,7 @@ def _run_signal_on_files(
     model_state: Any | None,
     load_bars: Callable[[Path], pl.DataFrame],
     backtest_kwargs: dict[str, Any],
+    feature_group: str = "all",
 ) -> dict[str, Any]:
     trade_frames: list[pl.DataFrame] = []
     causality_checked = False
@@ -430,12 +412,13 @@ def _run_signal_on_files(
         bars = load_bars(Path(file_path))
         if len(bars) == 0:
             continue
+        strategy_bars = filter_strategy_inputs(bars, feature_group)
 
         # Causality check (prefix invariance) once per evaluation run on >=33 bars.
         # Buffers short files so the check still runs for coarse bar sizes.
         if not causality_checked:
-            causality_frames.append(_safe_signal_bars(bars))
-            causality_row_count += len(bars)
+            causality_frames.append(strategy_bars)
+            causality_row_count += len(strategy_bars)
             if causality_row_count >= _CAUSALITY_MIN_ROWS:
                 causality_df = pl.concat(causality_frames).sort("ts_event")
                 causality_errors = check_signal_causality(
@@ -451,10 +434,11 @@ def _run_signal_on_files(
                 causality_checked = True
                 causality_frames.clear()
 
-        signal = _generate_signal_array(runtime, bars, signal_params, model_state)
+        signal = _generate_signal_array(runtime, strategy_bars, signal_params, model_state)
         bars_with_signal = bars.with_columns(pl.Series("signal", signal).cast(pl.Int8))
         trades = run_backtest(bars_with_signal, signal_col="signal", **backtest_kwargs)
         if len(trades) > 0:
+            trades = compute_adaptive_costs(trades, bars_with_signal)
             trade_frames.append(trades)
 
     if causality_row_count > 0 and not causality_checked:
@@ -512,16 +496,26 @@ def _evaluate_candidate_walk_forward(
 
     all_files = _collect_all_files()
     wfa_files, lockbox_files, lockbox_months = _split_lockbox_files(all_files, int(args.lockbox_months))
+    bars_cache: dict[Path, pl.DataFrame] = {}
+
+    def _load_full_bars(file_path: Path) -> pl.DataFrame:
+        resolved = Path(file_path).resolve()
+        if resolved not in bars_cache:
+            bars_cache[resolved] = load_cached_matrix(
+                resolved,
+                bar_size=bar_cfg["bar_size"],
+                bar_type=bar_cfg["bar_type"],
+                bar_threshold=bar_cfg["bar_threshold"],
+                include_bar_columns=True,
+                session_filter=bar_cfg["session_filter"],
+            )
+        return bars_cache[resolved]
+
+    def _load_strategy_bars(file_path: Path) -> pl.DataFrame:
+        return filter_strategy_inputs(_load_full_bars(file_path), bar_cfg["feature_group"])
 
     def _load_bars(file_path: Path) -> pl.DataFrame:
-        return load_cached_matrix(
-            file_path,
-            bar_size=bar_cfg["bar_size"],
-            bar_type=bar_cfg["bar_type"],
-            bar_threshold=bar_cfg["bar_threshold"],
-            include_bar_columns=True,
-            session_filter=bar_cfg["session_filter"],
-        )
+        return _load_full_bars(file_path)
 
     validator = WalkForwardValidator(
         wfa_files,
@@ -552,7 +546,7 @@ def _evaluate_candidate_walk_forward(
             runtime,
             train_files=fold.train_files,
             params=params,
-            load_bars=_load_bars,
+            load_bars=_load_strategy_bars,
         )
 
         fold_eval = _run_signal_on_files(
@@ -562,6 +556,7 @@ def _evaluate_candidate_walk_forward(
             model_state=model_state,
             load_bars=_load_bars,
             backtest_kwargs=backtest_kwargs,
+            feature_group=bar_cfg["feature_group"],
         )
 
         combined_daily_returns_2x.extend([float(v) for v in fold_eval["daily_returns_2x"]])
@@ -587,7 +582,7 @@ def _evaluate_candidate_walk_forward(
             runtime,
             train_files=tuple(wfa_files),
             params=signal_params,
-            load_bars=_load_bars,
+            load_bars=_load_strategy_bars,
         )
         lockbox_eval = _run_signal_on_files(
             files=tuple(lockbox_files),
@@ -596,6 +591,7 @@ def _evaluate_candidate_walk_forward(
             model_state=lockbox_state,
             load_bars=_load_bars,
             backtest_kwargs=backtest_kwargs,
+            feature_group=bar_cfg["feature_group"],
         )
         lockbox_metrics = {
             "months": lockbox_months,

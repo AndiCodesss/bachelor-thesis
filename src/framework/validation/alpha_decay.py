@@ -9,29 +9,22 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from src.framework.backtest.metrics import compute_trade_pnl_frame
 from src.framework.data.constants import (
     ALPHA_DECAY_MIN_WINDOWS,
     ALPHA_DECAY_STABLE_HALFLIFE,
     ALPHA_DECAY_STEP_DAYS,
     ALPHA_DECAY_WINDOW_DAYS,
-    TICK_SIZE,
-    TICK_VALUE,
-    TOTAL_COST_RT,
 )
 
 
 def _add_net_pnl(trades: pl.DataFrame) -> pl.DataFrame:
     """Compute net PnL in dollars from raw trade columns (matches metrics.py)."""
-    return trades.with_columns(
-        (
-            (pl.col("exit_price") - pl.col("entry_price"))
-            * pl.col("direction")
-            / TICK_SIZE
-            * TICK_VALUE
-            * pl.col("size")
-            - pl.col("size") * TOTAL_COST_RT
-        ).alias("pnl_dollars")
-    )
+    cost_col = "adaptive_cost_rt" if "adaptive_cost_rt" in trades.columns else None
+    return compute_trade_pnl_frame(
+        trades,
+        cost_override_col=cost_col,
+    ).rename({"net_pnl": "pnl_dollars"})
 
 
 def compute_rolling_sharpe(

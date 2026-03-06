@@ -67,7 +67,8 @@ def test_format_results_table_sorts_by_sharpe_and_marks_near_misses():
         {"event": "task_result", "strategy_name": "bad_strat", "bar_config": "tick_610",
          "verdict": "FAIL", "sharpe_ratio": -2.1, "trade_count": 80},
         {"event": "task_result", "strategy_name": "near_miss_strat", "bar_config": "time_1m",
-         "verdict": "FAIL", "sharpe_ratio": 0.42, "trade_count": 25},
+         "verdict": "FAIL", "sharpe_ratio": 0.42, "trade_count": 25,
+         "failed_checks": ["trade_count", "shuffle"], "dsr": 0.31, "alpha_decay_verdict": "DECAYING"},
         {"event": "generation_rejected", "strategy_name": "broken_gen", "error": "KeyError: ema_ratio"},
     ]
     table = mod._format_results_table(items)
@@ -79,6 +80,9 @@ def test_format_results_table_sorts_by_sharpe_and_marks_near_misses():
     # error block present
     assert "broken_gen" in table
     assert "KeyError" in table
+    assert "fails=trade_count,shuffle" in table
+    assert "dsr=0.31" in table
+    assert "decay=DECAYING" in table
 
 
 def test_format_results_table_empty_items():
@@ -361,9 +365,11 @@ def test_prompts_include_feature_knowledge_markers():
         },
         existing_strategies=[],
         feedback_items=[],
+        runtime_context={"split": "validate", "min_trade_count": 30, "sample_bar_context": {"tick_610": {"sample_rows": 1200}}},
         feature_knowledge=feature_knowledge,
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in thinker_prompt
+    assert "RUNTIME_MISSION_CONTEXT_JSON_BEGIN" in thinker_prompt
     assert "KNOWLEDGE_BASE_COMMAND" in thinker_prompt
     assert "https://notebooklm.google.com/notebook/test-id" in thinker_prompt
     assert "query_notebook.py" in thinker_prompt
@@ -389,6 +395,14 @@ def test_thinker_system_prompt_requires_internal_brainstorm():
     assert "internally brainstorm" in prompt
     assert "RESEARCH HANDBOOK" in prompt
     assert "KNOWLEDGE_BASE_COMMAND" in prompt
+
+
+def test_thinker_system_prompt_uses_runtime_context_not_stale_session_claims():
+    mod = _load_module()
+    prompt = mod._build_thinker_system_prompt()
+    assert "prior session volume. VAH = va_high" not in prompt
+    assert "Do not assume ETH" in prompt
+    assert "target_sharpe and min_trade_count" in prompt
 
 
 def test_thinker_user_prompt_omits_notebook_command_when_no_url():

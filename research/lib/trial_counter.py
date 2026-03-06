@@ -19,6 +19,7 @@ _DEFAULT_LOCK_PATH = Path("research/.state/trial_count.lock")
 _DEFAULT_EXPERIMENTS_PATH = Path("results/logs/research_experiments.jsonl")
 
 _SCHEMA_VERSION = "1.0"
+_TRIAL_EVENTS = frozenset({"task_result", "task_error"})
 
 
 def _utc_now() -> str:
@@ -79,11 +80,7 @@ def increment_trial(
 def count_trials(
     experiments_path: Path | str = _DEFAULT_EXPERIMENTS_PATH,
 ) -> int:
-    """Read-only count of every backtest execution from experiments JSONL.
-
-    Counts all valid rows, not just unique strategy_ids. This correctly
-    penalizes parameter sweeps on the same strategy in the DSR calculation.
-    """
+    """Read-only count of every backtest execution from experiments JSONL."""
     path = Path(experiments_path)
     if not path.exists():
         return 0
@@ -97,9 +94,17 @@ def count_trials(
                 row = json.loads(line)
             except Exception:
                 continue
-            if isinstance(row, dict):
+            if isinstance(row, dict) and _is_trial_row(row):
                 count += 1
     return count
+
+
+def _is_trial_row(row: dict[str, Any]) -> bool:
+    """Return True when a JSONL record represents one validator execution."""
+    event = str(row.get("event", "")).strip()
+    if event:
+        return event in _TRIAL_EVENTS
+    return any(row.get(key) for key in ("strategy_id", "strategy_name", "strategy"))
 
 
 def _strategy_family(row: dict[str, Any]) -> str | None:
@@ -119,7 +124,7 @@ def estimate_effective_trials(
     """Estimate correlation-adjusted effective trial count.
 
     Method:
-    - raw_trials: all valid JSON object rows
+    - raw_trials: validator execution rows only
     - unique_strategies: unique strategy_id or (strategy_name, params) keys
     - effective_trials: sum(sqrt(n_family)) across strategy families
 
@@ -151,6 +156,8 @@ def estimate_effective_trials(
             except Exception:
                 continue
             if not isinstance(row, dict):
+                continue
+            if not _is_trial_row(row):
                 continue
 
             raw_trials += 1

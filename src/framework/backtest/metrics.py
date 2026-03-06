@@ -6,6 +6,70 @@ import numpy as np
 from src.framework.data.constants import TICK_SIZE, TICK_VALUE, TOTAL_COST_RT
 
 
+def compute_trade_pnl_frame(
+    trades: pl.DataFrame,
+    *,
+    cost_override_col: str | None = None,
+    cost_multiplier: float = 1.0,
+) -> pl.DataFrame:
+    """Return per-trade gross/net PnL with optional adaptive-cost scaling."""
+    use_adaptive = (
+        cost_override_col is not None
+        and cost_override_col in trades.columns
+    )
+    if use_adaptive:
+        cost_expr = (pl.col(cost_override_col) * pl.col("size") * float(cost_multiplier)).alias("costs")
+    else:
+        cost_expr = (pl.col("size") * TOTAL_COST_RT * float(cost_multiplier)).alias("costs")
+
+    return trades.with_columns([
+        ((pl.col("exit_price") - pl.col("entry_price")) * pl.col("direction")).alias("gross_pnl_points"),
+        cost_expr,
+        ((pl.col("exit_time") - pl.col("entry_time")).dt.total_seconds() / 60.0).alias("holding_time_min"),
+    ]).with_columns([
+        (pl.col("gross_pnl_points") / TICK_SIZE * TICK_VALUE * pl.col("size")).alias("gross_pnl"),
+    ]).with_columns([
+        (pl.col("gross_pnl") - pl.col("costs")).alias("net_pnl"),
+    ])
+
+
+def compute_daily_pnl_series(
+    trades: pl.DataFrame,
+    *,
+    cost_override_col: str | None = None,
+    cost_multiplier: float = 1.0,
+) -> pl.DataFrame:
+    """Aggregate trade PnL to daily series with zero-filled weekdays."""
+    if len(trades) == 0:
+        return pl.DataFrame({
+            "_date": pl.Series([], dtype=pl.Date),
+            "net_pnl": pl.Series([], dtype=pl.Float64),
+        })
+
+    df = compute_trade_pnl_frame(
+        trades,
+        cost_override_col=cost_override_col,
+        cost_multiplier=cost_multiplier,
+    )
+    daily_pnl_df = df.with_columns(
+        pl.col("exit_time").dt.date().alias("_date")
+    ).group_by("_date").agg(pl.col("net_pnl").sum()).sort("_date")
+
+    if len(daily_pnl_df) <= 1:
+        return daily_pnl_df
+
+    min_date = daily_pnl_df["_date"].min()
+    max_date = daily_pnl_df["_date"].max()
+    all_bdays = pl.DataFrame({
+        "_date": pl.date_range(min_date, max_date, "1d", eager=True),
+    }).filter(pl.col("_date").dt.weekday() <= 5)
+    all_dates = pl.concat([
+        all_bdays.select("_date"),
+        daily_pnl_df.select("_date"),
+    ]).unique().sort("_date")
+    return all_dates.join(daily_pnl_df, on="_date", how="left").fill_null(0.0)
+
+
 def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_override_col: str | None = None, initial_capital: float = 100_000.0) -> dict:
     """Compute financial performance metrics from trades.
 
@@ -42,31 +106,7 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
             "avg_bars_held": 0.0,
         }
 
-    # Determine cost expression: per-trade adaptive or flat
-    use_adaptive = (
-        cost_override_col is not None
-        and cost_override_col in trades.columns
-    )
-    if use_adaptive:
-        cost_expr = (pl.col(cost_override_col) * pl.col("size")).alias("costs")
-    else:
-        cost_expr = (pl.col("size") * TOTAL_COST_RT).alias("costs")
-
-    # Compute PnL for each trade
-    df = trades.with_columns([
-        # Gross PnL in points (per contract)
-        ((pl.col("exit_price") - pl.col("entry_price")) * pl.col("direction")).alias("gross_pnl_points"),
-        # Transaction costs
-        cost_expr,
-        # Holding time
-        ((pl.col("exit_time") - pl.col("entry_time")).dt.total_seconds() / 60.0).alias("holding_time_min"),
-    ]).with_columns([
-        # Gross PnL in dollars (multiply by size for multiple contracts)
-        (pl.col("gross_pnl_points") / TICK_SIZE * TICK_VALUE * pl.col("size")).alias("gross_pnl"),
-    ]).with_columns([
-        # Net PnL (after costs)
-        (pl.col("gross_pnl") - pl.col("costs")).alias("net_pnl"),
-    ])
+    df = compute_trade_pnl_frame(trades, cost_override_col=cost_override_col)
 
     # Basic counts
     trade_count = len(df)
@@ -104,24 +144,11 @@ def compute_metrics(trades: pl.DataFrame, bar_minutes: float = 5.0, cost_overrid
     trade_pnls = df["net_pnl"].to_numpy()
     sharpe_ratio = np.nan
     if trade_count > 1 and "exit_time" in trades.columns:
-        # Group trades by exit date to get daily PnLs
-        daily_pnl_df = df.with_columns(
-            pl.col("exit_time").dt.date().alias("_date")
-        ).group_by("_date").agg(pl.col("net_pnl").sum()).sort("_date")
-
+        daily_pnl_df = compute_daily_pnl_series(
+            trades,
+            cost_override_col=cost_override_col,
+        )
         if len(daily_pnl_df) > 1:
-            # Zero-fill non-trading weekdays so Sharpe is not inflated
-            min_date = daily_pnl_df["_date"].min()
-            max_date = daily_pnl_df["_date"].max()
-            all_bdays = pl.DataFrame({
-                "_date": pl.date_range(min_date, max_date, "1d", eager=True)
-            }).filter(pl.col("_date").dt.weekday() <= 5)
-            # Include actual trading dates (handles weekend trades in tests)
-            all_dates = pl.concat([
-                all_bdays.select("_date"),
-                daily_pnl_df.select("_date"),
-            ]).unique().sort("_date")
-            daily_pnl_df = all_dates.join(daily_pnl_df, on="_date", how="left").fill_null(0)
             trading_day_pnls = daily_pnl_df["net_pnl"].to_numpy().astype(np.float64)
 
             if len(trading_day_pnls) > 1:

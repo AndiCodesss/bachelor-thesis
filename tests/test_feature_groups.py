@@ -6,6 +6,7 @@ import pytest
 from research.lib.feature_groups import (
     OHLCV_FEATURE_COLUMNS,
     filter_feature_group,
+    filter_strategy_inputs,
 )
 from src.framework.features_canonical.builder import NON_FEATURE_COLUMNS
 
@@ -157,6 +158,53 @@ def test_filter_preserves_column_order():
 
     original_order = [c for c in df.columns if c in result.columns]
     assert result.columns == original_order
+
+
+def test_filter_strategy_inputs_all_strips_labels_only():
+    df = _make_dummy_matrix().with_columns(
+        pl.Series("bid_price", [100.0] * 5),
+        pl.Series("ask_price", [100.25] * 5),
+    )
+    result = filter_strategy_inputs(df, "all")
+    assert "fwd_return_1bar" not in result.columns
+    assert "bid_price" in result.columns
+    assert "ask_price" in result.columns
+
+
+def test_filter_strategy_inputs_ohlcv_removes_microstructure_and_labels():
+    df = pl.DataFrame({
+        "ts_event": pl.Series(range(5), dtype=pl.Int64),
+        "open": [100.0] * 5,
+        "high": [101.0] * 5,
+        "low": [99.0] * 5,
+        "close": [100.5] * 5,
+        "volume": [1000.0] * 5,
+        "prev_day_high": [101.0] * 5,
+        "or_high": [101.5] * 5,
+        "sma_ratio_8": [0.01] * 5,
+        "order_flow_imbalance": [0.2] * 5,
+        "bid_price": [100.25] * 5,
+        "ask_price": [100.5] * 5,
+        "buy_volume": [500.0] * 5,
+        "fwd_return_1bar": [0.01] * 5,
+    })
+
+    result = filter_strategy_inputs(df, "ohlcv")
+
+    assert "sma_ratio_8" in result.columns
+    assert "open" in result.columns
+    assert "high" in result.columns
+    assert "low" in result.columns
+    assert "close" in result.columns
+    assert "volume" in result.columns
+    assert "prev_day_high" in result.columns
+    assert "or_high" in result.columns
+
+    assert "order_flow_imbalance" not in result.columns
+    assert "bid_price" not in result.columns
+    assert "ask_price" not in result.columns
+    assert "buy_volume" not in result.columns
+    assert "fwd_return_1bar" not in result.columns
 
 
 # ---------------------------------------------------------------------------

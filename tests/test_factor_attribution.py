@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import numpy as np
 import polars as pl
 
+from src.framework.data.constants import TOTAL_COST_RT
 from src.framework.validation.factor_attribution import (
     compute_factor_returns,
     factor_attribution,
@@ -264,3 +265,16 @@ def test_factor_attribution_uses_exit_date_for_daily_pnl():
     result = factor_attribution(trades, bars, min_days=1)
     assert result["available"] is True
     assert result["n_days"] >= 2
+
+
+def test_factor_attribution_uses_adaptive_costs_when_present():
+    bars = _make_bars(40, seed=321)
+    dates_list = sorted(bars.with_columns(pl.col("ts_event").dt.date().alias("d"))["d"].unique().to_list())
+    daily_pnls = {d: 80.0 for d in dates_list}
+    trades = _make_trades(daily_pnls).with_columns(
+        pl.lit(TOTAL_COST_RT + 120.0).alias("adaptive_cost_rt")
+    )
+
+    result = factor_attribution(trades, bars, min_days=5)
+    assert result["available"] is True
+    assert result["alpha_daily"] < 0.0

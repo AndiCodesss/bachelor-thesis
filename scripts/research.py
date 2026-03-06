@@ -28,7 +28,7 @@ if __package__ is None or __package__ == "":
 from research.lib.atomic_io import atomic_json_write
 from research.lib.budget import MissionBudget
 from research.lib.candidates import write_candidate
-from research.lib.feature_groups import filter_feature_group
+from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.coordination import (
     claim_task,
     complete_task,
@@ -38,6 +38,7 @@ from research.lib.coordination import (
     watchdog_check_timeouts,
 )
 from research.lib.experiments import log_experiment
+from research.lib.trial_counter import estimate_effective_trials
 from research.signals import (
     CAUSALITY_MIN_PREFIX_BARS,
     check_signal_causality,
@@ -48,7 +49,11 @@ from research.signals import (
 from src.framework import __version__ as framework_version
 from src.framework.api import (
     ExecutionMode,
+    compute_adaptive_costs,
     compute_metrics,
+    deflated_sharpe_ratio,
+    factor_attribution,
+    fit_alpha_decay,
     get_split_files,
     load_cached_matrix,
     run_backtest,
@@ -56,8 +61,8 @@ from src.framework.api import (
     set_execution_mode,
 )
 from src.framework.backtest.engine import TRADE_SCHEMA
+from src.framework.backtest.metrics import compute_daily_pnl_series
 from src.framework.data.constants import RESULTS_DIR
-from src.framework.features_canonical.builder import LABEL_COLUMNS
 from src.framework.security.framework_lock import verify_manifest
 
 _ALLOWED_RESEARCH_SPLITS = {"train", "validate"}
@@ -288,6 +293,68 @@ def _prune_terminal_tasks(
         update_fn=_update,
     )
     return int(out["pruned"])
+
+
+def _daily_net_pnl_series(trades: pl.DataFrame) -> np.ndarray:
+    """Daily net PnL series used for DSR diagnostics."""
+    if len(trades) == 0:
+        return np.array([], dtype=np.float64)
+    cost_col = "adaptive_cost_rt" if "adaptive_cost_rt" in trades.columns else None
+    daily = compute_daily_pnl_series(trades, cost_override_col=cost_col)
+    return daily["net_pnl"].to_numpy().astype(np.float64)
+
+
+def _evaluate_advanced_validation_gates(
+    mission: dict[str, Any],
+    advanced_validation: dict[str, Any],
+) -> dict[str, Any]:
+    cfg = mission.get("advanced_validation")
+    if not isinstance(cfg, dict):
+        return {"enabled": False, "passed": True, "checks": {}}
+
+    checks: dict[str, Any] = {}
+
+    min_dsr = cfg.get("min_dsr_probability")
+    if min_dsr is not None:
+        payload = advanced_validation.get("deflated_sharpe")
+        available = isinstance(payload, dict) and bool(payload.get("available", False))
+        value = float(payload.get("dsr", 0.0)) if available and isinstance(payload, dict) else 0.0
+        checks["min_dsr_probability"] = {
+            "passed": available and value >= float(min_dsr),
+            "available": available,
+            "value": value,
+            "min_required": float(min_dsr),
+        }
+
+    allowed_decay = cfg.get("allowed_alpha_decay_verdicts")
+    if isinstance(allowed_decay, list):
+        payload = advanced_validation.get("alpha_decay")
+        verdict = str(payload.get("verdict", "")).strip() if isinstance(payload, dict) else ""
+        allowed = [str(v).strip() for v in allowed_decay if str(v).strip()]
+        checks["alpha_decay_verdict"] = {
+            "passed": verdict in allowed,
+            "available": bool(verdict),
+            "value": verdict,
+            "allowed": allowed,
+        }
+
+    allowed_factor = cfg.get("allowed_factor_verdicts")
+    if isinstance(allowed_factor, list):
+        payload = advanced_validation.get("factor_attribution")
+        verdict = str(payload.get("verdict", "")).strip() if isinstance(payload, dict) else ""
+        allowed = [str(v).strip() for v in allowed_factor if str(v).strip()]
+        checks["factor_verdict"] = {
+            "passed": verdict in allowed,
+            "available": bool(verdict),
+            "value": verdict,
+            "allowed": allowed,
+        }
+
+    return {
+        "enabled": bool(checks),
+        "passed": all(bool(check.get("passed", False)) for check in checks.values()) if checks else True,
+        "checks": checks,
+    }
 
 
 def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
@@ -776,6 +843,7 @@ def _execute_claimed_task(
 
     all_signals: list[pl.DataFrame] = []
     all_trades: list[pl.DataFrame] = []
+    all_bars: list[pl.DataFrame] = []
     bars_processed = 0
     signal_count = 0
     causality_checked = False
@@ -783,7 +851,7 @@ def _execute_claimed_task(
     causality_row_count = 0
 
     for file_path in files:
-        df = load_cached_matrix(
+        full_df = load_cached_matrix(
             file_path,
             bar_size=parsed_bar["bar_size"],
             bar_type=parsed_bar["bar_type"],
@@ -791,13 +859,10 @@ def _execute_claimed_task(
             include_bar_columns=True,
             session_filter=session_filter,
         )
-        if len(df) == 0:
+        if len(full_df) == 0:
             continue
 
-        df = filter_feature_group(df, feature_group)
-        # Strip label columns so strategy code cannot access forward returns
-        _label_cols_present = [c for c in LABEL_COLUMNS if c in df.columns]
-        strategy_df = df.drop(_label_cols_present) if _label_cols_present else df
+        strategy_df = filter_strategy_inputs(full_df, feature_group)
 
         # Causality check (prefix invariance) once per task on >=33 bars.
         # Buffers short files so the check still runs for coarser bar sizes.
@@ -832,18 +897,24 @@ def _execute_claimed_task(
             raise ValueError(f"{task_id}: signal contract failed: {signal_errors}")
 
         signal_i8 = raw_signal.astype(np.int8, copy=False)
-        df_signal = df.with_columns(pl.Series("signal", signal_i8).cast(pl.Int8))
-        bars_processed += len(df_signal)
-        signal_count += int((df_signal["signal"] != 0).sum())
-        # Keep OHLC columns needed by engine (open for entry_on_next_open, high/low for PT/SL)
+        bars_with_signal = full_df.with_columns(pl.Series("signal", signal_i8).cast(pl.Int8))
+        bars_processed += len(bars_with_signal)
+        signal_count += int((bars_with_signal["signal"] != 0).sum())
+        # Keep the evaluator-visible bar surface for the gauntlet and adaptive costs.
         _sig_cols = ["ts_event", "close", "signal"]
-        for _c in ("open", "high", "low"):
-            if _c in df_signal.columns:
+        for _c in ("open", "high", "low", "volume", "bid_price", "ask_price"):
+            if _c in bars_with_signal.columns:
                 _sig_cols.append(_c)
-        all_signals.append(df_signal.select(_sig_cols))
+        all_signals.append(bars_with_signal.select(_sig_cols))
+        eval_bar_cols = [
+            c for c in ("ts_event", "open", "high", "low", "close", "volume", "bid_price", "ask_price")
+            if c in bars_with_signal.columns
+        ]
+        all_bars.append(bars_with_signal.select(eval_bar_cols))
 
-        trades = run_backtest(df_signal, signal_col="signal", **bt_kwargs)
+        trades = run_backtest(bars_with_signal, signal_col="signal", **bt_kwargs)
         if len(trades) > 0:
+            trades = compute_adaptive_costs(trades, bars_with_signal)
             all_trades.append(trades)
 
     if causality_row_count > 0 and not causality_checked:
@@ -853,6 +924,7 @@ def _execute_claimed_task(
         )
 
     signals_df = pl.concat(all_signals).sort("ts_event") if all_signals else _empty_signal_frame()
+    bars_df = pl.concat(all_bars).sort("ts_event") if all_bars else pl.DataFrame()
     trades_df = pl.concat(all_trades) if all_trades else pl.DataFrame(schema=TRADE_SCHEMA)
     metrics = compute_metrics(
         trades_df,
@@ -861,7 +933,24 @@ def _execute_claimed_task(
 
     gauntlet: dict[str, Any] | None = None
     if run_gauntlet and len(signals_df) > 0 and signal_count > 0:
-        gauntlet = run_validation_gauntlet(signals_df, signal_col="signal", **bt_kwargs)
+        gauntlet = run_validation_gauntlet(
+            signals_df,
+            signal_col="signal",
+            min_trades=int(mission.get("min_trade_count", 50)),
+            **bt_kwargs,
+        )
+
+    advanced_validation: dict[str, Any] = {}
+    if len(trades_df) > 0:
+        trial_stats = deflated_sharpe_ratio(
+            _daily_net_pnl_series(trades_df),
+            n_trials=max(1, int(estimate_effective_trials(experiments_path).get("effective_trials", 1))),
+        )
+        advanced_validation["deflated_sharpe"] = trial_stats
+        advanced_validation["alpha_decay"] = fit_alpha_decay(trades_df)
+        if len(bars_df) > 0:
+            advanced_validation["factor_attribution"] = factor_attribution(trades_df, bars_df)
+    advanced_validation_gates = _evaluate_advanced_validation_gates(mission, advanced_validation)
 
     target_sharpe = float(mission.get("target_sharpe", 0.0))
     min_trade_count = int(mission.get("min_trade_count", 1))
@@ -869,13 +958,14 @@ def _execute_claimed_task(
         metrics["sharpe_ratio"] >= target_sharpe
         and metrics["trade_count"] >= min_trade_count
     )
+    meets_advanced_gates = bool(advanced_validation_gates.get("passed", True))
 
     verdict = "FAIL"
     if run_gauntlet:
-        if gauntlet and gauntlet.get("overall_verdict") == "PASS" and meets_metric_thresholds:
+        if gauntlet and gauntlet.get("overall_verdict") == "PASS" and meets_metric_thresholds and meets_advanced_gates:
             verdict = "PASS"
     else:
-        if meets_metric_thresholds:
+        if meets_metric_thresholds and meets_advanced_gates:
             verdict = "PASS"
 
     summary = {
@@ -884,6 +974,7 @@ def _execute_claimed_task(
         "strategy_name": strategy_name,
         "strategy_id": strategy_id,
         "split": split,
+        "feature_group": feature_group,
         "bar_config": bar_config,
         "bar_params": parsed_bar,
         "params": params,
@@ -892,6 +983,8 @@ def _execute_claimed_task(
         "signal_count": signal_count,
         "metrics": metrics,
         "gauntlet": gauntlet,
+        "advanced_validation": advanced_validation,
+        "advanced_validation_gates": advanced_validation_gates,
         "verdict": verdict,
     }
     summary_path = task_dir / "summary.json"
@@ -920,10 +1013,13 @@ def _execute_claimed_task(
             "version": str(getattr(strategy_module, "STRATEGY_METADATA", {}).get("version", "1.0")),
             "bar_config": bar_config,
             "session_filter": session_filter,
+            "feature_group": feature_group,
             "backtest": bt_kwargs,
             "parameters": params,
             "validation_metrics": metrics,
             "gauntlet_results": gauntlet or {},
+            "advanced_validation": advanced_validation,
+            "advanced_validation_gates": advanced_validation_gates,
             "artifacts": {
                 "signal_file": str(signal_file),
                 "signal_file_hash": _sha256_file(signal_file),
@@ -960,9 +1056,12 @@ def _execute_claimed_task(
             "strategy_name": strategy_name,
             "strategy_id": strategy_id,
             "split": split,
+            "feature_group": feature_group,
             "bar_config": bar_config,
             "metrics": metrics,
             "gauntlet": gauntlet,
+            "advanced_validation": advanced_validation,
+            "advanced_validation_gates": advanced_validation_gates,
             "verdict": verdict,
             "artifacts": artifacts,
             "candidate_path": candidate_path,
@@ -975,6 +1074,10 @@ def _execute_claimed_task(
         "strategy_id": strategy_id,
         "metrics": metrics,
         "artifacts": artifacts,
+        "gauntlet": gauntlet,
+        "advanced_validation": advanced_validation,
+        "advanced_validation_gates": advanced_validation_gates,
+        "feature_group": feature_group,
     }
     if candidate_path:
         details["candidate_path"] = candidate_path

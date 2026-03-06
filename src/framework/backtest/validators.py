@@ -2,9 +2,10 @@
 
 import polars as pl
 import numpy as np
+from src.framework.backtest.costs import compute_adaptive_costs
 from src.framework.backtest.engine import run_backtest
 from src.framework.backtest.metrics import compute_metrics
-from src.framework.data.constants import SEED, TOTAL_COST_RT
+from src.framework.data.constants import SEED
 
 
 def _sanitize_sharpe(value: float | int | None) -> float:
@@ -14,6 +15,26 @@ def _sanitize_sharpe(value: float | int | None) -> float:
     except (TypeError, ValueError):
         return 0.0
     return val if np.isfinite(val) else 0.0
+
+
+def _compute_eval_metrics(trades: pl.DataFrame, bars: pl.DataFrame) -> tuple[pl.DataFrame, dict]:
+    """Score trades using adaptive costs when bar context is available."""
+    scored = trades
+    if len(scored) > 0 and "ts_event" in bars.columns and "close" in bars.columns:
+        cost_bars = bars
+        entry_dtype = scored.schema.get("entry_time")
+        ts_dtype = cost_bars.schema.get("ts_event")
+        if entry_dtype is not None and ts_dtype is not None and entry_dtype != ts_dtype:
+            cost_bars = cost_bars.with_columns(pl.col("ts_event").cast(entry_dtype))
+        try:
+            scored = compute_adaptive_costs(scored, cost_bars)
+        except pl.exceptions.PolarsError:
+            scored = trades
+    metrics = compute_metrics(
+        scored,
+        cost_override_col="adaptive_cost_rt" if "adaptive_cost_rt" in scored.columns else None,
+    )
+    return scored, metrics
 
 
 def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int = 100, **backtest_kwargs) -> dict:
@@ -30,7 +51,7 @@ def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int
     """
     # Run backtest on real signal
     real_trades = run_backtest(df, signal_col=signal_col, **backtest_kwargs)
-    real_metrics = compute_metrics(real_trades)
+    _, real_metrics = _compute_eval_metrics(real_trades, df)
     real_sharpe = _sanitize_sharpe(real_metrics["sharpe_ratio"])
 
     # Run backtest on shuffled signals (block permutation)
@@ -52,7 +73,7 @@ def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int
         ])
 
         shuffle_trades = run_backtest(df_shuffled, signal_col="_shuffled_signal", **backtest_kwargs)
-        shuffle_metrics = compute_metrics(shuffle_trades)
+        _, shuffle_metrics = _compute_eval_metrics(shuffle_trades, df_shuffled)
         shuffle_sharpes.append(_sanitize_sharpe(shuffle_metrics["sharpe_ratio"]))
 
     # Compute statistics
@@ -113,7 +134,7 @@ def walk_forward_test(df: pl.DataFrame, signal_col: str = "signal", n_folds: int
             continue
 
         fold_trades = run_backtest(fold_df, signal_col=signal_col, **backtest_kwargs)
-        fold_metrics = compute_metrics(fold_trades)
+        _, fold_metrics = _compute_eval_metrics(fold_trades, fold_df)
 
         fold_sharpes.append(fold_metrics["sharpe_ratio"])
         fold_pnls.append(fold_metrics["net_pnl"])
@@ -150,6 +171,7 @@ def regime_test(df: pl.DataFrame, signal_col: str = "signal", **backtest_kwargs)
     """
     # Run backtest on full contiguous data
     all_trades = run_backtest(df, signal_col=signal_col, **backtest_kwargs)
+    all_trades, _ = _compute_eval_metrics(all_trades, df)
     if len(all_trades) == 0:
         return {
             "verdict": "FAIL",
@@ -195,8 +217,8 @@ def regime_test(df: pl.DataFrame, signal_col: str = "signal", **backtest_kwargs)
     high_vol_trades = trades_with_regime.filter(pl.col("_entry_date").is_in(high_vol_days)).drop("_entry_date")
     low_vol_trades = trades_with_regime.filter(~pl.col("_entry_date").is_in(high_vol_days)).drop("_entry_date")
 
-    high_vol_metrics = compute_metrics(high_vol_trades)
-    low_vol_metrics = compute_metrics(low_vol_trades)
+    _, high_vol_metrics = _compute_eval_metrics(high_vol_trades, df)
+    _, low_vol_metrics = _compute_eval_metrics(low_vol_trades, df)
 
     # PASS if BOTH regimes are profitable
     verdict = "PASS" if (high_vol_metrics["net_pnl"] > 0 and low_vol_metrics["net_pnl"] > 0) else "FAIL"
@@ -227,7 +249,7 @@ def param_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", perturb
     """
     # Run baseline backtest
     baseline_trades = run_backtest(df, signal_col=signal_col, **backtest_kwargs)
-    baseline_metrics = compute_metrics(baseline_trades)
+    _, baseline_metrics = _compute_eval_metrics(baseline_trades, df)
     baseline_sharpe = _sanitize_sharpe(baseline_metrics["sharpe_ratio"])
 
     # Run backtest with perturbed signals
@@ -255,7 +277,7 @@ def param_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", perturb
         ])
 
         perturbed_trades = run_backtest(df_perturbed, signal_col="_perturbed_signal", **backtest_kwargs)
-        perturbed_metrics = compute_metrics(perturbed_trades)
+        _, perturbed_metrics = _compute_eval_metrics(perturbed_trades, df_perturbed)
         perturbed_sharpes.append(_sanitize_sharpe(perturbed_metrics["sharpe_ratio"]))
 
     # Compute statistics
@@ -296,19 +318,17 @@ def cost_sensitivity_test(df: pl.DataFrame, signal_col: str = "signal", **backte
     """
     # Run baseline backtest at 1x costs
     baseline_trades = run_backtest(df, signal_col=signal_col, **backtest_kwargs)
-    baseline_metrics = compute_metrics(baseline_trades)
+    baseline_trades, baseline_metrics = _compute_eval_metrics(baseline_trades, df)
 
     pnl_1x = baseline_metrics["net_pnl"]
     sharpe_1x = baseline_metrics["sharpe_ratio"]
-    trade_count = baseline_metrics["trade_count"]
+    gross_pnl = baseline_metrics["gross_pnl"]
+    total_costs = baseline_metrics["total_costs"]
 
-    # Compute PnL at higher cost levels by adjusting net PnL
-    # Extra cost per trade = TOTAL_COST_RT * (multiplier - 1)
-    extra_cost_1_5x = TOTAL_COST_RT * 0.5
-    extra_cost_2x = TOTAL_COST_RT * 1.0
-
-    pnl_1_5x = pnl_1x - (trade_count * extra_cost_1_5x)
-    pnl_2x = pnl_1x - (trade_count * extra_cost_2x)
+    # Reprice the observed trades under higher friction using the same per-trade
+    # adaptive costs when present, or flat costs otherwise.
+    pnl_1_5x = gross_pnl - (total_costs * 1.5)
+    pnl_2x = gross_pnl - (total_costs * 2.0)
 
     # PASS if profitable at 1.5x costs
     verdict = "PASS" if pnl_1_5x > 0 else "FAIL"
@@ -351,7 +371,7 @@ def decay_test(df: pl.DataFrame, signal_col: str = "signal", n_chunks: int = 4, 
             continue
 
         chunk_trades = run_backtest(chunk_df, signal_col=signal_col, **backtest_kwargs)
-        chunk_metrics = compute_metrics(chunk_trades)
+        _, chunk_metrics = _compute_eval_metrics(chunk_trades, chunk_df)
         chunk_sharpes.append(_sanitize_sharpe(chunk_metrics["sharpe_ratio"]))
         last_chunk_df = chunk_df
 
@@ -366,7 +386,7 @@ def decay_test(df: pl.DataFrame, signal_col: str = "signal", n_chunks: int = 4, 
             "is_declining": is_declining,
         }
     last_chunk_trades = run_backtest(last_chunk_df, signal_col=signal_col, **backtest_kwargs)
-    last_chunk_metrics = compute_metrics(last_chunk_trades)
+    _, last_chunk_metrics = _compute_eval_metrics(last_chunk_trades, last_chunk_df)
     last_chunk_profitable = last_chunk_metrics["net_pnl"] > 0
 
     # PASS if NOT declining AND last chunk is profitable
@@ -403,7 +423,13 @@ def trade_count_test(df: pl.DataFrame, signal_col: str = "signal", min_trades: i
     }
 
 
-def run_validation_gauntlet(df: pl.DataFrame, signal_col: str = "signal", **backtest_kwargs) -> dict:
+def run_validation_gauntlet(
+    df: pl.DataFrame,
+    signal_col: str = "signal",
+    *,
+    min_trades: int = 50,
+    **backtest_kwargs,
+) -> dict:
     """Run all 7 validators and return combined results.
 
     Args:
@@ -422,7 +448,7 @@ def run_validation_gauntlet(df: pl.DataFrame, signal_col: str = "signal", **back
         "param_sensitivity": param_sensitivity_test(df, signal_col, **backtest_kwargs),
         "cost_sensitivity": cost_sensitivity_test(df, signal_col, **backtest_kwargs),
         "decay": decay_test(df, signal_col, **backtest_kwargs),
-        "trade_count": trade_count_test(df, signal_col, **backtest_kwargs),
+        "trade_count": trade_count_test(df, signal_col, min_trades=min_trades, **backtest_kwargs),
     }
 
     # Compute overall verdict

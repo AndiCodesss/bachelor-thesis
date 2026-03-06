@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import polars as pl
 
+from src.framework.data.constants import TOTAL_COST_RT
 from src.framework.validation.alpha_decay import (
     compute_rolling_sharpe,
     fit_alpha_decay,
@@ -195,3 +196,14 @@ def test_fit_alpha_decay_returns_rolling_sharpes():
     assert "rolling_sharpes" in result
     assert isinstance(result["rolling_sharpes"], list)
     assert len(result["rolling_sharpes"]) >= 5
+
+
+def test_fit_alpha_decay_uses_adaptive_costs_when_present():
+    daily_pnls = [60.0] * 80
+    trades = _make_trades(daily_pnls).with_columns(
+        pl.lit(TOTAL_COST_RT + 120.0).alias("adaptive_cost_rt")
+    )
+
+    result = fit_alpha_decay(trades, window_days=15, step_days=3, min_windows=5)
+    assert result["available"] is True
+    assert result["verdict"] == "DEAD"

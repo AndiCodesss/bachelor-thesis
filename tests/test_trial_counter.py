@@ -114,15 +114,16 @@ def test_count_trials_missing_file(tmp_path: Path) -> None:
     assert count_trials(tmp_path / "nonexistent.jsonl") == 0
 
 
-def test_count_trials_counts_all_valid_dicts(tmp_path: Path) -> None:
-    """Every valid JSON dict row is counted; invalid JSON is skipped."""
+def test_count_trials_skips_non_trial_events(tmp_path: Path) -> None:
+    """Only trial executions count; housekeeping events are ignored."""
     experiments = tmp_path / "experiments.jsonl"
     with open(experiments, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"strategy_id": "a"}) + "\n")
-        f.write(json.dumps({"event": "run_start"}) + "\n")  # valid dict, counts
-        f.write(json.dumps({"strategy_id": "b"}) + "\n")
+        f.write(json.dumps({"event": "task_result", "strategy_id": "a"}) + "\n")
+        f.write(json.dumps({"event": "run_start"}) + "\n")
+        f.write(json.dumps({"event": "task_error", "strategy_name": "b"}) + "\n")
+        f.write(json.dumps({"event": "validation_handoff_completed"}) + "\n")
         f.write("not json at all\n")  # invalid, skipped
-    assert count_trials(experiments) == 3
+    assert count_trials(experiments) == 2
 
 
 def test_state_file_schema(tmp_path: Path) -> None:
@@ -173,3 +174,21 @@ def test_estimate_effective_trials_missing_file(tmp_path: Path) -> None:
     out = estimate_effective_trials(tmp_path / "missing.jsonl")
     assert out["raw_trials"] == 0
     assert out["effective_trials"] == 1
+
+
+def test_estimate_effective_trials_ignores_non_trial_rows(tmp_path: Path) -> None:
+    experiments = tmp_path / "experiments.jsonl"
+    rows = [
+        {"event": "run_start"},
+        {"event": "task_result", "strategy_name": "alpha", "params": {"k": 1}},
+        {"event": "validation_handoff_completed"},
+        {"event": "task_error", "strategy_name": "alpha", "params": {"k": 2}},
+        {"event": "task_result", "strategy_name": "beta", "params": {"k": 1}},
+    ]
+    with open(experiments, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+    out = estimate_effective_trials(experiments)
+    assert out["raw_trials"] == 3
+    assert out["family_counts"] == {"alpha": 2, "beta": 1}

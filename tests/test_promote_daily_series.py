@@ -132,3 +132,62 @@ def test_promote_requires_min_bars_for_causality(tmp_path: Path):
             load_bars=lambda _p: bars,
             backtest_kwargs={"entry_on_next_open": False},
         )
+
+
+def test_promote_ohlcv_feature_group_hides_microstructure_columns(tmp_path: Path):
+    mod = _load_promote_module()
+
+    n = 40
+    start = datetime(2024, 1, 2, 9, 30, tzinfo=timezone.utc)
+    ts = [start + timedelta(minutes=i) for i in range(n)]
+    close = np.linspace(100.0, 102.0, n)
+    bars = pl.DataFrame(
+        {
+            "ts_event": ts,
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(n, 1000, dtype=np.uint32),
+            "bid_price": close - 0.25,
+            "ask_price": close + 0.25,
+            "order_flow_imbalance": np.linspace(-1.0, 1.0, n),
+            "sma_ratio_8": np.zeros(n, dtype=np.float64),
+        }
+    )
+
+    seen_columns: list[str] = []
+
+    def _signal(df: pl.DataFrame, _params: dict) -> np.ndarray:
+        seen_columns[:] = list(df.columns)
+        return np.zeros(len(df), dtype=np.int8)
+
+    runtime = mod.SignalRuntime(
+        generate_fn=_signal,
+        generate_accepts_state=False,
+        fit_fn=None,
+        fit_on_files_fn=None,
+    )
+    fake_file = tmp_path / "nq_2024-01-02.parquet"
+    fake_file.write_text("", encoding="utf-8")
+
+    out = mod._run_signal_on_files(
+        files=[fake_file],
+        runtime=runtime,
+        signal_params={},
+        model_state=None,
+        load_bars=lambda _p: bars,
+        backtest_kwargs={"entry_on_next_open": False},
+        feature_group="ohlcv",
+    )
+
+    assert out["trade_count"] == 0
+
+    assert "bid_price" not in seen_columns
+    assert "ask_price" not in seen_columns
+    assert "order_flow_imbalance" not in seen_columns
+    assert "open" in seen_columns
+    assert "high" in seen_columns
+    assert "low" in seen_columns
+    assert "close" in seen_columns
+    assert "volume" in seen_columns
