@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-06T18:48:15.895291+00:00",
+  "generated_at": "2026-03-06T21:15:15.411747+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 28,
   "files": [
@@ -26,8 +26,8 @@
     },
     {
       "path": "src/framework/backtest/validators.py",
-      "sha256": "fb63eca732a166a7b23843d61a333a46b3d9ec6e59fe903e24b7d7bebdfe1678",
-      "size_bytes": 17843
+      "sha256": "8a3b52d4f01e63e77c382d5f8a33838497fb0ff4d15018a7db104d9eecbfafd1",
+      "size_bytes": 20874
     },
     {
       "path": "src/framework/data/bars.py",
@@ -131,13 +131,13 @@
     },
     {
       "path": "src/framework/validation/alpha_decay.py",
-      "sha256": "98ae9aefce5d9d9ed8c0f3977661a994e0c5a3f9806b30c2c080d77c9eadc5e7",
-      "size_bytes": 5219
+      "sha256": "bd5bae32daa39926adc39bac696493c5284d93fd7a3dc3985317078178c2d636",
+      "size_bytes": 5649
     },
     {
       "path": "src/framework/validation/factor_attribution.py",
-      "sha256": "8326a0d3590ca388c645d00a2a4d524c26376b4f111f3e460db0db76a8546b65",
-      "size_bytes": 7741
+      "sha256": "be7ad459d6361dbfc215e82872b242853171659b28264bead015f9ae21207ce9",
+      "size_bytes": 9318
     },
     {
       "path": "src/framework/validation/robustness.py",

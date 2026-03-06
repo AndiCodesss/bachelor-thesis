@@ -96,6 +96,10 @@ def _dotted_name(node: ast.AST) -> str | None:
     return None
 
 
+def _is_dunder_name(name: str) -> bool:
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
 def _is_mutable_default(node: ast.AST | None) -> bool:
     return isinstance(node, (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, ast.SetComp))
 
@@ -178,8 +182,16 @@ def _validate_signal_source(source: str, path: Path) -> None:
             raise ValueError(f"Strategy module {path} may not mutate module/global scope")
         if isinstance(node, (ast.Import, ast.ImportFrom)) and node not in tree.body:
             raise ValueError(f"Strategy module {path} may only import at module scope")
+        if isinstance(node, ast.Attribute) and _is_dunder_name(node.attr):
+            raise ValueError(
+                f"Strategy module {path} uses disallowed dunder attribute '{node.attr}'",
+            )
         if isinstance(node, ast.Call):
             call_name = _dotted_name(node.func)
+            if isinstance(node.func, ast.Attribute):
+                leaf = node.func.attr
+                if _is_dunder_name(leaf) or leaf in _BANNED_ATTR_CALLS:
+                    raise ValueError(f"Strategy module {path} uses disallowed call '{leaf}'")
             if call_name is None:
                 continue
             root = call_name.split(".", 1)[0]

@@ -223,6 +223,35 @@ def test_load_signal_module_rejects_disallowed_file_io_call(tmp_path: Path) -> N
         load_signal_module("bad_io_signal", signals_dir=tmp_path)
 
 
+def test_load_signal_module_rejects_dunder_attribute_introspection(tmp_path: Path) -> None:
+    (tmp_path / "bad_dunder_signal.py").write_text(
+        "import numpy as np\n"
+        "def generate_signal(df, params):\n"
+        "    ().__class__.__bases__[0].__subclasses__()\n"
+        "    return np.zeros(len(df), dtype=np.int8)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="disallowed"):
+        load_signal_module("bad_dunder_signal", signals_dir=tmp_path)
+
+
+def test_load_signal_module_allows_safe_method_chains(tmp_path: Path) -> None:
+    (tmp_path / "good_chain_signal.py").write_text(
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "def generate_signal(df, params):\n"
+        "    expr = pl.col('close').rolling_mean(3).fill_null(pl.col('close'))\n"
+        "    values = df.select(expr.alias('m'))['m'].to_numpy()\n"
+        "    return np.sign(values - values.mean()).astype(np.int8)\n",
+        encoding="utf-8",
+    )
+
+    signal = load_signal_module("good_chain_signal", signals_dir=tmp_path).generate_signal(_df(), {})
+    assert isinstance(signal, np.ndarray)
+    assert len(signal) == len(_df())
+
+
 def test_load_signal_module_rejects_mutable_module_scope_state(tmp_path: Path) -> None:
     (tmp_path / "bad_state_signal.py").write_text(
         "import numpy as np\n"
