@@ -86,7 +86,11 @@ def log_notebook_query(
     status: str,
     duration_seconds: float,
     answer_chars: int = 0,
+    discovered_sources: int = 0,
+    approved_sources: int = 0,
     imported_sources: int = 0,
+    rejected_sources: int = 0,
+    approved_domains: list[str] | None = None,
     fallback_to_plain: bool = False,
     error: str | None = None,
     audit_path: Path | str = DEFAULT_AUDIT_PATH,
@@ -100,11 +104,16 @@ def log_notebook_query(
         "status": str(status).strip() or "unknown",
         "duration_seconds": float(max(0.0, duration_seconds)),
         "answer_chars": int(max(0, answer_chars)),
+        "discovered_sources": int(max(0, discovered_sources)),
+        "approved_sources": int(max(0, approved_sources)),
         "imported_sources": int(max(0, imported_sources)),
+        "rejected_sources": int(max(0, rejected_sources)),
         "fallback_to_plain": bool(fallback_to_plain),
         "question_hash": _question_hash(question),
         "question_preview": str(question).strip()[:180],
     }
+    if approved_domains:
+        row["approved_domains"] = [str(domain).strip().lower() for domain in approved_domains if str(domain).strip()]
     row.update(audit_context_from_env())
     if error:
         row["error"] = str(error)[:400]
@@ -165,16 +174,36 @@ def summarize_notebook_queries(
         matched.append(row)
 
     mode_counts = {"plain": 0, "research": 0, "deep_research": 0}
+    non_fallback_mode_counts = {"plain": 0, "research": 0, "deep_research": 0}
     question_previews: list[str] = []
+    discovered_sources = 0
+    approved_sources = 0
     imported_sources = 0
+    rejected_sources = 0
     error_count = 0
+    fallback_count = 0
+    approved_domains: list[str] = []
     for row in matched:
         mode = str(row.get("mode", "")).strip().lower()
         if mode in mode_counts:
             mode_counts[mode] += 1
+            if (
+                str(row.get("status", "")).strip().lower() == "success"
+                and not bool(row.get("fallback_to_plain", False))
+            ):
+                non_fallback_mode_counts[mode] += 1
+        discovered_sources += int(row.get("discovered_sources", 0) or 0)
+        approved_sources += int(row.get("approved_sources", 0) or 0)
         imported_sources += int(row.get("imported_sources", 0) or 0)
+        rejected_sources += int(row.get("rejected_sources", 0) or 0)
         if str(row.get("status", "")).strip().lower() != "success":
             error_count += 1
+        if bool(row.get("fallback_to_plain", False)):
+            fallback_count += 1
+        for domain in row.get("approved_domains", []) if isinstance(row.get("approved_domains"), list) else []:
+            value = str(domain).strip().lower()
+            if value and value not in approved_domains:
+                approved_domains.append(value)
         preview = str(row.get("question_preview", "")).strip()
         if preview and preview not in question_previews:
             question_previews.append(preview)
@@ -187,7 +216,13 @@ def summarize_notebook_queries(
         "error_count": error_count,
         "modes_used": modes_used,
         "mode_counts": mode_counts,
+        "non_fallback_mode_counts": non_fallback_mode_counts,
+        "fallback_count": fallback_count,
+        "discovered_sources": discovered_sources,
+        "approved_sources": approved_sources,
         "imported_sources": imported_sources,
+        "rejected_sources": rejected_sources,
+        "approved_domains": approved_domains,
         "question_previews": question_previews[:3],
     }
 

@@ -34,6 +34,7 @@ from research.lib.llm_client import (
     extract_json_object,
 )
 from research.lib.mission_splits import resolve_research_splits
+from research.lib.notebook_policy import notebook_source_policy_context
 from research.lib.notebook_runtime import ensure_lane_notebook
 from research.lib.notebook_audit import notebook_audit_context, summarize_notebook_queries
 from research.lib.runtime_state import (
@@ -656,16 +657,101 @@ def _default_notebook_summary(*, configured: bool) -> dict[str, Any]:
         "error_count": 0,
         "modes_used": [],
         "mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
+        "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
+        "fallback_count": 0,
+        "discovered_sources": 0,
+        "approved_sources": 0,
         "imported_sources": 0,
+        "rejected_sources": 0,
+        "approved_domains": [],
         "question_previews": [],
     }
 
 
-def _notebook_used_research(summary: dict[str, Any]) -> bool:
-    mode_counts = summary.get("mode_counts") if isinstance(summary.get("mode_counts"), dict) else {}
-    research_count = int(mode_counts.get("research", 0) or 0)
-    deep_count = int(mode_counts.get("deep_research", 0) or 0)
-    return (research_count + deep_count) > 0
+def _default_notebook_seed_requirements() -> dict[str, Any]:
+    return {
+        "required": False,
+        "preferred_mode": "deep_research",
+        "accepted_modes": ["deep_research"],
+        "min_successful_queries": 0,
+        "min_approved_sources": 0,
+        "min_distinct_domains": 0,
+        "allow_fallback_to_plain": False,
+    }
+
+
+def _resolve_notebook_seed_requirements(mission: dict[str, Any]) -> dict[str, Any]:
+    payload = mission.get("lane_notebook_seed_requirements")
+    if not isinstance(payload, dict):
+        return _default_notebook_seed_requirements()
+    out = _default_notebook_seed_requirements()
+    out.update(dict(payload))
+    accepted_modes = out.get("accepted_modes")
+    if not isinstance(accepted_modes, list) or not accepted_modes:
+        accepted_modes = [str(out.get("preferred_mode", "deep_research"))]
+    cleaned_modes = []
+    for mode in accepted_modes:
+        value = str(mode or "").strip().lower()
+        if value in {"research", "deep_research"} and value not in cleaned_modes:
+            cleaned_modes.append(value)
+    out["accepted_modes"] = cleaned_modes or ["deep_research"]
+    out["preferred_mode"] = str(out.get("preferred_mode", "deep_research")).strip().lower() or "deep_research"
+    out["min_successful_queries"] = max(0, int(out.get("min_successful_queries", 0) or 0))
+    out["min_approved_sources"] = max(0, int(out.get("min_approved_sources", 0) or 0))
+    out["min_distinct_domains"] = max(0, int(out.get("min_distinct_domains", 0) or 0))
+    out["allow_fallback_to_plain"] = bool(out.get("allow_fallback_to_plain", False))
+    out["required"] = bool(out.get("required", False))
+    return out
+
+
+def _notebook_seed_satisfied(summary: dict[str, Any], requirements: dict[str, Any]) -> bool:
+    accepted_modes = requirements.get("accepted_modes") if isinstance(requirements.get("accepted_modes"), list) else []
+    mode_counts = (
+        summary.get("non_fallback_mode_counts")
+        if isinstance(summary.get("non_fallback_mode_counts"), dict)
+        else {}
+    )
+    successful_queries = sum(int(mode_counts.get(mode, 0) or 0) for mode in accepted_modes)
+    approved_sources = int(summary.get("approved_sources", 0) or 0)
+    approved_domains = (
+        summary.get("approved_domains")
+        if isinstance(summary.get("approved_domains"), list)
+        else []
+    )
+    return (
+        successful_queries >= int(requirements.get("min_successful_queries", 0) or 0)
+        and approved_sources >= int(requirements.get("min_approved_sources", 0) or 0)
+        and len(approved_domains) >= int(requirements.get("min_distinct_domains", 0) or 0)
+    )
+
+
+def _notebook_seed_failure_reason(summary: dict[str, Any], requirements: dict[str, Any]) -> str:
+    accepted_modes = requirements.get("accepted_modes") if isinstance(requirements.get("accepted_modes"), list) else []
+    mode_counts = (
+        summary.get("non_fallback_mode_counts")
+        if isinstance(summary.get("non_fallback_mode_counts"), dict)
+        else {}
+    )
+    successful_queries = sum(int(mode_counts.get(mode, 0) or 0) for mode in accepted_modes)
+    fallback_count = int(summary.get("fallback_count", 0) or 0)
+    approved_sources = int(summary.get("approved_sources", 0) or 0)
+    distinct_domains = len(
+        summary.get("approved_domains")
+        if isinstance(summary.get("approved_domains"), list)
+        else [],
+    )
+    min_queries = int(requirements.get("min_successful_queries", 0) or 0)
+    min_sources = int(requirements.get("min_approved_sources", 0) or 0)
+    min_domains = int(requirements.get("min_distinct_domains", 0) or 0)
+    if successful_queries < min_queries:
+        if fallback_count > 0:
+            return "research fell back to plain answers without a completed qualifying notebook enrichment"
+        return "no qualifying notebook research query completed"
+    if approved_sources < min_sources:
+        return f"approved notebook sources too low ({approved_sources} < {min_sources})"
+    if distinct_domains < min_domains:
+        return f"approved notebook domain diversity too low ({distinct_domains} < {min_domains})"
+    return "notebook seed requirements not satisfied"
 
 
 def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
@@ -1444,8 +1530,14 @@ def _build_thinker_system_prompt() -> str:
         "     Bash: uv run python scripts/query_notebook.py --notebook-url \"<URL>\" --research \"question\"\n"
         "   Use when: plain query returns a shallow or uncertain answer. Permanently enriches\n"
         "   the notebook for all future runs. Takes ~30-60s.\n\n"
-        "Workflow: start with a plain query. If the answer lacks specificity (e.g. no concrete\n"
-        "thresholds, cites no sources), escalate to --research on the same question.\n\n"
+        "3. Deep research query — slower, but better for building a high-quality notebook from scratch:\n"
+        "     Bash: uv run python scripts/query_notebook.py --notebook-url \"<URL>\" --deep-research \"question\"\n"
+        "   Use when: the notebook is still sparse, you are mapping a new direction, or fast research\n"
+        "   is likely to return thin / noisy sources. Prefer this for fresh notebooks.\n\n"
+        "Workflow: start with a plain query for precision lookups against existing notebook content.\n"
+        "If the answer lacks specificity (e.g. no concrete thresholds, cites no sources), escalate to\n"
+        "--research on the same question. If you are building a new line of inquiry or need better source\n"
+        "quality, escalate directly to --deep-research instead of collecting shallow links.\n\n"
         "Ask specific, targeted questions — not broad summaries. Examples:\n"
         "- \"What AMT value area rejection thresholds and bar conditions have documented NQ edge?\"\n"
         "- \"What orderflow signals most reliably predict short-term NQ directional continuation?\"\n"
@@ -1473,6 +1565,7 @@ def _build_thinker_user_prompt(
         current_focus = []
     notebooklm_url = str(mission.get("notebooklm_notebook_url", "")).strip()
     lane_notebook_requires_research = bool(mission.get("lane_notebook_requires_research", False))
+    seed_requirements = _resolve_notebook_seed_requirements(mission)
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
@@ -1504,13 +1597,19 @@ def _build_thinker_user_prompt(
             f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --deep-research "question"\n'
             "This notebook is private to your lane and persists across iterations for this lane only. "
             "You must choose the research direction yourself based on the mission, recent results, and what the notebook already contains. "
-            "Start with the plain form for precision lookups; use --research or --deep-research when you need to enrich the notebook with new sources."
+            "Start with the plain form for precision lookups; use --research or --deep-research when you need to enrich the notebook with new sources. "
+            "Notebook imports automatically filter out low-signal sources such as social/forum chatter and script marketplaces."
         )
         if lane_notebook_requires_research:
+            preferred_mode = str(seed_requirements.get("preferred_mode", "deep_research")).replace("_", "-")
+            min_sources = int(seed_requirements.get("min_approved_sources", 0) or 0)
+            min_domains = int(seed_requirements.get("min_distinct_domains", 0) or 0)
             prompt += (
                 "\nFRESH NOTEBOOK REQUIREMENT:\n"
                 "Your lane notebook is fresh. Before finalising the hypothesis, decide which direction of the mission is most promising "
-                "and run at least one --research or --deep-research query to seed the notebook in that direction. "
+                f"and run at least one successful --{preferred_mode} query to seed the notebook in that direction. "
+                f"That query must import at least {min_sources} approved source(s)"
+                f" across at least {min_domains} distinct domain(s). "
                 "Do not wait for a predefined topic list; you are responsible for choosing the angle."
             )
     if feature_knowledge:
@@ -2178,6 +2277,12 @@ def main() -> int:
     )
     active_mission = dict(mission)
     active_mission.update(dict(notebook_bootstrap.get("mission_overrides", {})))
+    notebook_source_policy = (
+        dict(active_mission.get("notebook_source_policy"))
+        if isinstance(active_mission.get("notebook_source_policy"), dict)
+        else {}
+    )
+    notebook_seed_requirements = _resolve_notebook_seed_requirements(active_mission)
     notebook_meta = (
         dict(notebook_bootstrap["notebook"])
         if isinstance(notebook_bootstrap.get("notebook"), dict)
@@ -2294,7 +2399,7 @@ def main() -> int:
                 iteration=iteration_no,
                 stage="quant_thinker",
                 lane_id=lane_id,
-            ):
+            ), notebook_source_policy_context(notebook_source_policy):
                 thinker_generation = _call_stage_json(
                     stage_name="quant_thinker",
                     schema_hint=(
@@ -2348,20 +2453,24 @@ def main() -> int:
             if (
                 notebooklm_configured
                 and bool(active_mission.get("lane_notebook_requires_research", False))
-                and not _notebook_used_research(notebook_summary)
+                and not _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements)
             ):
+                preferred_mode = str(
+                    notebook_seed_requirements.get("preferred_mode", "deep_research"),
+                ).replace("_", "-")
                 retry_prompt = (
                     thinker_user_prompt
                     + "\n\nENFORCEMENT REMINDER:\n"
-                    + "The lane notebook is still fresh. Choose your own direction and run at least one --research "
-                    + "or --deep-research query before returning the hypothesis JSON."
+                    + "The lane notebook is still fresh. Choose your own direction and run a successful --"
+                    + preferred_mode
+                    + " query that imports enough approved sources before returning the hypothesis JSON."
                 )
                 with notebook_audit_context(
                     run_id=run_id,
                     iteration=iteration_no,
                     stage="quant_thinker",
                     lane_id=lane_id,
-                ):
+                ), notebook_source_policy_context(notebook_source_policy):
                     thinker_generation = _call_stage_json(
                         stage_name="quant_thinker",
                         schema_hint=(
@@ -2411,12 +2520,13 @@ def main() -> int:
                         lane_id=lane_id,
                     ),
                 )
-                if not _notebook_used_research(notebook_summary):
+                if not _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements):
                     raise RuntimeError(
-                        "fresh lane notebook was not seeded with a research query before hypothesis generation",
+                        "fresh lane notebook was not seeded properly before hypothesis generation: "
+                        + _notebook_seed_failure_reason(notebook_summary, notebook_seed_requirements),
                     )
             if notebook_meta is not None and bool(active_mission.get("lane_notebook_requires_research", False)):
-                if _notebook_used_research(notebook_summary):
+                if _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements):
                     notebook_meta["seeded"] = True
                     notebook_meta["fresh"] = False
                     active_mission["lane_notebook_requires_research"] = False

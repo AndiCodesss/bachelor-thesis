@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from research.lib.notebook_policy import filter_research_sources, resolve_source_policy
 
 _NOTEBOOK_URL_PREFIX = "https://notebooklm.google.com/notebook/"
 _RESEARCH_POLL_INTERVAL_SECONDS = 5
@@ -41,6 +42,17 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
             cfg.get("notebook_url") or mission.get("notebooklm_notebook_url", ""),
         ).strip()
         bootstrap_queries = _clean_text_list(cfg.get("bootstrap_queries") or [])
+        fresh_query_mode = _normalize_fresh_query_mode(
+            cfg.get("fresh_query_mode", "deep_research" if mode == "lane_fresh" else "research"),
+        )
+        min_fresh_sources = max(
+            0,
+            int(cfg.get("min_fresh_sources", 4 if mode == "lane_fresh" else 0)),
+        )
+        min_fresh_domains = max(
+            0,
+            int(cfg.get("min_fresh_domains", 2 if mode == "lane_fresh" else 0)),
+        )
         return {
             "enabled": bool(notebook_url) or mode == "lane_fresh",
             "mode": mode,
@@ -53,6 +65,10 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
             "bootstrap_mode": _normalize_seed_mode(cfg.get("bootstrap_mode", "deep")),
             "require_research_on_fresh": bool(cfg.get("require_research_on_fresh", mode == "lane_fresh")),
             "min_bootstrap_successes": max(0, int(cfg.get("min_bootstrap_successes", 0))),
+            "fresh_query_mode": fresh_query_mode,
+            "min_fresh_sources": min_fresh_sources,
+            "min_fresh_domains": min_fresh_domains,
+            "source_policy": resolve_source_policy(cfg.get("source_policy")),
         }
 
     notebook_url = str(mission.get("notebooklm_notebook_url", "")).strip()
@@ -66,6 +82,10 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
         "bootstrap_mode": "deep",
         "require_research_on_fresh": False,
         "min_bootstrap_successes": 0,
+        "fresh_query_mode": "research",
+        "min_fresh_sources": 0,
+        "min_fresh_domains": 0,
+        "source_policy": resolve_source_policy(),
     }
 
 
@@ -105,6 +125,8 @@ def ensure_lane_notebook(
         result["mission_overrides"] = {
             "notebooklm_notebook_url": notebook_url,
             "lane_notebook_requires_research": False,
+            "notebook_source_policy": dict(cfg["source_policy"]),
+            "lane_notebook_seed_requirements": _build_seed_requirements(cfg, required=False),
         }
         return result
 
@@ -121,6 +143,11 @@ def ensure_lane_notebook(
                 "lane_notebook_requires_research": bool(
                     cfg.get("require_research_on_fresh", True) and not bool(existing.get("seeded", False)),
                 ),
+                "notebook_source_policy": dict(cfg["source_policy"]),
+                "lane_notebook_seed_requirements": _build_seed_requirements(
+                    cfg,
+                    required=bool(cfg.get("require_research_on_fresh", True) and not bool(existing.get("seeded", False))),
+                ),
             }
             return result
 
@@ -132,11 +159,17 @@ def ensure_lane_notebook(
         bootstrap_mode=str(cfg.get("bootstrap_mode", "deep")),
         min_bootstrap_successes=int(cfg.get("min_bootstrap_successes", 0)),
         required=bool(cfg.get("required", False)),
+        source_policy=dict(cfg["source_policy"]),
     )
     result["notebook"] = notebook_meta
     result["mission_overrides"] = {
         "notebooklm_notebook_url": str(notebook_meta["notebook_url"]),
         "lane_notebook_requires_research": bool(cfg.get("require_research_on_fresh", True) and not notebook_meta.get("seeded", False)),
+        "notebook_source_policy": dict(cfg["source_policy"]),
+        "lane_notebook_seed_requirements": _build_seed_requirements(
+            cfg,
+            required=bool(cfg.get("require_research_on_fresh", True) and not notebook_meta.get("seeded", False)),
+        ),
     }
     return result
 
@@ -157,6 +190,7 @@ def _create_and_optionally_seed_lane_notebook(
     bootstrap_mode: str,
     min_bootstrap_successes: int,
     required: bool,
+    source_policy: dict[str, Any],
 ) -> dict[str, Any]:
     return asyncio.run(
         _create_and_optionally_seed_lane_notebook_async(
@@ -167,6 +201,7 @@ def _create_and_optionally_seed_lane_notebook(
             bootstrap_mode=bootstrap_mode,
             min_bootstrap_successes=min_bootstrap_successes,
             required=required,
+            source_policy=source_policy,
         ),
     )
 
@@ -180,6 +215,7 @@ async def _create_and_optionally_seed_lane_notebook_async(
     bootstrap_mode: str,
     min_bootstrap_successes: int,
     required: bool,
+    source_policy: dict[str, Any],
 ) -> dict[str, Any]:
     from notebooklm import NotebookLMClient
 
@@ -203,6 +239,7 @@ async def _create_and_optionally_seed_lane_notebook_async(
                     notebook_id=notebook_id,
                     question=str(query),
                     mode=bootstrap_mode,
+                    source_policy=source_policy,
                 )
                 row["status"] = "success"
                 row["imported_sources"] = int(imported)
@@ -244,6 +281,7 @@ async def _seed_research_query(
     notebook_id: str,
     question: str,
     mode: str,
+    source_policy: dict[str, Any],
 ) -> int:
     mode = _normalize_seed_mode(mode)
     timeout = (
@@ -268,7 +306,7 @@ async def _seed_research_query(
     else:
         raise TimeoutError(f"research timed out after {timeout} seconds")
 
-    sources = [row for row in status.get("sources", []) if row.get("url")]
+    sources, _ = filter_research_sources(status.get("sources", []), source_policy)
     if not sources:
         return 0
     task_id = status.get("task_id") or task.get("task_id")
@@ -283,6 +321,31 @@ def _normalize_seed_mode(value: Any) -> str:
     if mode not in {"fast", "deep"}:
         raise ValueError(f"Unsupported NotebookLM bootstrap_mode '{value}'")
     return mode
+
+
+def _normalize_fresh_query_mode(value: Any) -> str:
+    mode = str(value or "deep_research").strip().lower()
+    if mode not in {"research", "deep_research"}:
+        raise ValueError(f"Unsupported NotebookLM fresh_query_mode '{value}'")
+    return mode
+
+
+def _build_seed_requirements(cfg: dict[str, Any], *, required: bool) -> dict[str, Any]:
+    preferred_mode = str(cfg.get("fresh_query_mode", "deep_research"))
+    accepted_modes = (
+        ["research", "deep_research"]
+        if preferred_mode == "research"
+        else ["deep_research"]
+    )
+    return {
+        "required": bool(required),
+        "preferred_mode": preferred_mode,
+        "accepted_modes": accepted_modes,
+        "min_successful_queries": 1 if required else 0,
+        "min_approved_sources": int(cfg.get("min_fresh_sources", 0) or 0),
+        "min_distinct_domains": int(cfg.get("min_fresh_domains", 0) or 0),
+        "allow_fallback_to_plain": False,
+    }
 
 
 def _clean_text_list(values: Any) -> list[str]:

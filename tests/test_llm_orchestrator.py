@@ -414,6 +414,13 @@ def test_prompts_include_feature_knowledge_markers():
             "feature_group": "all",
             "notebooklm_notebook_url": "https://notebooklm.google.com/notebook/test-id",
             "lane_notebook_requires_research": True,
+            "lane_notebook_seed_requirements": {
+                "preferred_mode": "deep_research",
+                "accepted_modes": ["deep_research"],
+                "min_successful_queries": 1,
+                "min_approved_sources": 4,
+                "min_distinct_domains": 2,
+            },
         },
         existing_strategies=[],
         feedback_items=[],
@@ -428,6 +435,8 @@ def test_prompts_include_feature_knowledge_markers():
     assert "--deep-research" in thinker_prompt
     assert "FRESH NOTEBOOK REQUIREMENT" in thinker_prompt
     assert "choose the research direction yourself" in thinker_prompt
+    assert "successful --deep-research query" in thinker_prompt
+    assert "at least 4 approved source(s)" in thinker_prompt
     assert '"common_columns"' in thinker_prompt
 
     coder_prompt = mod._build_coder_user_prompt(
@@ -479,6 +488,36 @@ def test_thinker_user_prompt_omits_notebook_command_when_no_url():
     )
     assert "KNOWLEDGE_BASE_COMMAND" not in prompt
     assert "query_notebook.py" not in prompt
+
+
+def test_notebook_seed_satisfied_requires_non_fallback_quality_research():
+    mod = _load_module()
+    requirements = {
+        "required": True,
+        "preferred_mode": "deep_research",
+        "accepted_modes": ["deep_research"],
+        "min_successful_queries": 1,
+        "min_approved_sources": 4,
+        "min_distinct_domains": 2,
+        "allow_fallback_to_plain": False,
+    }
+    summary = {
+        "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 1},
+        "fallback_count": 0,
+        "approved_sources": 4,
+        "approved_domains": ["cmegroup.com", "ssrn.com"],
+    }
+    assert mod._notebook_seed_satisfied(summary, requirements) is True
+
+    bad_summary = {
+        "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
+        "fallback_count": 1,
+        "approved_sources": 0,
+        "approved_domains": [],
+    }
+    assert mod._notebook_seed_satisfied(bad_summary, requirements) is False
+    reason = mod._notebook_seed_failure_reason(bad_summary, requirements)
+    assert "fell back to plain" in reason
 
 
 def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):

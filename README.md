@@ -219,7 +219,7 @@ uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.j
 ```
 
 Runner entrypoints are resume-safe by default. Use `--fresh-state` only when you intentionally want a new queue/handoff/budget state.
-NotebookLM query usage is audited to `results/logs/notebook_queries.jsonl`, and each orchestrator generation event records whether the thinker actually used the notebook during that iteration.
+NotebookLM query usage is audited to `results/logs/notebook_queries.jsonl`, and each orchestrator generation event records whether the thinker actually used the notebook during that iteration. Fresh lane notebooks require a successful seeding query before the hypothesis is accepted, and imported web sources are filtered through the mission's NotebookLM source-quality policy.
 
 ## Promotion Workflow
 
