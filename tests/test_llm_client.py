@@ -41,6 +41,29 @@ def test_claude_cli_generate_raw(monkeypatch: pytest.MonkeyPatch):
     assert out.usage == {}
 
 
+def test_claude_cli_generate_raw_passes_agent(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/claude")
+
+    class _FakeProc:
+        returncode = 0
+        stdout = '{"ok": true}'
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        assert "--agent" in cmd
+        assert cmd[cmd.index("--agent") + 1] == "quant-thinker"
+        return _FakeProc()
+
+    monkeypatch.setattr(llm_client.subprocess, "run", _fake_run)
+    client = llm_client.ClaudeCodeCLIClient(
+        model="sonnet",
+        cli_binary="claude",
+        agent_name="quant-thinker",
+    )
+    out = client.generate_raw(system_prompt="sys", user_prompt="usr", force_json_object=True)
+    assert out.raw_text == '{"ok": true}'
+
+
 def test_claude_cli_missing_binary_raises(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(llm_client.shutil, "which", lambda _name: None)
     with pytest.raises(llm_client.LLMClientError):

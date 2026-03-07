@@ -79,6 +79,7 @@ class ClaudeCodeCLIClient:
         *,
         model: str,
         cli_binary: str = "claude",
+        agent_name: str | None = None,
         timeout_seconds: float = 180.0,
         max_retries: int = 2,
         retry_backoff_seconds: float = 1.5,
@@ -111,6 +112,7 @@ class ClaudeCodeCLIClient:
             self._retry_backoff_seconds,
             float(retry_max_backoff_seconds),
         )
+        self._agent_name = str(agent_name).strip() or None
         self._workdir = str(workdir) if workdir is not None else None
         self._extra_args = [str(v) for v in (extra_args or []) if str(v).strip()]
         self._disable_slash_commands = bool(disable_slash_commands)
@@ -145,6 +147,8 @@ class ClaudeCodeCLIClient:
             "--system-prompt",
             str(system_prompt),
         ]
+        if self._agent_name:
+            cmd.extend(["--agent", self._agent_name])
         cmd.extend(self._extra_args)
         # Keep orchestrator requests lean and deterministic: disable tool/runtime discovery overhead.
         if "--strict-mcp-config" not in cmd:

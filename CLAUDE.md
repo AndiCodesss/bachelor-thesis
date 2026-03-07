@@ -1,49 +1,56 @@
-# NQ Alpha — Fortress Framework
+# NQ Alpha Discovery
 
-## Architecture
+This repository runs an autonomous intraday alpha-discovery loop for NQ futures.
 
-- Immutable evaluation framework: `src/framework/` (28 files, SHA-256 locked)
-- Mutable research workspace: `research/`
-- Lock manifest: `configs/framework_lock.json`
+## Core Workflow
 
-## Entry Point
+- `scripts/llm_orchestrator.py` generates hypotheses and signal modules in `research/signals/`
+- `scripts/research.py` validates them on `search_split`, then gates them on `selection_split`
+- `scripts/promote.py` is the holdout / promotion path
 
-- `scripts/research.py` — Autonomous research loop (holdout blocked)
+## Research Contract
 
-## Data
+- `train` is the search split
+- `validate` is the untouched selection gate
+- `test` is blocked until promotion
+- do not contaminate `validate` or `test`
 
-- Instrument: NQ E-mini Nasdaq-100 futures
-- Source: Databento MBP1 (Level-1 quotes + trades, nanosecond precision)
-- Path: set `NQ_DATA_PATH` env var
+## Signal Contract
 
-## Splits (enforced at runtime)
+Every generated module must expose:
 
-- TRAIN: Oct 2022 -- Aug 2024 (23 month folders)
-- VALIDATE: Sep 2024 -- Mar 2025 (7 month folders)
-- TEST: Apr 2025 -- Feb 2026 (blocked in research mode)
-
-## Transaction Costs
-
-- Commission: $4.50 RT
-- Slippage: 1 tick/side ($5.00)
-- Total: $14.50 RT (or adaptive via `CostModel`)
-
-## Commands
-
-```bash
-uv sync                                                    # Install deps
-uv run pytest -q                                           # Run tests
-uv run python scripts/framework/verify_lock.py \
-  --manifest configs/framework_lock.json --mode error      # Lock check
-uv run python scripts/research.py \
-  --mission configs/missions/alpha-discovery.yaml           # Research loop
+```python
+def generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray
 ```
 
-## Key Modules
+Requirements:
 
-- Stable API: `src/framework/api.py`
-- Backtest engine: `src/framework/backtest/engine.py`
-- Validation gauntlet: `src/framework/backtest/validators.py`
-- Canonical features (221): `src/framework/features_canonical/`
-- Constants: `src/framework/data/constants.py`
-- Signal workspace: `research/signals/`
+- output length == `len(df)`
+- dtype `np.int8`
+- values strictly in `{-1, 0, 1}`
+- no lookahead
+- deterministic
+- no I/O or networking
+
+Use the helper imports from `research.signals` instead of ad hoc dataframe-to-numpy handling.
+
+## NotebookLM
+
+- each orchestrator lane gets its own persistent notebook
+- fresh lane notebooks must be seeded before the hypothesis is accepted
+- prefer `--deep-research` for fresh notebooks or new directions
+- ask for high-quality trusted sources: exchange/operator docs, academic papers, serious market-structure research, broker/execution research, and technical references
+- avoid low-signal forum chatter, script marketplaces, and recycled summaries
+
+## Important Files
+
+- mission: `configs/missions/alpha-discovery.yaml`
+- agent runtime config: `configs/agents/llm_orchestrator.yaml`
+- feature catalog: `research/feature_catalog.md`
+- agent guide: `docs/AGENT_GUIDE.md`
+
+## Hard Boundaries
+
+- do not edit `src/framework/` from research roles
+- do not access `test` in research mode
+- do not bypass queue, logging, validation, or candidate-writing rules

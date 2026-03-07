@@ -58,10 +58,7 @@ def test_summarize_notebook_queries_filters_current_iteration(tmp_path: Path):
             duration_seconds=5.0,
             answer_chars=240,
             discovered_sources=5,
-            approved_sources=3,
             imported_sources=3,
-            rejected_sources=2,
-            approved_domains=["cmegroup.com", "ssrn.com"],
             audit_path=audit_path,
             lock_path=lock_path,
         )
@@ -94,8 +91,5 @@ def test_summarize_notebook_queries_filters_current_iteration(tmp_path: Path):
     assert summary["non_fallback_mode_counts"]["research"] == 1
     assert summary["fallback_count"] == 0
     assert summary["discovered_sources"] == 5
-    assert summary["approved_sources"] == 3
     assert summary["imported_sources"] == 3
-    assert summary["rejected_sources"] == 2
-    assert summary["approved_domains"] == ["cmegroup.com", "ssrn.com"]
     assert len(summary["question_previews"]) == 2

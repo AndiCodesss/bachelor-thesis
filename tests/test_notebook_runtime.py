@@ -20,8 +20,8 @@ def _mission() -> dict:
             "title_prefix": "NQ Alpha Discovery",
             "require_research_on_fresh": True,
             "fresh_query_mode": "deep_research",
-            "min_fresh_sources": 4,
-            "min_fresh_domains": 2,
+            "min_fresh_imports": 1,
+            "research_guidance": "Use high-quality trusted sources.",
         },
     }
 
@@ -41,9 +41,8 @@ def test_resolve_notebooklm_config_supports_lane_fresh_mode():
     assert cfg["require_research_on_fresh"] is True
     assert cfg["bootstrap_queries"] == []
     assert cfg["fresh_query_mode"] == "deep_research"
-    assert cfg["min_fresh_sources"] == 4
-    assert cfg["min_fresh_domains"] == 2
-    assert cfg["source_policy"]["max_imports_per_query"] == 8
+    assert cfg["min_fresh_imports"] == 1
+    assert cfg["research_guidance"] == "Use high-quality trusted sources."
 
 
 def test_ensure_lane_notebook_reuses_existing_lane_notebook_without_network_calls():
@@ -67,4 +66,5 @@ def test_ensure_lane_notebook_reuses_existing_lane_notebook_without_network_call
     assert out["mission_overrides"]["notebooklm_notebook_url"].endswith("nb_lane_a")
     assert out["mission_overrides"]["lane_notebook_requires_research"] is True
     assert out["mission_overrides"]["lane_notebook_seed_requirements"]["preferred_mode"] == "deep_research"
-    assert out["mission_overrides"]["lane_notebook_seed_requirements"]["min_approved_sources"] == 4
+    assert out["mission_overrides"]["lane_notebook_seed_requirements"]["min_imported_sources"] == 1
+    assert out["mission_overrides"]["notebook_research_guidance"] == "Use high-quality trusted sources."

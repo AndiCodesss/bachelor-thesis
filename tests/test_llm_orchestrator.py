@@ -414,12 +414,12 @@ def test_prompts_include_feature_knowledge_markers():
             "feature_group": "all",
             "notebooklm_notebook_url": "https://notebooklm.google.com/notebook/test-id",
             "lane_notebook_requires_research": True,
+            "notebook_research_guidance": "Use high-quality trusted sources.",
             "lane_notebook_seed_requirements": {
                 "preferred_mode": "deep_research",
                 "accepted_modes": ["deep_research"],
                 "min_successful_queries": 1,
-                "min_approved_sources": 4,
-                "min_distinct_domains": 2,
+                "min_imported_sources": 1,
             },
         },
         existing_strategies=[],
@@ -436,7 +436,8 @@ def test_prompts_include_feature_knowledge_markers():
     assert "FRESH NOTEBOOK REQUIREMENT" in thinker_prompt
     assert "choose the research direction yourself" in thinker_prompt
     assert "successful --deep-research query" in thinker_prompt
-    assert "at least 4 approved source(s)" in thinker_prompt
+    assert "at least 1 source(s)" in thinker_prompt
+    assert "Use high-quality trusted sources." in thinker_prompt
     assert '"common_columns"' in thinker_prompt
 
     coder_prompt = mod._build_coder_user_prompt(
@@ -456,27 +457,22 @@ def test_prompts_include_feature_knowledge_markers():
 def test_coder_system_prompt_requires_safe_column_helpers():
     mod = _load_module()
     prompt = mod._build_coder_system_prompt()
-    assert "safe_f64_col" in prompt
-    assert "session_start_mask" in prompt
-    assert "signal_from_conditions" in prompt
-    assert "DO NOT call df[..].to_numpy() directly" in prompt
+    assert "nq-signal-coder" in prompt
+    assert "Return only the required JSON object" in prompt
 
 
 def test_thinker_system_prompt_requires_internal_brainstorm():
     mod = _load_module()
     prompt = mod._build_thinker_system_prompt()
-    assert "internally brainstorm" in prompt
-    assert "RESEARCH HANDBOOK" in prompt
-    assert "KNOWLEDGE_BASE_COMMAND" in prompt
+    assert "quant-thinker" in prompt
+    assert "runtime mission context" in prompt
 
 
 def test_thinker_system_prompt_uses_runtime_context_not_stale_session_claims():
     mod = _load_module()
     prompt = mod._build_thinker_system_prompt()
     assert "prior session volume. VAH = va_high" not in prompt
-    assert "Do not assume ETH" in prompt
-    assert "target_sharpe and min_trade_count" in prompt
-    assert "signal perturbation" in prompt
+    assert "source of truth" in prompt
 
 
 def test_thinker_user_prompt_omits_notebook_command_when_no_url():
@@ -497,23 +493,20 @@ def test_notebook_seed_satisfied_requires_non_fallback_quality_research():
         "preferred_mode": "deep_research",
         "accepted_modes": ["deep_research"],
         "min_successful_queries": 1,
-        "min_approved_sources": 4,
-        "min_distinct_domains": 2,
+        "min_imported_sources": 1,
         "allow_fallback_to_plain": False,
     }
     summary = {
         "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 1},
         "fallback_count": 0,
-        "approved_sources": 4,
-        "approved_domains": ["cmegroup.com", "ssrn.com"],
+        "imported_sources": 5,
     }
     assert mod._notebook_seed_satisfied(summary, requirements) is True
 
     bad_summary = {
         "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
         "fallback_count": 1,
-        "approved_sources": 0,
-        "approved_domains": [],
+        "imported_sources": 0,
     }
     assert mod._notebook_seed_satisfied(bad_summary, requirements) is False
     reason = mod._notebook_seed_failure_reason(bad_summary, requirements)

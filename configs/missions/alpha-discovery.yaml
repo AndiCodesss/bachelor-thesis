@@ -43,25 +43,8 @@ notebooklm:
   title_prefix: "NQ Alpha Discovery"
   require_research_on_fresh: true
   fresh_query_mode: deep_research
-  min_fresh_sources: 4
-  min_fresh_domains: 2
-  source_policy:
-    max_imports_per_query: 8
-    max_per_domain: 2
-    blocked_domains:
-      - reddit.com
-      - tradingview.com
-      - scribd.com
-      - quora.com
-      - facebook.com
-      - instagram.com
-      - tiktok.com
-      - pinterest.com
-      - x.com
-      - twitter.com
-    blocked_url_substrings:
-      - "/script/"
-      - "/ideas/"
+  min_fresh_imports: 1
+  research_guidance: "Use high-quality trusted sources. Prefer exchanges, academic papers, execution research, market-structure research, and serious technical references. Avoid low-signal forum chatter, script marketplaces, and recycled summaries."
 
 current_focus:
   - "AMT value area rejection and rotation (VAH/VAL/POC mean-reversion)"

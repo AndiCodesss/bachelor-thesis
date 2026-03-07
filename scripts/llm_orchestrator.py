@@ -34,7 +34,7 @@ from research.lib.llm_client import (
     extract_json_object,
 )
 from research.lib.mission_splits import resolve_research_splits
-from research.lib.notebook_policy import notebook_source_policy_context
+from research.lib.notebook_guidance import notebook_research_guidance_context
 from research.lib.notebook_runtime import ensure_lane_notebook
 from research.lib.notebook_audit import notebook_audit_context, summarize_notebook_queries
 from research.lib.runtime_state import (
@@ -660,10 +660,7 @@ def _default_notebook_summary(*, configured: bool) -> dict[str, Any]:
         "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
         "fallback_count": 0,
         "discovered_sources": 0,
-        "approved_sources": 0,
         "imported_sources": 0,
-        "rejected_sources": 0,
-        "approved_domains": [],
         "question_previews": [],
     }
 
@@ -674,8 +671,7 @@ def _default_notebook_seed_requirements() -> dict[str, Any]:
         "preferred_mode": "deep_research",
         "accepted_modes": ["deep_research"],
         "min_successful_queries": 0,
-        "min_approved_sources": 0,
-        "min_distinct_domains": 0,
+        "min_imported_sources": 0,
         "allow_fallback_to_plain": False,
     }
 
@@ -697,8 +693,7 @@ def _resolve_notebook_seed_requirements(mission: dict[str, Any]) -> dict[str, An
     out["accepted_modes"] = cleaned_modes or ["deep_research"]
     out["preferred_mode"] = str(out.get("preferred_mode", "deep_research")).strip().lower() or "deep_research"
     out["min_successful_queries"] = max(0, int(out.get("min_successful_queries", 0) or 0))
-    out["min_approved_sources"] = max(0, int(out.get("min_approved_sources", 0) or 0))
-    out["min_distinct_domains"] = max(0, int(out.get("min_distinct_domains", 0) or 0))
+    out["min_imported_sources"] = max(0, int(out.get("min_imported_sources", 0) or 0))
     out["allow_fallback_to_plain"] = bool(out.get("allow_fallback_to_plain", False))
     out["required"] = bool(out.get("required", False))
     return out
@@ -712,16 +707,9 @@ def _notebook_seed_satisfied(summary: dict[str, Any], requirements: dict[str, An
         else {}
     )
     successful_queries = sum(int(mode_counts.get(mode, 0) or 0) for mode in accepted_modes)
-    approved_sources = int(summary.get("approved_sources", 0) or 0)
-    approved_domains = (
-        summary.get("approved_domains")
-        if isinstance(summary.get("approved_domains"), list)
-        else []
-    )
     return (
         successful_queries >= int(requirements.get("min_successful_queries", 0) or 0)
-        and approved_sources >= int(requirements.get("min_approved_sources", 0) or 0)
-        and len(approved_domains) >= int(requirements.get("min_distinct_domains", 0) or 0)
+        and int(summary.get("imported_sources", 0) or 0) >= int(requirements.get("min_imported_sources", 0) or 0)
     )
 
 
@@ -734,23 +722,15 @@ def _notebook_seed_failure_reason(summary: dict[str, Any], requirements: dict[st
     )
     successful_queries = sum(int(mode_counts.get(mode, 0) or 0) for mode in accepted_modes)
     fallback_count = int(summary.get("fallback_count", 0) or 0)
-    approved_sources = int(summary.get("approved_sources", 0) or 0)
-    distinct_domains = len(
-        summary.get("approved_domains")
-        if isinstance(summary.get("approved_domains"), list)
-        else [],
-    )
+    imported_sources = int(summary.get("imported_sources", 0) or 0)
     min_queries = int(requirements.get("min_successful_queries", 0) or 0)
-    min_sources = int(requirements.get("min_approved_sources", 0) or 0)
-    min_domains = int(requirements.get("min_distinct_domains", 0) or 0)
+    min_imports = int(requirements.get("min_imported_sources", 0) or 0)
     if successful_queries < min_queries:
         if fallback_count > 0:
             return "research fell back to plain answers without a completed qualifying notebook enrichment"
         return "no qualifying notebook research query completed"
-    if approved_sources < min_sources:
-        return f"approved notebook sources too low ({approved_sources} < {min_sources})"
-    if distinct_domains < min_domains:
-        return f"approved notebook domain diversity too low ({distinct_domains} < {min_domains})"
+    if imported_sources < min_imports:
+        return f"imported notebook sources too low ({imported_sources} < {min_imports})"
     return "notebook seed requirements not satisfied"
 
 
@@ -1375,179 +1355,9 @@ def _validate_generated_strategy(
 
 def _build_thinker_system_prompt() -> str:
     return (
-        "You are a quant researcher designing intraday alpha hypotheses for NQ E-mini Nasdaq-100 futures.\n"
-        "Before producing the final JSON, internally brainstorm at least three distinct hypotheses — "
-        "prioritise novelty and diversity across the three candidates. "
-        "Evaluate each against cost reality, pass criteria, and the market physics constraint, "
-        "then select the strongest. Output only the final selected hypothesis JSON.\n\n"
-        "INSTRUMENT & COST REALITY:\n"
-        "- Tick size: 0.25 pts = $5/tick. Total round-trip cost: $14.50 (commission + 1-tick slippage/side).\n"
-        "- A strategy trading 100 times costs $1,450 in friction. At 500 trades it needs $7,250 gross to break even.\n"
-        "- Use the active mission context from the user prompt for split, session filter, min_trade_count, and allowed bar configs.\n"
-        "- Strategies firing >300 signals almost certainly lose to transaction costs. Design for precision, not frequency.\n"
-        "- Signal rate: target roughly 0.05–0.3% of bars non-zero. Design thresholds for rare, high-conviction setups, not frequent noise.\n\n"
-        "BAR RANGE REALITY — CRITICAL FOR STOP SIZING:\n"
-        "The backtest engine evaluates stops INTRA-BAR. A stop smaller than the bar's typical noise range\n"
-        "will be hit within the same bar the trade enters — producing avg_bars_held=0 and stop-out clusters.\n"
-        "Use the sample bar-range statistics in the runtime context JSON for the chosen bar config.\n"
-        "RULE: sl_ticks should be at least half the sample p25 bar range, and usually closer to the sample median.\n"
-        "With 1.5:1 RR minimum: pt_ticks >= 1.5 × sl_ticks.\n"
-        "Example: sl_ticks=32, pt_ticks=48 → PT=$240, SL=$160 — viable at 42%+ WR.\n\n"
-        "ACTIVE CONTEXT:\n"
-        "- Respect the split and session filter supplied in the runtime context JSON.\n"
-        "- Do not assume ETH, validate-only, or any fixed month range unless the runtime context explicitly says so.\n\n"
-        "PASS CRITERIA:\n"
-        "- Satisfy the mission target_sharpe and min_trade_count from the runtime context, plus a gauntlet pass.\n"
-        "- Gauntlet coverage includes shuffle, walk-forward, regime, signal perturbation, cost sensitivity, decay, and trade-count checks.\n\n"
-        "ANTI-LOOKAHEAD RULES (non-negotiable):\n"
-        "- Never reference bar N+1 or later. Only use current bar (index i) and past bars.\n"
-        "- shift(1) means shift FORWARD in time (previous bar value) — safe. shift(-1) means FUTURE — forbidden.\n"
-        "- Rolling aggregates must use only past bars. No global future statistics.\n\n"
-        "DESIGN PRINCIPLES:\n"
-        "- Prefer event-driven, sparse signals (a few high-conviction entries per week over noisy daily signals).\n"
-        "- Use precomputed canonical features as primary building blocks — do not re-derive what is already there.\n"
-        "- Every entry condition should have a clear microstructure rationale (why does this predict price direction?).\n"
-        "- Include explicit exit logic: profit target in ticks, stop loss in ticks, max holding bars.\n"
-        "- Include cooldown / reentry prevention to avoid chasing the same move multiple times.\n\n"
-        "RISK/REWARD — MINIMUM 1.5:1 REQUIRED:\n"
-        "Every hypothesis must specify PT and SL in ticks with PT >= 1.5 × SL.\n"
-        "Preferred target: 2:1 or better. A 2:1 RR means you can be wrong 40% of the time and still profit.\n"
-        "Example time_1m: SL=10t ($50), PT=16t ($80) → net per win $65.50, net per loss -$64.50 → viable at 50% WR.\n"
-        "Example tick_610: SL=32t ($160), PT=48t ($240) → net per win $225.50, net per loss -$174.50 → viable at 44% WR.\n"
-        "Avoid 1:1 RR — after $14.50 RT costs it is always negative expectancy regardless of win rate.\n\n"
-        "EXIT PARAMS — MANDATORY CANONICAL NAMES IN params_template:\n"
-        "The backtest engine reads exit configuration directly from the strategy's params. You MUST use\n"
-        "these exact keys in params_template — they are automatically extracted and applied during backtesting:\n"
-        "  pt_ticks  : profit target in NQ ticks (integer). Engine converts to points (ticks × 0.25).\n"
-        "  sl_ticks  : stop loss in NQ ticks (integer). Must satisfy pt_ticks >= 1.5 × sl_ticks.\n"
-        "  max_bars  : maximum bars to hold before forced exit (integer). Prevents overnight exposure.\n"
-        "Example tick_610: {\"pt_ticks\": 48, \"sl_ticks\": 32, \"max_bars\": 8} → PT=$240, SL=$160, hold max 8 bars.\n"
-        "Example time_1m: {\"pt_ticks\": 16, \"sl_ticks\": 10, \"max_bars\": 20} → PT=$80, SL=$50, hold max 20 bars.\n"
-        "Without these keys the engine has no exits — strategy holds until end-of-day with no stop protection.\n\n"
-        "STOP PLACEMENT — STRUCTURAL, NOT ARBITRARY:\n"
-        "Stops must be placed at the level that INVALIDATES the hypothesis — not a fixed tick count.\n"
-        "Good stop placement:\n"
-        "- VA rejection long: stop just below VAL (hypothesis fails if price accepts below value area)\n"
-        "- IB breakout long: stop just below IB high (hypothesis fails if price falls back inside IB)\n"
-        "- CVD fade short: stop above the prior swing high (hypothesis fails if momentum resumes)\n"
-        "- POC reversion: stop beyond the session extreme (hypothesis fails if auction extends further)\n"
-        "Bad stop placement: 'SL = 4 ticks' with no structural basis — gets noise-stopped constantly.\n"
-        "Express stop offset in params as ticks beyond the structural level so it is tunable.\n\n"
-        "AUCTION MARKET THEORY (AMT) — HIGH PRIORITY FOCUS:\n"
-        "AMT is a first-principles framework for NQ and is strongly encouraged as a basis for hypotheses.\n"
-        "Core AMT concepts and their EXACT precomputed column names:\n"
-        "- Current-session Value Area (VA): expanding causal session profile. VAH = va_high, VAL = va_low.\n"
-        "  position_in_va: current price position within VA (0=at VAL, 1=at VAH, <0=below VA, >1=above VA)\n"
-        "  va_width: total width of value area in points\n"
-        "  rolling_va_high, rolling_va_low, rolling_va_position: 24-bar rolling intraday equivalents\n"
-        "  Edge: price entering VA from outside rotates to opposite boundary. Price rejecting VA boundary\n"
-        "  signals continuation. Use position_in_va < 0 for 'price below VA' condition.\n"
-        "- Previous-session profile levels are separate fields: prev_day_poc, prev_day_vah, prev_day_val,\n"
-        "  plus dist_prev_poc, dist_prev_vah, dist_prev_val, and prev_day_va_position.\n"
-        "- Point of Control (POC): highest-volume price level in the expanding current-session profile.\n"
-        "  poc_price: actual price level of POC\n"
-        "  poc_distance: ATR-normalised distance of close from POC (positive = above, negative = below)\n"
-        "  poc_distance_raw: distance in raw points\n"
-        "  poc_slope_6: 6-bar slope of rolling POC — positive means POC drifting up\n"
-        "  rolling_poc, rolling_poc_distance: intraday rolling POC equivalents\n"
-        "  Edge: POC is a magnet. Fade moves away from POC when no directional conviction.\n"
-        "- Opening Range (IB proxy): first 30 min of RTH (09:30–10:00 ET).\n"
-        "  or_broken_up: 1 when price first breaks above OR high, 0 otherwise\n"
-        "  or_broken_down: 1 when price first breaks below OR low, 0 otherwise\n"
-        "  or_width: opening range width in points\n"
-        "  position_in_or: 0=at OR low, 1=at OR high, outside=breakout\n"
-        "  Edge: OR breakout with volume = directional conviction. Failed breakout (re-enters OR) = fade.\n"
-        "- Poor Highs/Lows (Unfinished Business): bars that closed away from their extreme.\n"
-        "  fp_unfinished_high: 1 if current bar has an unfinished/poor high (selling didn't complete)\n"
-        "  fp_unfinished_low: 1 if current bar has an unfinished/poor low (buying didn't complete)\n"
-        "  bars_since_unfinished_high, bars_since_unfinished_low: recency (0=this bar, 1=prior bar, etc.)\n"
-        "  Edge: unfinished business signals incomplete auction — price likely returns to complete it.\n"
-        "- High/Low Volume Nodes:\n"
-        "  at_hvn: 1 if price is near a High Volume Node (support/resistance — expect stalling)\n"
-        "  at_lvn: 1 if price is near a Low Volume Node (thin area — expect fast passage)\n"
-        "  dist_nearest_hvn, dist_nearest_lvn: distance to nearest HVN/LVN in points\n"
-        "  hvn_lvn_ratio: ratio of nearby HVN to LVN volume — high ratio = strong local support\n"
-        "- Swing-based AMT:\n"
-        "  swing_va_position: price position within the recent swing value area\n"
-        "  swing_poc_dist: distance from swing POC\n"
-        "  breakout_direction: 1=up breakout, -1=down breakout, 0=inside\n"
-        "  bars_since_breakout: how many bars ago the breakout occurred\n"
-        "AMT strategies naturally produce sparse, high-conviction signals because they fire only at\n"
-        "structural price levels — ideal for the 30–150 trade target.\n\n"
-        "STATE MACHINES — POWERFUL TOOL FOR SEQUENTIAL PATTERNS:\n"
-        "You can and SHOULD design multi-step sequential strategies using state machine logic.\n"
-        "A state machine tracks what has already happened and waits for confirmation before acting.\n"
-        "Example AMT state machine:\n"
-        "  State 0 (neutral): wait for price to probe below VAL\n"
-        "  State 1 (armed): price is below VAL — now wait for rejection bar (close > VAL)\n"
-        "  State 2 (triggered): rejection confirmed — fire LONG signal, reset to State 0\n"
-        "This is far more selective than a single-bar condition and aligns with how AMT traders think.\n"
-        "Other sequential patterns worth encoding as state machines:\n"
-        "- IB breakout → pullback to IB boundary → re-breakout entry\n"
-        "- Failed auction at POC (3 bars near POC, then sharp rejection) → fade entry\n"
-        "- CVD divergence builds over N bars → confirmed by delta flip on bar N+1 → entry\n"
-        "- Volatility compression (N bars of narrow range) → first expansion bar → trend entry\n"
-        "State machines produce naturally sparse signals, are robust to noise, and have clear\n"
-        "market physics rationale — the coder can implement them with a simple Python for-loop.\n\n"
-        "BE CREATIVE — EXPLORE NOVEL ALPHA SOURCES:\n"
-        "You are encouraged to think beyond the obvious EMA crossovers and simple orderflow divergence patterns.\n"
-        "Novel hypothesis directions worth exploring (not exhaustive — invent your own):\n"
-        "- Cross-feature interactions: e.g. volume imbalance only meaningful when spread is compressed\n"
-        "- Regime-conditioned entries: e.g. a momentum signal gated by intraday volatility percentile\n"
-        "- Time-of-session asymmetry: e.g. absorption patterns behave differently in the open vs midday\n"
-        "- Multi-timeframe confluence: e.g. tick-bar signal confirmed by 1m bar structure\n"
-        "- Sequential microstructure events: e.g. failed auction followed by delta divergence within N bars\n"
-        "- Mean-reversion after anomalous tape: e.g. extreme short-term CVD exhaustion at known price levels\n"
-        "Creativity is actively rewarded. Aim to find ideas that experienced traders would recognise as\n"
-        "plausible but have not yet been tested in this system.\n\n"
-        "HARD CONSTRAINT — MARKET PHYSICS:\n"
-        "Every hypothesis MUST have a credible causal mechanism rooted in how markets actually work.\n"
-        "Ask yourself: if this signal fires, what participant behaviour or structural force causes price to move?\n"
-        "Acceptable answers: trapped longs/shorts forced to exit, passive liquidity withdrawal, momentum\n"
-        "ignition from a breakout, mean-reversion from over-extended one-sided flow, institutional absorption.\n"
-        "Reject any idea where you cannot articulate WHY it should work — spurious correlations have no edge.\n\n"
-        "Return ONLY a JSON object with keys:\n"
-        "- hypothesis_id: str (short slug, e.g. 'cvd_fade_va_reject_001')\n"
-        "- strategy_name_hint: str (Python-safe slug)\n"
-        "- thesis: str (1-2 sentences: what market inefficiency does this exploit and why does it exist?)\n"
-        "- bar_configs: list[str] (choose from allowed configs; pick those that match signal frequency target)\n"
-        "- params_template: object (all numeric thresholds with sensible defaults)\n"
-        "- entry_logic: str (precise conditions using named feature columns; specify long/short separately)\n"
-        "- exit_logic: str (PT ticks, SL ticks, max_bars; PT must be >= 1.5×SL; stops at structural invalidation level)\n"
-        "- risk_controls: list[str] (e.g. max trades/day, time-of-day filter, spread filter)\n"
-        "- anti_lookahead_checks: list[str] (explicit list of checks the coder must verify)\n"
-        "- validation_focus: list[str] (what metrics/patterns would confirm this hypothesis has real edge)\n\n"
-        "RESEARCH HANDBOOK — NOTEBOOKLM:\n"
-        "You have a curated trading research knowledge base accessible via the Bash tool.\n"
-        "Treat it as your primary research handbook: query it actively during reasoning,\n"
-        "not as an afterthought. If a KNOWLEDGE_BASE_COMMAND is provided in the user message,\n"
-        "use it before finalising your hypothesis.\n\n"
-        "TWO QUERY MODES (choose based on need):\n"
-        "1. Plain query — fast, searches existing sources only:\n"
-        "     Bash: uv run python scripts/query_notebook.py --notebook-url \"<URL>\" \"question\"\n"
-        "   Use for: specific threshold lookups, pattern validation, market-physics checks.\n\n"
-        "2. Research query — searches the web, imports new sources, then answers:\n"
-        "     Bash: uv run python scripts/query_notebook.py --notebook-url \"<URL>\" --research \"question\"\n"
-        "   Use when: plain query returns a shallow or uncertain answer. Permanently enriches\n"
-        "   the notebook for all future runs. Takes ~30-60s.\n\n"
-        "3. Deep research query — slower, but better for building a high-quality notebook from scratch:\n"
-        "     Bash: uv run python scripts/query_notebook.py --notebook-url \"<URL>\" --deep-research \"question\"\n"
-        "   Use when: the notebook is still sparse, you are mapping a new direction, or fast research\n"
-        "   is likely to return thin / noisy sources. Prefer this for fresh notebooks.\n\n"
-        "Workflow: start with a plain query for precision lookups against existing notebook content.\n"
-        "If the answer lacks specificity (e.g. no concrete thresholds, cites no sources), escalate to\n"
-        "--research on the same question. If you are building a new line of inquiry or need better source\n"
-        "quality, escalate directly to --deep-research instead of collecting shallow links.\n\n"
-        "Ask specific, targeted questions — not broad summaries. Examples:\n"
-        "- \"What AMT value area rejection thresholds and bar conditions have documented NQ edge?\"\n"
-        "- \"What orderflow signals most reliably predict short-term NQ directional continuation?\"\n"
-        "- \"What threshold mistakes cause NQ scalping strategies to fire zero trades?\"\n"
-        "- \"What holding periods and PT/SL ratios work for profitable NQ intraday scalps?\"\n"
-        "Run multiple queries with different angles. The handbook is your primary resource.\n\n"
-        "FILE ACCESS — READ TOOL:\n"
-        "You also have the Read tool for inspecting files in this project.\n"
-        "Use it selectively — only for near-miss strategies (positive Sharpe that failed):\n"
-        "  read research/signals/<strategy_name>.py to understand what was close to working."
+        "Use the project Claude agent `quant-thinker` from `.claude/agents/quant-thinker.md`.\n"
+        "Treat the runtime mission context in the user prompt as the source of truth for split, session filter,\n"
+        "thresholds, and allowed bar configs. Return only the required JSON object."
     )
 
 
@@ -1566,6 +1376,7 @@ def _build_thinker_user_prompt(
     notebooklm_url = str(mission.get("notebooklm_notebook_url", "")).strip()
     lane_notebook_requires_research = bool(mission.get("lane_notebook_requires_research", False))
     seed_requirements = _resolve_notebook_seed_requirements(mission)
+    notebook_research_guidance = str(mission.get("notebook_research_guidance", "")).strip()
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
@@ -1597,19 +1408,21 @@ def _build_thinker_user_prompt(
             f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --deep-research "question"\n'
             "This notebook is private to your lane and persists across iterations for this lane only. "
             "You must choose the research direction yourself based on the mission, recent results, and what the notebook already contains. "
-            "Start with the plain form for precision lookups; use --research or --deep-research when you need to enrich the notebook with new sources. "
-            "Notebook imports automatically filter out low-signal sources such as social/forum chatter and script marketplaces."
+            "Start with the plain form for precision lookups; use --research or --deep-research when you need to enrich the notebook with new sources."
         )
+        if notebook_research_guidance:
+            prompt += (
+                "\nNotebookLM research guidance:\n"
+                f"- {notebook_research_guidance}"
+            )
         if lane_notebook_requires_research:
             preferred_mode = str(seed_requirements.get("preferred_mode", "deep_research")).replace("_", "-")
-            min_sources = int(seed_requirements.get("min_approved_sources", 0) or 0)
-            min_domains = int(seed_requirements.get("min_distinct_domains", 0) or 0)
+            min_imports = int(seed_requirements.get("min_imported_sources", 0) or 0)
             prompt += (
                 "\nFRESH NOTEBOOK REQUIREMENT:\n"
                 "Your lane notebook is fresh. Before finalising the hypothesis, decide which direction of the mission is most promising "
                 f"and run at least one successful --{preferred_mode} query to seed the notebook in that direction. "
-                f"That query must import at least {min_sources} approved source(s)"
-                f" across at least {min_domains} distinct domain(s). "
+                f"That query must import at least {min_imports} source(s). "
                 "Do not wait for a predefined topic list; you are responsible for choosing the angle."
             )
     if feature_knowledge:
@@ -1626,151 +1439,13 @@ def _build_thinker_user_prompt(
 
 
 def _build_coder_system_prompt() -> str:
-    return """\
-You are a Python quant signal coder for NQ E-mini Nasdaq-100 futures.
-You receive a structured hypothesis from a thinker model. Implement ONLY that plan — nothing more.
-
-Return ONLY a JSON object with exactly these keys: strategy_name, bar_configs, params, code.
-
-CRITICAL: dtype=np.int8 IS MANDATORY
-generate_signal MUST return np.ndarray with dtype=np.int8 and values in {-1, 0, 1}.
-Use: signal = np.where(long_cond, 1, np.where(short_cond, -1, 0)).astype(np.int8)
-Do NOT omit .astype(np.int8). np.where returns int64 by default — that WILL fail validation.
-
-WORKING EXAMPLE MODULE (study this structure exactly):
-
-from __future__ import annotations
-from typing import Any
-import numpy as np
-import polars as pl
-from research.signals import safe_f64_col, signal_from_conditions
-
-DEFAULT_PARAMS: dict[str, Any] = {
-    "fast_span": 8,
-    "slow_span": 21,
-    "min_distance": 0.0,
-}
-
-def generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray:
-    cfg = dict(DEFAULT_PARAMS)
-    cfg.update(params or {})
-
-    close = safe_f64_col(df, "close")
-    fast = _ema(close, int(cfg["fast_span"]))
-    slow = _ema(close, int(cfg["slow_span"]))
-
-    dist = fast - slow
-    prev = np.roll(dist, 1)
-    prev[0] = 0.0
-
-    min_distance = float(cfg["min_distance"])
-    cross_up = (prev <= 0.0) & (dist > min_distance)
-    cross_down = (prev >= 0.0) & (dist < -min_distance)
-
-    # ALWAYS end with .astype(np.int8)
-    signal = np.where(cross_up, 1, np.where(cross_down, -1, 0)).astype(np.int8)
-    return signal
-
-STRATEGY_METADATA = {
-    "name": "example_ema_turn",
-    "version": "1.0",
-    "features_required": ["close"],
-    "description": "EMA crossover signal.",
-}
-
-REQUIREMENTS FOR `code`:
-- Complete Python module (no placeholders, no `pass`)
-- Allowed imports ONLY: numpy as np, polars as pl, typing (Any, Optional, etc.), __future__, and optionally:
-  from research.signals import safe_f64_col, session_start_mask, signal_from_conditions
-- Reuse the framework signal helpers via explicit import; DO NOT reimplement them:
-  * from research.signals import safe_f64_col, session_start_mask, signal_from_conditions
-  * safe_f64_col(df, "col", fill=0.0) -> writable float64 numpy array with NaN/inf sanitized
-  * session_start_mask(df) -> bool array with True on the first bar of each session
-  * signal_from_conditions(long_cond, short_cond) -> final {-1,0,1} int8 signal array
-- Defines DEFAULT_PARAMS: dict[str, Any] — all tunable scalars here
-  IMPORTANT — backtest engine exit params (use these exact keys, values in ticks):
-    pt_ticks : profit target in NQ ticks — engine converts to points automatically
-    sl_ticks : stop loss in NQ ticks — engine converts to points automatically
-    max_bars : max bars to hold before forced exit
-  Copy these from the handoff's params_template. DO NOT implement PT/SL logic inside
-  generate_signal — the engine handles all exits. generate_signal only detects entries.
-- Defines STRATEGY_METADATA: dict with name, version, features_required, description
-- Defines generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray
-  * Returns array of dtype=np.int8, values strictly in {-1, 0, 1}, length == len(df)
-  * No NaN values — fill any intermediate NaN before the final signal array
-  * Merge params into defaults at start: cfg = dict(DEFAULT_PARAMS); cfg.update(params or {})
-- Deterministic: no random, no time.time(), no uuid
-- No I/O: no open(), no os, no sys, no subprocess, no network, no filesystem
-- No lookahead: NEVER use shift(-1) or any negative offset (reads the future)
-  * Correct: df["col"].shift(1)  -- previous bar value
-  * WRONG:   df["col"].shift(-1) -- future bar value (instant disqualification)
-- Safe fallbacks for missing columns:
-  * prefer safe_f64_col(df, "col_name", fill=0.0)
-  * All precomputed features may be absent -- never crash on KeyError
-- DO NOT call df[..].to_numpy() directly.
-- DO NOT use np.nan_to_num(..., copy=False).
-- DO NOT mutate arrays returned from Polars unless they were created through safe_f64_col(...) or np.array(..., copy=True).
-
-STATE MACHINES ARE ALLOWED AND ENCOURAGED:
-If the hypothesis requires sequential logic (e.g. "see event A, then wait for event B, then fire"),
-implement it as a bar-by-bar for-loop with integer state variables. This is pure numpy/polars —
-no special imports needed. Pattern:
-
-  signal = np.zeros(len(df), dtype=np.int8)
-  state = 0  # 0=neutral, 1=armed_long, 2=armed_short
-  for i in range(1, len(df)):
-      if state == 0:
-          if condition_a[i - 1]:   # event A seen on prior bar
-              state = 1
-      elif state == 1:
-          if condition_b[i]:        # event B confirms → fire
-              signal[i] = 1
-              state = 0
-          elif reset_condition[i]:  # setup invalidated → reset
-              state = 0
-  return signal
-
-Key rules for state machines:
-- All condition arrays must be precomputed BEFORE the loop (vectorised) for performance
-- Only reference index i (current) or i-1 (previous) inside the loop — never i+1 (lookahead)
-- Reset state at session boundaries to prevent cross-day contamination
-- State variable counts toward no imports — plain Python int is fine
-
-SESSION BOUNDARY RESET (required for state machines):
-Detect new session from ts_event so state does not bleed across days:
-
-  new_session = session_start_mask(df)
-
-Then inside the loop reset on new_session[i]:
-  if new_session[i]:
-      state = 0  # reset all state at start of each session
-
-SIGNAL FREQUENCY — CRITICAL CALIBRATION WARNING:
-The pre-flight validation runs on a SMALL SAMPLE of ~1,200 bars (roughly 1-3 trading days).
-The full research split is much larger than that sample.
-Use the mission_constraints in the thinker handoff for min_trade_count, session filter,
-and sample bar stats rather than hardcoding absolute signal counts from memory.
-
-NEVER embed raise ValueError or assert for signal count inside generate_signal.
-Reason: if you check "if signals < 30: raise ValueError", the repair loop will loosen
-thresholds until 30 signals appear in 1,200 bars — which equals ~1,500 signals on validate.
-The minimum trade count is enforced by the validation framework AFTER backtesting, not inside
-the module. Your job is only to generate the signal array; let the framework judge the count.
-
-Target signal RATE: 0.05–0.3% of bars should be non-zero (signal in {-1, 1}).
-On 1,200 sample bars that is 1–4 signals — which is correct and expected.
-On 60,000 validate bars that is 30–180 signals — which hits the 30-trade minimum.
-Design thresholds to produce rare, high-conviction events, not frequent signals.
-
-COMMON MISTAKES THAT WILL FAIL VALIDATION:
-1. Missing .astype(np.int8) -> dtype validation fails (int64 != int8)
-2. Negative shift: df["x"].shift(-1) -> causality check fails immediately
-3. KeyError on missing column -> crashes at import time
-4. NaN in output array -> contract validation fails
-5. Wrong length: len(signal) != len(df) -> contract validation fails
-6. Importing os, sys, requests, json, random -> forbidden imports check fails
-7. raise ValueError / assert for signal count -> triggers repair loop, causes overtrading
-"""
+    return (
+        "Use the project Claude agent `nq-signal-coder` from `.claude/agents/nq-signal-coder.md`.\n"
+        "Follow that agent plus the user prompt exactly. Return only the required JSON object with keys\n"
+        "`strategy_name`, `bar_configs`, `params`, and `code`.\n"
+        "Hard runtime reminders: the final signal array must be dtype `np.int8` and should end with "
+        "`.astype(np.int8)`, and `shift(-1)` is forbidden."
+    )
 
 
 def _build_coder_handoff(
@@ -2025,6 +1700,7 @@ def _build_llm_client(
     model: str,
     agent_cfg: dict[str, Any],
     root: Path,
+    role_agent_name: str | None = None,
     role_extra_args: list[str] | None = None,
     role_disable_slash_commands: bool | None = None,
     role_timeout_seconds: float | None = None,
@@ -2061,6 +1737,7 @@ def _build_llm_client(
     return ClaudeCodeCLIClient(
         model=model,
         cli_binary=cli_binary,
+        agent_name=role_agent_name,
         timeout_seconds=timeout_seconds,
         max_retries=retries,
         retry_backoff_seconds=retry_backoff_seconds,
@@ -2094,8 +1771,10 @@ def _resolve_role_cfg(
 
     role_timeout_raw = role_cfg.get("timeout_seconds")
     role_timeout_out = float(role_timeout_raw) if role_timeout_raw is not None else None
+    agent_name = str(role_cfg.get("agent_name", "")).strip() or None
 
     return {
+        "agent_name": agent_name,
         "model": model,
         "temperature": float(
             role_cfg.get(
@@ -2246,6 +1925,7 @@ def main() -> int:
         model=thinker_role["model"],
         agent_cfg=agent_cfg,
         root=root,
+        role_agent_name=thinker_role.get("agent_name"),
         role_extra_args=thinker_role.get("extra_args"),
         role_disable_slash_commands=thinker_role.get("disable_slash_commands"),
         role_timeout_seconds=thinker_role.get("timeout_seconds"),
@@ -2255,6 +1935,7 @@ def main() -> int:
         model=coder_role["model"],
         agent_cfg=agent_cfg,
         root=root,
+        role_agent_name=coder_role.get("agent_name"),
         role_extra_args=coder_role.get("extra_args"),
         role_disable_slash_commands=coder_role.get("disable_slash_commands"),
         role_timeout_seconds=coder_role.get("timeout_seconds"),
@@ -2277,11 +1958,7 @@ def main() -> int:
     )
     active_mission = dict(mission)
     active_mission.update(dict(notebook_bootstrap.get("mission_overrides", {})))
-    notebook_source_policy = (
-        dict(active_mission.get("notebook_source_policy"))
-        if isinstance(active_mission.get("notebook_source_policy"), dict)
-        else {}
-    )
+    notebook_research_guidance = str(active_mission.get("notebook_research_guidance", "")).strip()
     notebook_seed_requirements = _resolve_notebook_seed_requirements(active_mission)
     notebook_meta = (
         dict(notebook_bootstrap["notebook"])
@@ -2399,7 +2076,7 @@ def main() -> int:
                 iteration=iteration_no,
                 stage="quant_thinker",
                 lane_id=lane_id,
-            ), notebook_source_policy_context(notebook_source_policy):
+            ), notebook_research_guidance_context(notebook_research_guidance):
                 thinker_generation = _call_stage_json(
                     stage_name="quant_thinker",
                     schema_hint=(
@@ -2463,14 +2140,14 @@ def main() -> int:
                     + "\n\nENFORCEMENT REMINDER:\n"
                     + "The lane notebook is still fresh. Choose your own direction and run a successful --"
                     + preferred_mode
-                    + " query that imports enough approved sources before returning the hypothesis JSON."
+                    + " query that imports enough sources before returning the hypothesis JSON."
                 )
                 with notebook_audit_context(
                     run_id=run_id,
                     iteration=iteration_no,
                     stage="quant_thinker",
                     lane_id=lane_id,
-                ), notebook_source_policy_context(notebook_source_policy):
+                ), notebook_research_guidance_context(notebook_research_guidance):
                     thinker_generation = _call_stage_json(
                         stage_name="quant_thinker",
                         schema_hint=(

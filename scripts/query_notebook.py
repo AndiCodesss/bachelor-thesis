@@ -16,9 +16,9 @@ Authentication:
     ~/.notebooklm/storage_state.json. All subsequent queries use those cookies.
 
 Note on --research / --deep-research:
-    Approved discovered sources are permanently imported into the notebook,
-    enriching it for all future queries. Low-signal domains and URLs are
-    filtered through the active NotebookLM source policy before import.
+    URL-backed discovered sources are permanently imported into the notebook,
+    enriching it for all future queries. Research runs can be guided with an
+    environment-provided source-quality instruction.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research.lib.notebook_audit import log_notebook_query
-from research.lib.notebook_policy import filter_research_sources, load_source_policy_from_env
+from research.lib.notebook_guidance import load_notebook_research_guidance
 
 _RESEARCH_POLL_INTERVAL = 5    # seconds between status polls
 _FAST_RESEARCH_TIMEOUT = 300   # seconds max for fast mode (5 min)
@@ -51,9 +51,7 @@ async def _ask(notebook_id: str, question: str) -> tuple[str, dict[str, object]]
         result = await client.chat.ask(notebook_id, question)
         return result.answer, {
             "discovered_sources": 0,
-            "approved_sources": 0,
             "imported_sources": 0,
-            "approved_domains": [],
             "fallback_to_plain": False,
         }
 
@@ -63,7 +61,6 @@ async def _research_and_ask(
     question: str,
     *,
     mode: str,
-    source_policy: dict[str, object],
 ) -> tuple[str, dict[str, object]]:
     """Search the web for new sources, import them, then ask the question."""
     from notebooklm import NotebookLMClient
@@ -73,16 +70,21 @@ async def _research_and_ask(
     async with await NotebookLMClient.from_storage() as client:
         # 1. Start research
         print(f"[NotebookLM: starting {mode} web research...]", file=sys.stderr)
-        task = await client.research.start(notebook_id, question, source="web", mode=mode)
+        research_guidance = load_notebook_research_guidance()
+        research_question = question
+        if research_guidance:
+            research_question = (
+                f"{research_guidance}\n\n"
+                f"Research question: {question}"
+            )
+        task = await client.research.start(notebook_id, research_question, source="web", mode=mode)
         if not task:
             print("[NotebookLM: research failed to start, falling back to plain query]",
                   file=sys.stderr)
             result = await client.chat.ask(notebook_id, question)
             return result.answer, {
                 "discovered_sources": 0,
-                "approved_sources": 0,
                 "imported_sources": 0,
-                "approved_domains": [],
                 "fallback_to_plain": True,
             }
 
@@ -101,36 +103,27 @@ async def _research_and_ask(
             result = await client.chat.ask(notebook_id, question)
             return result.answer, {
                 "discovered_sources": 0,
-                "approved_sources": 0,
                 "imported_sources": 0,
-                "approved_domains": [],
                 "fallback_to_plain": True,
             }
 
-        # 3. Import only approved sources
-        approved_sources, filter_stats = filter_research_sources(status.get("sources", []), source_policy)
-        if approved_sources:
+        # 3. Import all discovered URL-backed sources
+        sources = [s for s in status.get("sources", []) if s.get("url")]
+        if sources:
             task_id = status.get("task_id") or task.get("task_id")
-            imported = await client.research.import_sources(notebook_id, task_id, approved_sources)
+            imported = await client.research.import_sources(notebook_id, task_id, sources)
             print(f"[NotebookLM: imported {len(imported)} new source(s) into notebook]",
                   file=sys.stderr)
             imported_count = len(imported)
         else:
-            print(
-                "[NotebookLM: no approved sources found to import "
-                f"(rejected={int(filter_stats.get('rejected_sources', 0))})]",
-                file=sys.stderr,
-            )
+            print("[NotebookLM: no new sources found to import]", file=sys.stderr)
             imported_count = 0
 
         # 4. Ask now that sources are enriched
         result = await client.chat.ask(notebook_id, question)
         return result.answer, {
-            "discovered_sources": int(filter_stats.get("discovered_sources", 0)),
-            "approved_sources": int(filter_stats.get("approved_sources", 0)),
+            "discovered_sources": len(sources),
             "imported_sources": int(imported_count),
-            "approved_domains": list(filter_stats.get("approved_domains", [])),
-            "rejected_sources": int(filter_stats.get("rejected_sources", 0)),
             "fallback_to_plain": False,
         }
 
@@ -159,8 +152,6 @@ def main() -> None:
     elif args.deep_research:
         mode = "deep_research"
     start = time.monotonic()
-    source_policy = load_source_policy_from_env()
-
     try:
         if args.research:
             answer, meta = asyncio.run(
@@ -168,7 +159,6 @@ def main() -> None:
                     notebook_id,
                     args.question,
                     mode="fast",
-                    source_policy=source_policy,
                 ),
             )
         elif args.deep_research:
@@ -177,7 +167,6 @@ def main() -> None:
                     notebook_id,
                     args.question,
                     mode="deep",
-                    source_policy=source_policy,
                 ),
             )
         else:
@@ -191,10 +180,7 @@ def main() -> None:
                 duration_seconds=time.monotonic() - start,
                 answer_chars=len(answer),
                 discovered_sources=int(meta.get("discovered_sources", 0)),
-                approved_sources=int(meta.get("approved_sources", 0)),
                 imported_sources=int(meta.get("imported_sources", 0)),
-                rejected_sources=int(meta.get("rejected_sources", 0)),
-                approved_domains=list(meta.get("approved_domains", [])),
                 fallback_to_plain=bool(meta.get("fallback_to_plain", False)),
             )
         except Exception:

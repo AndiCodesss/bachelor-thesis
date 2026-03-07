@@ -103,9 +103,10 @@ uv run python scripts/research.py \
 
 For `lane_fresh` NotebookLM runs, each lane gets its own persistent notebook.
 Fresh lane notebooks are not considered seeded until the thinker completes the
-required research mode from the mission config and imports enough approved
-sources. Notebook imports are filtered through the active source-quality policy
-before they enter the notebook.
+required research mode from the mission config and imports enough sources.
+Research guidance should push NotebookLM toward high-quality trusted sources,
+but the notebook import path itself stays simple: URL-backed research sources
+are imported as returned.
 
 The generator calls Claude through the local `claude` CLI (`provider: claude_cli`)
 rather than direct API billing.
