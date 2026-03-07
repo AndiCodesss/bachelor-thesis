@@ -413,6 +413,7 @@ def test_prompts_include_feature_knowledge_markers():
             "session_filter": "eth",
             "feature_group": "all",
             "notebooklm_notebook_url": "https://notebooklm.google.com/notebook/test-id",
+            "lane_notebook_requires_research": True,
         },
         existing_strategies=[],
         feedback_items=[],
@@ -424,6 +425,9 @@ def test_prompts_include_feature_knowledge_markers():
     assert "KNOWLEDGE_BASE_COMMAND" in thinker_prompt
     assert "https://notebooklm.google.com/notebook/test-id" in thinker_prompt
     assert "query_notebook.py" in thinker_prompt
+    assert "--deep-research" in thinker_prompt
+    assert "FRESH NOTEBOOK REQUIREMENT" in thinker_prompt
+    assert "choose the research direction yourself" in thinker_prompt
     assert '"common_columns"' in thinker_prompt
 
     coder_prompt = mod._build_coder_user_prompt(
@@ -438,6 +442,15 @@ def test_prompts_include_feature_knowledge_markers():
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in coder_prompt
     assert "Prefer precomputed features directly" in coder_prompt
+
+
+def test_coder_system_prompt_requires_safe_column_helpers():
+    mod = _load_module()
+    prompt = mod._build_coder_system_prompt()
+    assert "safe_f64_col" in prompt
+    assert "session_start_mask" in prompt
+    assert "signal_from_conditions" in prompt
+    assert "DO NOT call df[..].to_numpy() directly" in prompt
 
 
 def test_thinker_system_prompt_requires_internal_brainstorm():
@@ -703,10 +716,11 @@ def test_validate_generated_strategy_errors_on_zero_signal_rate(tmp_path):
         "from typing import Any\n"
         "import numpy as np\n"
         "import polars as pl\n"
+        "from research.signals import safe_f64_col\n"
         'DEFAULT_PARAMS: dict = {"absorption_threshold": 0.9999}\n'
         "def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray:\n"
         '    cfg = dict(DEFAULT_PARAMS); cfg.update(params or {})\n'
-        '    _ = df["absorption_signal"].to_numpy() if "absorption_signal" in df.columns else None\n'
+        '    _ = safe_f64_col(df, "absorption_signal", fill=0.0)\n'
         "    return np.zeros(len(df), dtype=np.int8)\n"
         'STRATEGY_METADATA = {"name": "zero_strat", "version": "1.0",'
         ' "features_required": ["close"], "description": "test"}\n'

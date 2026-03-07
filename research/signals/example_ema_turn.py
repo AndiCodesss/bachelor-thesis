@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from research.signals import safe_f64_col, signal_from_conditions
+
 DEFAULT_PARAMS: dict[str, Any] = {
     "fast_span": 8,
     "slow_span": 21,
@@ -34,7 +36,7 @@ def generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray:
     cfg = dict(DEFAULT_PARAMS)
     cfg.update(params or {})
 
-    close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+    close = safe_f64_col(df, "close")
     fast = _ema(close, int(cfg["fast_span"]))
     slow = _ema(close, int(cfg["slow_span"]))
 
@@ -46,8 +48,7 @@ def generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray:
     cross_up = (prev <= 0.0) & (dist > min_distance)
     cross_down = (prev >= 0.0) & (dist < -min_distance)
 
-    signal = np.where(cross_up, 1, np.where(cross_down, -1, 0)).astype(np.int8)
-    return signal
+    return signal_from_conditions(cross_up, cross_down)
 
 
 STRATEGY_METADATA = {
@@ -56,4 +57,3 @@ STRATEGY_METADATA = {
     "features_required": ["close"],
     "description": "EMA crossover signal for contract and pipeline smoke testing.",
 }
-

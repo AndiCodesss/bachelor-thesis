@@ -37,7 +37,11 @@ advanced_validation:
     - ALPHA_WITH_BETA_EXPOSURE
     - INSUFFICIENT_DATA
 
-notebooklm_notebook_url: "https://notebooklm.google.com/notebook/c59b7dcc-ffeb-431a-b2a8-dbf5bf9cde58"
+notebooklm:
+  mode: lane_fresh
+  required: true
+  title_prefix: "NQ Alpha Discovery"
+  require_research_on_fresh: true
 
 current_focus:
   - "AMT value area rejection and rotation (VAH/VAL/POC mean-reversion)"

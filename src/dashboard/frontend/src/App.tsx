@@ -302,7 +302,7 @@ export default function App() {
       </header>
 
       <main className="main-content">
-        <div className="panel config-panel">
+        <div className="panel config-panel" style={activeTab === 'signals' ? {flex: 1, maxWidth: 'none', overflow: 'hidden'} : {}}>
           
           {/* TAB: CACHE BUILDER */}
           {activeTab === 'cache' && (
@@ -544,7 +544,7 @@ export default function App() {
 
           {/* TAB: SIGNALS EXPLORER */}
           {activeTab === 'signals' && (
-            <div style={{display: 'flex', flexDirection: 'column', height: '100%'}}>
+            <div style={{display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0}}>
               <div>
                 <h2 className="panel-title">Signals Explorer</h2>
                 <p className="panel-desc" style={{marginBottom: '1rem'}}>Inspect the generated files and detailed verification constraints of every tested strategy.</p>

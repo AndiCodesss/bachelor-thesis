@@ -34,6 +34,7 @@ from research.lib.llm_client import (
     extract_json_object,
 )
 from research.lib.mission_splits import resolve_research_splits
+from research.lib.notebook_runtime import ensure_lane_notebook
 from research.lib.notebook_audit import notebook_audit_context, summarize_notebook_queries
 from research.lib.runtime_state import (
     ensure_orchestrator_state,
@@ -660,6 +661,13 @@ def _default_notebook_summary(*, configured: bool) -> dict[str, Any]:
     }
 
 
+def _notebook_used_research(summary: dict[str, Any]) -> bool:
+    mode_counts = summary.get("mode_counts") if isinstance(summary.get("mode_counts"), dict) else {}
+    research_count = int(mode_counts.get("research", 0) or 0)
+    deep_count = int(mode_counts.get("deep_research", 0) or 0)
+    return (research_count + deep_count) > 0
+
+
 def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
     """Format raw feedback items into a compact results table for the thinker."""
     if not feedback_items:
@@ -961,6 +969,70 @@ def _load_sample_strategy_df(
     raise RuntimeError(f"Could not load sample feature frame for bar_config={bar_config}")
 
 
+def _validation_file_indices(total_files: int, *, target_count: int = 3) -> list[int]:
+    if total_files <= 0:
+        return []
+    if total_files <= target_count:
+        return list(range(total_files))
+    indices = np.linspace(0, total_files - 1, num=target_count, dtype=int).tolist()
+    return sorted(set(int(idx) for idx in indices))
+
+
+def _load_validation_strategy_samples(
+    *,
+    split: str,
+    bar_config: str,
+    session_filter: str,
+    feature_group: str,
+    max_rows: int = 1200,
+    target_count: int = 3,
+) -> list[tuple[str, pl.DataFrame]]:
+    try:
+        parsed = _parse_bar_config(bar_config)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid bar_config '{bar_config}': {exc}") from exc
+
+    files = get_split_files(split)
+    if not files:
+        raise RuntimeError(f"No files found for split={split}")
+
+    samples: list[tuple[str, pl.DataFrame]] = []
+    seen_paths: set[str] = set()
+    candidate_indices = _validation_file_indices(len(files), target_count=target_count)
+    candidate_indices.extend(idx for idx in range(len(files)) if idx not in candidate_indices)
+
+    for idx in candidate_indices:
+        file_path = files[idx]
+        key = str(file_path)
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        try:
+            df = load_cached_matrix(
+                file_path,
+                bar_size=parsed["bar_size"],
+                bar_type=parsed["bar_type"],
+                bar_threshold=parsed["bar_threshold"],
+                include_bar_columns=True,
+                session_filter=session_filter,
+            )
+        except Exception:
+            continue
+        if len(df) == 0:
+            continue
+        strategy_df = filter_strategy_inputs(df, feature_group)
+        if len(strategy_df) == 0:
+            continue
+        label = Path(file_path).stem
+        samples.append((label, strategy_df.head(max_rows)))
+        if len(samples) >= target_count:
+            break
+
+    if samples:
+        return samples
+    raise RuntimeError(f"Could not load validation sample frames for bar_config={bar_config}")
+
+
 FEATURE_COMPUTATION_NOTES = [
     "Use precomputed canonical feature columns whenever available; avoid recomputing them in signal code.",
     "sma_ratio_N = close / SMA(close, N) - 1 (rolling mean, min_samples=N).",
@@ -1132,7 +1204,8 @@ def _validate_generated_strategy(
     split: str,
     session_filter: str,
     feature_group: str,
-    sample_cache: dict[str, pl.DataFrame],
+    validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]] | None = None,
+    sample_cache: dict[str, pl.DataFrame] | None = None,
     code: str = "",
 ) -> list[str]:
     module = load_signal_module(strategy_name, signals_dir=signals_dir)
@@ -1140,51 +1213,65 @@ def _validate_generated_strategy(
     if not callable(strategy_fn):
         return [f"{strategy_name}: missing callable generate_signal(df, params)"]
 
+    if validation_sample_cache is None:
+        validation_sample_cache = {}
+    if sample_cache:
+        for bar_config, df in sample_cache.items():
+            validation_sample_cache.setdefault(str(bar_config), [("cached_sample", df)])
+
     errors: list[str] = []
     for bar_config in bar_configs:
-        if bar_config not in sample_cache:
-            sample_cache[bar_config] = _load_sample_strategy_df(
+        if bar_config not in validation_sample_cache:
+            validation_sample_cache[bar_config] = _load_validation_strategy_samples(
                 split=split,
                 bar_config=bar_config,
                 session_filter=session_filter,
                 feature_group=feature_group,
             )
+        for sample_label, strategy_df in validation_sample_cache[bar_config]:
+            if len(strategy_df) == 0:
+                errors.append(f"{strategy_name}: empty sample frame for {bar_config} ({sample_label})")
+                continue
 
-        strategy_df = sample_cache[bar_config]
-        if len(strategy_df) == 0:
-            errors.append(f"{strategy_name}: empty sample frame for {bar_config}")
-            continue
+            try:
+                causality = check_signal_causality(
+                    generate_fn=strategy_fn,
+                    df=strategy_df,
+                    params=params,
+                    mode="strict",
+                )
+            except Exception as exc:
+                errors.append(
+                    f"{strategy_name}: causality check crashed for {bar_config} "
+                    f"({sample_label}): {type(exc).__name__}: {exc}",
+                )
+                continue
+            if causality:
+                errors.append(f"{strategy_name}: non-causal for {bar_config} ({sample_label}): {causality[0]}")
+                continue
 
-        try:
-            causality = check_signal_causality(
-                generate_fn=strategy_fn,
-                df=strategy_df,
-                params=params,
-                mode="strict",
-            )
-        except Exception as exc:
-            errors.append(f"{strategy_name}: causality check crashed for {bar_config}: {type(exc).__name__}: {exc}")
-            continue
-        if causality:
-            errors.append(f"{strategy_name}: non-causal for {bar_config}: {causality[0]}")
-            continue
+            try:
+                raw = np.asarray(strategy_fn(strategy_df, params))
+            except Exception as exc:
+                errors.append(
+                    f"{strategy_name}: generate_signal failed for {bar_config} "
+                    f"({sample_label}): {type(exc).__name__}: {exc}",
+                )
+                continue
+            signal_errors = _validate_signal_array(raw, len(strategy_df))
+            if signal_errors:
+                errors.append(
+                    f"{strategy_name}: contract failed for {bar_config} ({sample_label}): {signal_errors[0]}",
+                )
+                continue
 
-        try:
-            raw = np.asarray(strategy_fn(strategy_df, params))
-        except Exception as exc:
-            errors.append(f"{strategy_name}: generate_signal failed for {bar_config}: {type(exc).__name__}: {exc}")
-            continue
-        signal_errors = _validate_signal_array(raw, len(strategy_df))
-        if signal_errors:
-            errors.append(f"{strategy_name}: contract failed for {bar_config}: {signal_errors[0]}")
-        else:
             nonzero = int(np.count_nonzero(raw))
             total = len(raw)
             rate_pct = 100.0 * nonzero / total if total > 0 else 0.0
             if nonzero == 0:
                 diag = _diagnose_zero_signal(strategy_df, code)
                 errors.append(
-                    f"{strategy_name}: signal_rate=0.0% for {bar_config} "
+                    f"{strategy_name}: signal_rate=0.0% for {bar_config} ({sample_label}) "
                     f"(0/{total} bars non-zero — target 0.05–0.3%). "
                     f"Column statistics for referenced features:\n{diag}\n"
                     f"ACTION REQUIRED: Relax the most restrictive threshold(s) above "
@@ -1192,7 +1279,7 @@ def _validate_generated_strategy(
                 )
             elif rate_pct > 2.0:
                 errors.append(
-                    f"{strategy_name}: signal_rate={rate_pct:.2f}% for {bar_config} "
+                    f"{strategy_name}: signal_rate={rate_pct:.2f}% for {bar_config} ({sample_label}) "
                     f"({nonzero}/{total} bars non-zero — target 0.05–0.3%). "
                     f"Tighten entry filters to avoid cost destruction."
                 )
@@ -1385,6 +1472,7 @@ def _build_thinker_user_prompt(
     if not isinstance(current_focus, list):
         current_focus = []
     notebooklm_url = str(mission.get("notebooklm_notebook_url", "")).strip()
+    lane_notebook_requires_research = bool(mission.get("lane_notebook_requires_research", False))
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
@@ -1413,9 +1501,18 @@ def _build_thinker_user_prompt(
             "\n\nKNOWLEDGE_BASE_COMMAND (copy these exact commands — do not modify the path):\n"
             f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" "question"\n'
             f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --research "question"\n'
-            "Query your research handbook before designing the hypothesis. "
-            "Start with the plain form; escalate to --research if the answer lacks concrete thresholds."
+            f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --deep-research "question"\n'
+            "This notebook is private to your lane and persists across iterations for this lane only. "
+            "You must choose the research direction yourself based on the mission, recent results, and what the notebook already contains. "
+            "Start with the plain form for precision lookups; use --research or --deep-research when you need to enrich the notebook with new sources."
         )
+        if lane_notebook_requires_research:
+            prompt += (
+                "\nFRESH NOTEBOOK REQUIREMENT:\n"
+                "Your lane notebook is fresh. Before finalising the hypothesis, decide which direction of the mission is most promising "
+                "and run at least one --research or --deep-research query to seed the notebook in that direction. "
+                "Do not wait for a predefined topic list; you are responsible for choosing the angle."
+            )
     if feature_knowledge:
         prompt += (
             "\n\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
@@ -1447,6 +1544,7 @@ from __future__ import annotations
 from typing import Any
 import numpy as np
 import polars as pl
+from research.signals import safe_f64_col, signal_from_conditions
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "fast_span": 8,
@@ -1458,7 +1556,7 @@ def generate_signal(df: pl.DataFrame, params: dict[str, Any]) -> np.ndarray:
     cfg = dict(DEFAULT_PARAMS)
     cfg.update(params or {})
 
-    close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+    close = safe_f64_col(df, "close")
     fast = _ema(close, int(cfg["fast_span"]))
     slow = _ema(close, int(cfg["slow_span"]))
 
@@ -1483,7 +1581,13 @@ STRATEGY_METADATA = {
 
 REQUIREMENTS FOR `code`:
 - Complete Python module (no placeholders, no `pass`)
-- Allowed imports ONLY: numpy as np, polars as pl, typing (Any, Optional, etc.), __future__
+- Allowed imports ONLY: numpy as np, polars as pl, typing (Any, Optional, etc.), __future__, and optionally:
+  from research.signals import safe_f64_col, session_start_mask, signal_from_conditions
+- Reuse the framework signal helpers via explicit import; DO NOT reimplement them:
+  * from research.signals import safe_f64_col, session_start_mask, signal_from_conditions
+  * safe_f64_col(df, "col", fill=0.0) -> writable float64 numpy array with NaN/inf sanitized
+  * session_start_mask(df) -> bool array with True on the first bar of each session
+  * signal_from_conditions(long_cond, short_cond) -> final {-1,0,1} int8 signal array
 - Defines DEFAULT_PARAMS: dict[str, Any] — all tunable scalars here
   IMPORTANT — backtest engine exit params (use these exact keys, values in ticks):
     pt_ticks : profit target in NQ ticks — engine converts to points automatically
@@ -1502,8 +1606,11 @@ REQUIREMENTS FOR `code`:
   * Correct: df["col"].shift(1)  -- previous bar value
   * WRONG:   df["col"].shift(-1) -- future bar value (instant disqualification)
 - Safe fallbacks for missing columns:
-  * if "col_name" not in df.columns: use np.zeros(len(df), dtype=np.float64)
+  * prefer safe_f64_col(df, "col_name", fill=0.0)
   * All precomputed features may be absent -- never crash on KeyError
+- DO NOT call df[..].to_numpy() directly.
+- DO NOT use np.nan_to_num(..., copy=False).
+- DO NOT mutate arrays returned from Polars unless they were created through safe_f64_col(...) or np.array(..., copy=True).
 
 STATE MACHINES ARE ALLOWED AND ENCOURAGED:
 If the hypothesis requires sequential logic (e.g. "see event A, then wait for event B, then fire"),
@@ -1533,9 +1640,7 @@ Key rules for state machines:
 SESSION BOUNDARY RESET (required for state machines):
 Detect new session from ts_event so state does not bleed across days:
 
-  ts = df["ts_event"].cast(pl.Datetime("us", "UTC"))
-  dates = ts.dt.convert_time_zone("US/Eastern").dt.date().to_numpy()
-  new_session = np.concatenate([[True], dates[1:] != dates[:-1]])
+  new_session = session_start_mask(df)
 
 Then inside the loop reset on new_session[i]:
   if new_session[i]:
@@ -2065,8 +2170,41 @@ def main() -> int:
     run_id = f"llm_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{_slug(mission_name)}{log_suffix}"
     start_monotonic = time.monotonic()
 
+    notebook_bootstrap = ensure_lane_notebook(
+        mission=mission,
+        lane_id=lane_id,
+        state_payload=orchestrator_state,
+        run_id=run_id,
+    )
+    active_mission = dict(mission)
+    active_mission.update(dict(notebook_bootstrap.get("mission_overrides", {})))
+    notebook_meta = (
+        dict(notebook_bootstrap["notebook"])
+        if isinstance(notebook_bootstrap.get("notebook"), dict)
+        else None
+    )
+    orchestrator_state["run_id"] = run_id
+    if notebook_meta is not None:
+        orchestrator_state["notebooklm"] = notebook_meta
+    elif "notebooklm" in orchestrator_state:
+        orchestrator_state.pop("notebooklm", None)
+    atomic_json_write(state_paths["orchestrator"], orchestrator_state)
+    if notebook_meta is not None:
+        log_experiment(
+            {
+                "run_id": run_id,
+                "agent": "llm_orchestrator",
+                "event": "notebooklm_setup",
+                "lane_id": lane_id,
+                "notebooklm": notebook_meta,
+            },
+            experiments_path=orchestrator_log_path,
+            lock_path=orchestrator_log_lock,
+        )
+
     set_execution_mode(ExecutionMode.RESEARCH)
     sample_cache: dict[str, pl.DataFrame] = {}
+    validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]] = {}
     feature_knowledge = _build_feature_knowledge(
         mission_bar_configs=mission_bar_configs,
         split=search_split,
@@ -2075,7 +2213,7 @@ def main() -> int:
         sample_cache=sample_cache,
     )
     runtime_context = _build_runtime_context(
-        mission=mission,
+        mission=active_mission,
         mission_bar_configs=mission_bar_configs,
         search_split=search_split,
         selection_split=selection_split,
@@ -2102,11 +2240,18 @@ def main() -> int:
         f"search_split={search_split} selection_split={selection_split or 'none'} "
         f"session_filter={session_filter} feature_group={feature_group}",
     )
+    if notebook_meta is not None:
+        print(
+            "notebooklm="
+            f"{notebook_meta.get('mode')} id={notebook_meta.get('notebook_id')} "
+            f"seeded={bool(notebook_meta.get('seeded', False))} "
+            f"imported_sources={notebook_meta.get('imported_sources', 0)}",
+        )
     print(f"state_mode={state_mode}")
     print(f"max_iterations={max_iterations} dry_run={bool(args.dry_run)}")
 
     stop_reason = "max_iterations_reached"
-    notebooklm_configured = bool(str(mission.get("notebooklm_notebook_url", "")).strip())
+    notebooklm_configured = bool(str(active_mission.get("notebooklm_notebook_url", "")).strip())
     while iterations_done < max_iterations:
         if max_runtime_hours is not None:
             elapsed = (time.monotonic() - start_monotonic) / 3600.0
@@ -2138,7 +2283,7 @@ def main() -> int:
 
         try:
             thinker_user_prompt = _build_thinker_user_prompt(
-                mission=mission,
+                mission=active_mission,
                 existing_strategies=existing,
                 feedback_items=feedback_items,
                 runtime_context=runtime_context,
@@ -2200,12 +2345,89 @@ def main() -> int:
                         lane_id=lane_id,
                     ),
                 )
+            if (
+                notebooklm_configured
+                and bool(active_mission.get("lane_notebook_requires_research", False))
+                and not _notebook_used_research(notebook_summary)
+            ):
+                retry_prompt = (
+                    thinker_user_prompt
+                    + "\n\nENFORCEMENT REMINDER:\n"
+                    + "The lane notebook is still fresh. Choose your own direction and run at least one --research "
+                    + "or --deep-research query before returning the hypothesis JSON."
+                )
+                with notebook_audit_context(
+                    run_id=run_id,
+                    iteration=iteration_no,
+                    stage="quant_thinker",
+                    lane_id=lane_id,
+                ):
+                    thinker_generation = _call_stage_json(
+                        stage_name="quant_thinker",
+                        schema_hint=(
+                            "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                            "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
+                        ),
+                        client=thinker_client,
+                        system_prompt=_build_thinker_system_prompt(),
+                        user_prompt=retry_prompt,
+                        temperature=float(thinker_role["temperature"]),
+                        max_output_tokens=int(thinker_role["max_output_tokens"]),
+                        max_attempts=stage_max_attempts,
+                        json_repair_attempts=json_repair_attempts,
+                        stage_backoff_seconds=stage_backoff_seconds,
+                        quota_backoff_seconds=quota_backoff_seconds,
+                        max_backoff_seconds=max_backoff_seconds,
+                    )
+                    thinker_brief, thinker_generation = _normalize_with_semantic_retry(
+                        stage_name="quant_thinker",
+                        stage_result=thinker_generation,
+                        normalize_fn=lambda payload: _normalize_thinker_brief(
+                            payload,
+                            mission_bar_configs=mission_bar_configs,
+                        ),
+                        client=thinker_client,
+                        system_prompt=_build_thinker_system_prompt(),
+                        base_user_prompt=retry_prompt,
+                        temperature=float(thinker_role["temperature"]),
+                        max_output_tokens=int(thinker_role["max_output_tokens"]),
+                        max_semantic_retries=semantic_retry_attempts,
+                        max_attempts=stage_max_attempts,
+                        json_repair_attempts=json_repair_attempts,
+                        stage_backoff_seconds=stage_backoff_seconds,
+                        quota_backoff_seconds=quota_backoff_seconds,
+                        max_backoff_seconds=max_backoff_seconds,
+                        schema_hint=(
+                            "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                            "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
+                        ),
+                    )
+                notebook_summary = _default_notebook_summary(configured=True)
+                notebook_summary.update(
+                    summarize_notebook_queries(
+                        run_id=run_id,
+                        iteration=iteration_no,
+                        stage="quant_thinker",
+                        lane_id=lane_id,
+                    ),
+                )
+                if not _notebook_used_research(notebook_summary):
+                    raise RuntimeError(
+                        "fresh lane notebook was not seeded with a research query before hypothesis generation",
+                    )
+            if notebook_meta is not None and bool(active_mission.get("lane_notebook_requires_research", False)):
+                if _notebook_used_research(notebook_summary):
+                    notebook_meta["seeded"] = True
+                    notebook_meta["fresh"] = False
+                    active_mission["lane_notebook_requires_research"] = False
+                    orchestrator_state["notebooklm"] = dict(notebook_meta)
+                    atomic_json_write(state_paths["orchestrator"], orchestrator_state)
             thinker_hash = _sha256_text(
                 json.dumps(thinker_brief, sort_keys=True, separators=(",", ":")),
             )[:16]
             thinker_handoff = _build_coder_handoff(
                 thinker_brief=thinker_brief,
-                mission=mission,
+                mission=active_mission,
                 thinker_payload_hash=thinker_hash,
                 runtime_context=runtime_context,
             )
@@ -2290,7 +2512,7 @@ def main() -> int:
                     split=search_split,
                     session_filter=session_filter,
                     feature_group=feature_group,
-                    sample_cache=sample_cache,
+                    validation_sample_cache=validation_sample_cache,
                     code=code,
                 )
 
@@ -2365,7 +2587,7 @@ def main() -> int:
                             split=search_split,
                             session_filter=session_filter,
                             feature_group=feature_group,
-                            sample_cache=sample_cache,
+                            validation_sample_cache=validation_sample_cache,
                             code=code,
                         )
                         if not validation_errors:
@@ -2420,7 +2642,7 @@ def main() -> int:
                         selection_split=selection_split,
                         bar_config=bar_config,
                         params=params,
-                        mission=mission,
+                        mission=active_mission,
                         code_hash=code_hash,
                         iteration=iteration_no,
                         hypothesis_id=hypothesis_id,
@@ -2545,6 +2767,7 @@ def main() -> int:
             "iterations_completed": iterations_done,
             "total_tasks_enqueued": total_tasks,
             "generated_modules": generated_modules[-200:],
+            "notebooklm": notebook_meta,
             "last_updated": _utc_now(),
         }
         atomic_json_write(state_paths["orchestrator"], state)
@@ -2563,6 +2786,7 @@ def main() -> int:
         },
         "queue_counts": final_counts,
         "stop_reason": stop_reason,
+        "notebooklm": notebook_meta,
         "dry_run": bool(args.dry_run),
         "last_updated": _utc_now(),
     }

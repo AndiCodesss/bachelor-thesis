@@ -20,6 +20,7 @@ import polars as pl
 SignalFn = Callable[..., np.ndarray]
 CAUSALITY_MIN_PREFIX_BARS = 32
 _SAFE_IMPORT_ROOTS = {"__future__", "math", "numpy", "polars", "typing"}
+_SAFE_EXACT_IMPORTS = {"research.signals"}
 _BANNED_CALL_ROOTS = {
     "__import__",
     "breakpoint",
@@ -116,6 +117,38 @@ def _freeze_constant(value: Any) -> Any:
     return value
 
 
+def safe_f64_col(df: pl.DataFrame, name: str, fill: float = 0.0) -> np.ndarray:
+    """Return a writable float64 array for one strategy column."""
+    default = float(fill)
+    if str(name) not in df.columns:
+        return np.full(len(df), default, dtype=np.float64)
+    arr = np.array(df[str(name)].to_numpy(), dtype=np.float64, copy=True)
+    return np.nan_to_num(arr, nan=default, posinf=default, neginf=default)
+
+
+def session_start_mask(df: pl.DataFrame, *, ts_col: str = "ts_event") -> np.ndarray:
+    """Mark the first bar of each session using US/Eastern session dates."""
+    out = np.zeros(len(df), dtype=bool)
+    if len(out) == 0:
+        return out
+    out[0] = True
+    if ts_col not in df.columns or len(out) == 1:
+        return out
+    ts = df[ts_col].cast(pl.Datetime("us", "UTC"))
+    dates = np.asarray(ts.dt.convert_time_zone("US/Eastern").dt.date().to_numpy())
+    out[1:] = dates[1:] != dates[:-1]
+    return out
+
+
+def signal_from_conditions(long_cond: Any, short_cond: Any) -> np.ndarray:
+    """Build the final strategy signal array in the framework contract format."""
+    long_mask = np.asarray(long_cond, dtype=bool).reshape(-1)
+    short_mask = np.asarray(short_cond, dtype=bool).reshape(-1)
+    if long_mask.shape != short_mask.shape:
+        raise ValueError("long_cond and short_cond must have matching shapes")
+    return np.where(long_mask, 1, np.where(short_mask, -1, 0)).astype(np.int8)
+
+
 def _restricted_import(
     name: str,
     globals_dict: dict[str, Any] | None = None,
@@ -125,6 +158,8 @@ def _restricted_import(
 ):
     if level != 0:
         raise ImportError("relative imports are not allowed in strategy modules")
+    if name in _SAFE_EXACT_IMPORTS:
+        return py_builtins.__import__(name, globals_dict, locals_dict, fromlist, level)
     root = name.split(".", 1)[0]
     if root not in _SAFE_IMPORT_ROOTS:
         raise ImportError(f"disallowed import root '{root}' in strategy module")
@@ -148,12 +183,17 @@ def _validate_signal_source(source: str, path: Path) -> None:
             continue
         if isinstance(node, ast.Import):
             for alias in node.names:
+                if alias.name in _SAFE_EXACT_IMPORTS:
+                    continue
                 root = alias.name.split(".", 1)[0]
                 if root not in _SAFE_IMPORT_ROOTS:
                     raise ValueError(f"Strategy module {path} uses disallowed import '{alias.name}'")
             continue
         if isinstance(node, ast.ImportFrom):
-            root = (node.module or "").split(".", 1)[0]
+            module_name = node.module or ""
+            if node.level == 0 and module_name in _SAFE_EXACT_IMPORTS:
+                continue
+            root = module_name.split(".", 1)[0]
             if node.level != 0 or root not in _SAFE_IMPORT_ROOTS:
                 raise ValueError(f"Strategy module {path} uses disallowed import from '{node.module}'")
             continue
@@ -192,6 +232,16 @@ def _validate_signal_source(source: str, path: Path) -> None:
                 leaf = node.func.attr
                 if _is_dunder_name(leaf) or leaf in _BANNED_ATTR_CALLS:
                     raise ValueError(f"Strategy module {path} uses disallowed call '{leaf}'")
+                if leaf == "to_numpy":
+                    raise ValueError(
+                        f"Strategy module {path} may not call to_numpy(); use safe_f64_col(...) instead",
+                    )
+            if call_name == "np.nan_to_num":
+                for kw in node.keywords:
+                    if kw.arg == "copy" and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+                        raise ValueError(
+                            f"Strategy module {path} may not use np.nan_to_num(..., copy=False)",
+                        )
             if call_name is None:
                 continue
             root = call_name.split(".", 1)[0]
@@ -407,4 +457,7 @@ __all__ = [
     "get_strategy_metadata",
     "compute_strategy_id",
     "check_signal_causality",
+    "safe_f64_col",
+    "session_start_mask",
+    "signal_from_conditions",
 ]

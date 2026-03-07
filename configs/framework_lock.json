@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-06T21:15:15.411747+00:00",
+  "generated_at": "2026-03-07T08:46:49.941144+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 28,
   "files": [
@@ -11,13 +11,13 @@
     },
     {
       "path": "src/framework/backtest/costs.py",
-      "sha256": "70256996b91f1419c131895d2430cea448be757d1c9323730f8442debe5f59fa",
-      "size_bytes": 8272
+      "sha256": "c2fb41ea12acebbcf119e4151ab96c34836557075e6bd19c10df5d451e8b5668",
+      "size_bytes": 8860
     },
     {
       "path": "src/framework/backtest/engine.py",
-      "sha256": "d2e073c988ff700e9cc2b1361d12b16e804fb778348ddf1635c7f04c775005ce",
-      "size_bytes": 15575
+      "sha256": "b4e725fcf7f456addf49140d2d0d5aaa174f4ef321a3660830e6d30fa9073e2e",
+      "size_bytes": 15594
     },
     {
       "path": "src/framework/backtest/metrics.py",

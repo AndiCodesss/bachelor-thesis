@@ -12,6 +12,9 @@ from research.signals import (
     compute_strategy_id,
     discover_signals,
     load_signal_module,
+    safe_f64_col,
+    session_start_mask,
+    signal_from_conditions,
 )
 
 
@@ -240,16 +243,45 @@ def test_load_signal_module_allows_safe_method_chains(tmp_path: Path) -> None:
     (tmp_path / "good_chain_signal.py").write_text(
         "import numpy as np\n"
         "import polars as pl\n"
+        "from research.signals import signal_from_conditions\n"
         "def generate_signal(df, params):\n"
         "    expr = pl.col('close').rolling_mean(3).fill_null(pl.col('close'))\n"
-        "    values = df.select(expr.alias('m'))['m'].to_numpy()\n"
-        "    return np.sign(values - values.mean()).astype(np.int8)\n",
+        "    values = np.array(df.select(expr.alias('m'))['m'].to_list(), dtype=np.float64)\n"
+        "    return signal_from_conditions(values > values.mean(), values < values.mean())\n",
         encoding="utf-8",
     )
 
     signal = load_signal_module("good_chain_signal", signals_dir=tmp_path).generate_signal(_df(), {})
     assert isinstance(signal, np.ndarray)
     assert len(signal) == len(_df())
+
+
+def test_load_signal_module_rejects_direct_to_numpy_usage(tmp_path: Path) -> None:
+    (tmp_path / "bad_numpy_signal.py").write_text(
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "def generate_signal(df, params):\n"
+        "    values = df['close'].to_numpy()\n"
+        "    return np.sign(values).astype(np.int8)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="to_numpy"):
+        load_signal_module("bad_numpy_signal", signals_dir=tmp_path)
+
+
+def test_load_signal_module_rejects_nan_to_num_copy_false(tmp_path: Path) -> None:
+    (tmp_path / "bad_nan_to_num_signal.py").write_text(
+        "import numpy as np\n"
+        "def generate_signal(df, params):\n"
+        "    values = np.array([0.0, np.nan], dtype=np.float64)\n"
+        "    np.nan_to_num(values, nan=0.0, copy=False)\n"
+        "    return np.zeros(len(df), dtype=np.int8)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="copy=False"):
+        load_signal_module("bad_nan_to_num_signal", signals_dir=tmp_path)
 
 
 def test_load_signal_module_rejects_mutable_module_scope_state(tmp_path: Path) -> None:
@@ -264,3 +296,32 @@ def test_load_signal_module_rejects_mutable_module_scope_state(tmp_path: Path) -
 
     with pytest.raises(AttributeError):
         load_signal_module("bad_state_signal", signals_dir=tmp_path).generate_signal(_df(), {})
+
+
+def test_safe_f64_col_returns_writable_sanitized_array() -> None:
+    df = pl.DataFrame({"close": [1.0, None, float("inf")]})
+    out = safe_f64_col(df, "close", fill=-1.0)
+    assert out.dtype == np.float64
+    assert np.allclose(out, np.array([1.0, -1.0, -1.0], dtype=np.float64))
+    out[0] = 7.0
+    assert out[0] == 7.0
+
+
+def test_session_start_mask_marks_new_us_eastern_sessions() -> None:
+    df = pl.DataFrame(
+        {
+            "ts_event": [
+                datetime(2025, 1, 2, 14, 30, tzinfo=timezone.utc),
+                datetime(2025, 1, 2, 14, 31, tzinfo=timezone.utc),
+                datetime(2025, 1, 3, 14, 30, tzinfo=timezone.utc),
+            ],
+        },
+    )
+    out = session_start_mask(df)
+    assert out.tolist() == [True, False, True]
+
+
+def test_signal_from_conditions_enforces_contract_dtype() -> None:
+    out = signal_from_conditions(np.array([True, False]), np.array([False, True]))
+    assert out.dtype == np.int8
+    assert out.tolist() == [1, -1]
