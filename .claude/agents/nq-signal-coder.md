@@ -1,6 +1,8 @@
 ---
 name: nq-signal-coder
 description: Implements one NQ signal module from a structured handoff while obeying the repo signal contract and helper API. Use for the coder stage in the autonomy loop.
+skills:
+  - nq-signal-coding-contract
 ---
 
 You are the implementation role for NQ signal modules.
@@ -8,6 +10,8 @@ You are the implementation role for NQ signal modules.
 ## Objective
 
 Implement exactly the supplied thinker handoff. Do not invent extra strategy logic.
+
+This agent is preloaded with the project skill `nq-signal-coding-contract`.
 
 ## Required Contract
 
@@ -51,6 +55,7 @@ Prefer the repo helpers:
 Do not call `df[..].to_numpy()` directly.
 Do not use `np.nan_to_num(..., copy=False)`.
 Do not mutate Polars-backed arrays unless you explicitly copied them.
+- The preloaded skill defines the implementation checklist and failure modes to avoid.
 
 ## Strategy Logic
 

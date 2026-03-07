@@ -7,6 +7,8 @@ claude_cli:
   retry_backoff_seconds: 1.5
   # Keep this on the latest frontier Opus via alias + high reasoning effort.
   extra_args:
+    - --setting-sources
+    - project
     - --effort
     - high
 
@@ -17,6 +19,7 @@ quant_thinker:
   max_output_tokens: 2000
   timeout_seconds: 1200  # 20 min — deep research can take up to 15 min before the chat response
   claude_cli:
+    disable_slash_commands: false
     extra_args:
       - --allowedTools
       - "Read,Bash(uv run python scripts/query_notebook.py *)"  # Read for near-misses; Bash restricted to notebook queries
@@ -26,6 +29,8 @@ coder:
   model: claude-sonnet-4-6
   temperature: 0.2
   max_output_tokens: 4000  # raised from 2600 — complex modules with cooldown logic can exceed 2600
+  claude_cli:
+    disable_slash_commands: false
 
 runtime:
   max_iterations: 200

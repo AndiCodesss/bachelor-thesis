@@ -101,6 +101,13 @@ uv run python scripts/research.py \
 2. `quant_thinker` (proposes one structured hypothesis),
 3. `coder` (implements only that hypothesis as signal code).
 
+The autonomy roles now also use repo-tracked Claude project skills:
+
+1. `notebook-alpha-research` for NotebookLM-driven direction selection and evidence synthesis
+2. `nq-signal-coding-contract` for coder-side signal contract discipline
+
+These are preloaded into the project agents through the agent frontmatter `skills:` field rather than relied on as ad hoc human-facing slash commands.
+
 For `lane_fresh` NotebookLM runs, each lane gets its own persistent notebook.
 Fresh lane notebooks are not considered seeded until the thinker completes the
 required research mode from the mission config and imports enough sources.

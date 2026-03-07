@@ -224,9 +224,15 @@ def _prune_terminal_tasks(
     queue_path: Path,
     lock_path: Path,
     max_terminal_tasks: int,
+    protected_task_ids: set[str] | None = None,
 ) -> int:
     """Bound queue file size by dropping oldest terminal tasks."""
     keep = max(_MIN_QUEUE_TERMINAL_KEEP, int(max_terminal_tasks))
+    protected = {
+        str(task_id).strip()
+        for task_id in (protected_task_ids or set())
+        if str(task_id).strip()
+    }
     out: dict[str, int] = {"pruned": 0}
 
     def _update(queue: dict[str, Any]) -> dict[str, Any]:
@@ -234,6 +240,7 @@ def _prune_terminal_tasks(
         terminal_indices = [
             idx for idx, task in enumerate(tasks)
             if task.get("state") in {"completed", "failed"}
+            and str(task.get("task_id", "")).strip() not in protected
         ]
         overflow = len(terminal_indices) - keep
         if overflow <= 0:
@@ -258,6 +265,35 @@ def _prune_terminal_tasks(
         update_fn=_update,
     )
     return int(out["pruned"])
+
+
+def _pending_validation_task_ids(
+    *,
+    handoffs_path: Path,
+    handoffs_lock: Path,
+) -> set[str]:
+    handoffs_payload = read_json_file(
+        json_path=handoffs_path,
+        lock_path=handoffs_lock,
+        default_payload={"schema_version": "1.0", "pending": [], "completed": []},
+    )
+    task_ids: set[str] = set()
+    for row in handoffs_payload.get("pending", []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("handoff_type", "")) != "validation_request":
+            continue
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        raw_task_ids = payload.get("task_ids")
+        if not isinstance(raw_task_ids, list):
+            continue
+        for task_id in raw_task_ids:
+            value = str(task_id).strip()
+            if value:
+                task_ids.add(value)
+    return task_ids
 
 
 def _daily_net_pnl_series(trades: pl.DataFrame) -> np.ndarray:
@@ -510,6 +546,51 @@ def _finalize_ready_validation_handoffs(
         update_fn=_update,
     )
     return completed_results
+
+
+def _complete_claimed_task_safely(
+    *,
+    state_paths: dict[str, Path],
+    agent_name: str,
+    claimed: dict[str, Any],
+    verdict: str,
+    details: dict[str, Any],
+    run_id: str,
+    experiments_path: Path,
+    experiments_lock: Path,
+) -> bool:
+    task_id = str(claimed.get("task_id", "")).strip()
+    strategy_name = str(claimed.get("strategy_name", "")).strip()
+    try:
+        complete_task(
+            queue_path=state_paths["queue"],
+            lock_path=state_paths["queue_lock"],
+            agent_name=agent_name,
+            task_id=task_id,
+            verdict=verdict,
+            details=details,
+        )
+        return True
+    except (PermissionError, ValueError) as exc:
+        warning = (
+            f"complete_task skipped for task_id={task_id or 'unknown'} "
+            f"strategy={strategy_name or 'unknown'}: {exc}"
+        )
+        print(f"WARN: {warning}", file=sys.stderr, flush=True)
+        log_experiment(
+            {
+                "run_id": run_id,
+                "agent": agent_name,
+                "event": "task_completion_race",
+                "task_id": task_id,
+                "strategy_name": strategy_name,
+                "attempted_verdict": verdict,
+                "error": str(exc),
+            },
+            experiments_path=experiments_path,
+            lock_path=experiments_lock,
+        )
+        return False
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -1554,13 +1635,15 @@ def main() -> None:
                     stop_heartbeat.set()
                     hb_thread.join(timeout=5)
 
-                complete_task(
-                    queue_path=state_paths["queue"],
-                    lock_path=state_paths["queue_lock"],
+                _complete_claimed_task_safely(
+                    state_paths=state_paths,
                     agent_name=str(args.worker_agent),
-                    task_id=str(claimed["task_id"]),
+                    claimed=claimed,
                     verdict=verdict,
                     details=details,
+                    run_id=run_id,
+                    experiments_path=experiments_path,
+                    experiments_lock=experiments_lock,
                 )
                 resolved_handoffs = _finalize_ready_validation_handoffs(
                     queue_path=state_paths["queue"],
@@ -1588,10 +1671,15 @@ def main() -> None:
                         experiments_path=experiments_path,
                         lock_path=experiments_lock,
                     )
+                protected_task_ids = _pending_validation_task_ids(
+                    handoffs_path=state_paths["handoffs"],
+                    handoffs_lock=state_paths["handoffs_lock"],
+                )
                 pruned = _prune_terminal_tasks(
                     queue_path=state_paths["queue"],
                     lock_path=state_paths["queue_lock"],
                     max_terminal_tasks=queue_terminal_keep,
+                    protected_task_ids=protected_task_ids,
                 )
                 if pruned > 0:
                     print(f"Queue compaction: pruned {pruned} terminal tasks.")

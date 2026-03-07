@@ -603,6 +603,119 @@ def test_finalize_ready_validation_handoffs_marks_mixed_multi_bar_results(
     assert summary["best_bar_config"] == "tick_610"
 
 
+def test_prune_terminal_tasks_preserves_pending_handoff_dependencies(tmp_path: Path):
+    mod = _load_runner_module()
+    mod._MIN_QUEUE_TERMINAL_KEEP = 1
+    queue_path = tmp_path / "queue.json"
+    lock_path = tmp_path / "queue.lock"
+
+    queue_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "tasks": [
+                    {
+                        "task_id": "keep_for_handoff",
+                        "state": "failed",
+                        "completed_at": "2026-01-01T00:00:00+00:00",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                    },
+                    {
+                        "task_id": "drop_me",
+                        "state": "failed",
+                        "completed_at": "2026-01-01T00:01:00+00:00",
+                        "created_at": "2026-01-01T00:01:00+00:00",
+                    },
+                    {
+                        "task_id": "keep_unprotected",
+                        "state": "failed",
+                        "completed_at": "2026-01-01T00:02:00+00:00",
+                        "created_at": "2026-01-01T00:02:00+00:00",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pruned = mod._prune_terminal_tasks(
+        queue_path=queue_path,
+        lock_path=lock_path,
+        max_terminal_tasks=1,
+        protected_task_ids={"keep_for_handoff"},
+    )
+    assert pruned == 1
+
+    payload = json.loads(queue_path.read_text(encoding="utf-8"))
+    remaining_ids = [str(t.get("task_id")) for t in payload.get("tasks", [])]
+    assert "keep_for_handoff" in remaining_ids
+    assert "drop_me" not in remaining_ids
+    assert "keep_unprotected" in remaining_ids
+
+
+def test_pending_validation_task_ids_reads_pending_handoff_references(tmp_path: Path):
+    mod = _load_runner_module()
+    handoffs_path = tmp_path / "handoffs.json"
+    handoffs_lock = tmp_path / "handoffs.lock"
+    handoffs_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "pending": [
+                    {
+                        "handoff_type": "validation_request",
+                        "payload": {"task_ids": ["t1", "t2", ""]},
+                    },
+                    {
+                        "handoff_type": "other",
+                        "payload": {"task_ids": ["ignored"]},
+                    },
+                ],
+                "completed": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert mod._pending_validation_task_ids(
+        handoffs_path=handoffs_path,
+        handoffs_lock=handoffs_lock,
+    ) == {"t1", "t2"}
+
+
+def test_complete_claimed_task_safely_logs_race_and_returns_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    mod = _load_runner_module()
+    events: list[dict[str, Any]] = []
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError("Task t1 is not in progress")
+
+    monkeypatch.setattr(mod, "complete_task", _raise)
+    monkeypatch.setattr(mod, "log_experiment", lambda row, **_kwargs: events.append(dict(row)))
+
+    ok = mod._complete_claimed_task_safely(
+        state_paths={"queue": tmp_path / "queue.json", "queue_lock": tmp_path / "queue.lock"},
+        agent_name="validator",
+        claimed={"task_id": "t1", "strategy_name": "alpha_x"},
+        verdict="PASS",
+        details={"metrics": {"sharpe_ratio": 1.0}},
+        run_id="run_123",
+        experiments_path=tmp_path / "experiments.jsonl",
+        experiments_lock=tmp_path / "experiments.lock",
+    )
+
+    assert ok is False
+    err = capsys.readouterr().err
+    assert "WARN: complete_task skipped" in err
+    assert len(events) == 1
+    assert events[0]["event"] == "task_completion_race"
+    assert events[0]["task_id"] == "t1"
+
+
 def test_execute_claimed_task_gauntlet_respects_metric_thresholds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

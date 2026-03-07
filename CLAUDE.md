@@ -41,6 +41,7 @@ Use the helper imports from `research.signals` instead of ad hoc dataframe-to-nu
 - prefer `--deep-research` for fresh notebooks or new directions
 - ask for high-quality trusted sources: exchange/operator docs, academic papers, serious market-structure research, broker/execution research, and technical references
 - avoid low-signal forum chatter, script marketplaces, and recycled summaries
+- the thinker agent preloads the project skill `notebook-alpha-research` to decide how to query NotebookLM and turn research into one hypothesis
 
 ## Important Files
 
@@ -48,6 +49,7 @@ Use the helper imports from `research.signals` instead of ad hoc dataframe-to-nu
 - agent runtime config: `configs/agents/llm_orchestrator.yaml`
 - feature catalog: `research/feature_catalog.md`
 - agent guide: `docs/AGENT_GUIDE.md`
+- Claude project skills: `.claude/skills/<skill-name>/SKILL.md`
 
 ## Hard Boundaries
 

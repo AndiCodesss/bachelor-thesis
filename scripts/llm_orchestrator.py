@@ -1356,6 +1356,7 @@ def _validate_generated_strategy(
 def _build_thinker_system_prompt() -> str:
     return (
         "Use the project Claude agent `quant-thinker` from `.claude/agents/quant-thinker.md`.\n"
+        "That agent includes the preloaded project skill `notebook-alpha-research`.\n"
         "Treat the runtime mission context in the user prompt as the source of truth for split, session filter,\n"
         "thresholds, and allowed bar configs. Return only the required JSON object."
     )
@@ -1441,6 +1442,7 @@ def _build_thinker_user_prompt(
 def _build_coder_system_prompt() -> str:
     return (
         "Use the project Claude agent `nq-signal-coder` from `.claude/agents/nq-signal-coder.md`.\n"
+        "That agent includes the preloaded project skill `nq-signal-coding-contract`.\n"
         "Follow that agent plus the user prompt exactly. Return only the required JSON object with keys\n"
         "`strategy_name`, `bar_configs`, `params`, and `code`.\n"
         "Hard runtime reminders: the final signal array must be dtype `np.int8` and should end with "

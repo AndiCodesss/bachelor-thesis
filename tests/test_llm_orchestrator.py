@@ -458,6 +458,7 @@ def test_coder_system_prompt_requires_safe_column_helpers():
     mod = _load_module()
     prompt = mod._build_coder_system_prompt()
     assert "nq-signal-coder" in prompt
+    assert "nq-signal-coding-contract" in prompt
     assert "Return only the required JSON object" in prompt
 
 
@@ -465,6 +466,7 @@ def test_thinker_system_prompt_requires_internal_brainstorm():
     mod = _load_module()
     prompt = mod._build_thinker_system_prompt()
     assert "quant-thinker" in prompt
+    assert "notebook-alpha-research" in prompt
     assert "runtime mission context" in prompt
 
 

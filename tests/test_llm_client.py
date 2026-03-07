@@ -27,6 +27,7 @@ def test_claude_cli_generate_raw(monkeypatch: pytest.MonkeyPatch):
         assert "-p" in cmd
         assert "--model" in cmd
         assert "--system-prompt" in cmd
+        assert "--agent" not in cmd
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
         assert kwargs["check"] is False
@@ -52,6 +53,8 @@ def test_claude_cli_generate_raw_passes_agent(monkeypatch: pytest.MonkeyPatch):
     def _fake_run(cmd, **kwargs):
         assert "--agent" in cmd
         assert cmd[cmd.index("--agent") + 1] == "quant-thinker"
+        assert "--system-prompt" not in cmd
+        assert "--append-system-prompt" in cmd
         return _FakeProc()
 
     monkeypatch.setattr(llm_client.subprocess, "run", _fake_run)
@@ -62,6 +65,7 @@ def test_claude_cli_generate_raw_passes_agent(monkeypatch: pytest.MonkeyPatch):
     )
     out = client.generate_raw(system_prompt="sys", user_prompt="usr", force_json_object=True)
     assert out.raw_text == '{"ok": true}'
+
 
 
 def test_claude_cli_missing_binary_raises(monkeypatch: pytest.MonkeyPatch):
