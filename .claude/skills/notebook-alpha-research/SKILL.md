@@ -78,5 +78,7 @@ That hypothesis should be:
 - causal
 - expressible with repo features
 - robust enough to justify coding
+- assigned to exactly one concise `theme_tag` in snake_case
+- reuse a current-focus anchor when it fits; otherwise mint a more precise tag if the evidence clearly justifies it
 
 If research does not justify a strong idea, pivot and ask a better NotebookLM question before finalizing.

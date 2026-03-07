@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from research.lib.atomic_io import atomic_json_write
+from research.lib.learning_scorecard import empty_scorecard
 
 
 def _utc_now() -> str:
@@ -28,6 +29,8 @@ def shared_state_paths(root: Path) -> dict[str, Path]:
         "handoffs_lock": state_root / "handoffs.lock",
         "budget": state_root / "mission_budget.json",
         "budget_lock": state_root / "mission_budget.lock",
+        "scorecard": state_root / "learning_scorecard.json",
+        "scorecard_lock": state_root / "learning_scorecard.lock",
     }
 
 
@@ -43,6 +46,7 @@ def shared_state_defaults(mission_name: str) -> dict[str, dict[str, Any]]:
             "started_at": None,
             "last_updated": None,
         },
+        "scorecard": empty_scorecard(),
     }
 
 

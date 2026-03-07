@@ -27,6 +27,12 @@ from research.lib.atomic_io import atomic_json_write
 from research.lib.coordination import append_handoff, enqueue_task, read_json_file
 from research.lib.experiments import log_experiment
 from research.lib.feature_groups import filter_strategy_inputs
+from research.lib.learning_scorecard import (
+    format_learning_context,
+    normalize_theme_tag,
+    read_learning_scorecard,
+    resolve_focus_anchors,
+)
 from research.lib.llm_client import (
     ClaudeCodeCLIClient,
     LLMClientError,
@@ -808,6 +814,15 @@ def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _build_learning_context(
+    *,
+    scorecard_path: Path,
+    scorecard_lock: Path,
+) -> str:
+    scorecard = read_learning_scorecard(scorecard_path, scorecard_lock)
+    return format_learning_context(scorecard)
+
+
 def _normalize_thinker_brief(
     payload: dict[str, Any],
     *,
@@ -823,6 +838,11 @@ def _normalize_thinker_brief(
     strategy_name_hint = _slug(str(payload.get("strategy_name_hint", "")).strip())
     if not strategy_name_hint:
         strategy_name_hint = f"{hypothesis_id}_signal"
+
+    raw_theme_tag = str(payload.get("theme_tag", "")).strip()
+    if not raw_theme_tag:
+        raise ValueError("theme_tag is required")
+    theme_tag = normalize_theme_tag(raw_theme_tag)
 
     params_template = payload.get("params_template", {})
     if not isinstance(params_template, dict):
@@ -887,6 +907,7 @@ def _normalize_thinker_brief(
 
     return {
         "hypothesis_id": hypothesis_id,
+        "theme_tag": theme_tag,
         "strategy_name_hint": strategy_name_hint,
         "bar_configs": chosen,
         "params_template": dict(params_template),
@@ -1367,6 +1388,7 @@ def _build_thinker_user_prompt(
     mission: dict[str, Any],
     existing_strategies: list[str],
     feedback_items: list[dict[str, Any]],
+    learning_context: str = "",
     runtime_context: dict[str, Any] | None = None,
     feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
@@ -1379,10 +1401,11 @@ def _build_thinker_user_prompt(
     seed_requirements = _resolve_notebook_seed_requirements(mission)
     notebook_research_guidance = str(mission.get("notebook_research_guidance", "")).strip()
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
+    focus_anchors = resolve_focus_anchors(mission)
     avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
     results_table = _format_results_table(feedback_items)
-    prompt = (
+    prompt_parts = [
         f"Mission objective:\n{objective}\n\n"
         f"Allowed bar_configs: {bar_configs}\n"
         f"Preferred session filter: {mission.get('session_filter', 'eth')}\n"
@@ -1390,8 +1413,21 @@ def _build_thinker_user_prompt(
         f"Current focus:\n{focus_blob}\n\n"
         f"Existing strategy files to avoid duplicating:\n{avoid}\n\n"
         f"Recent experiment results:\n{results_table}\n\n"
-        "Design exactly one hypothesis that is implementable by a separate coding model."
+    ]
+    if focus_anchors:
+        prompt_parts.append(
+            "Current focus anchors (soft guidance, not a fixed taxonomy):\n"
+            + "\n".join(f"- {tag}" for tag in focus_anchors)
+            + "\n\n",
+        )
+    prompt_parts.append(
+        "Return exactly one concise `theme_tag` in snake_case. Reuse a focus anchor if it fits; "
+        "otherwise introduce a new precise tag if the evidence points elsewhere.\n\n",
     )
+    if learning_context.strip():
+        prompt_parts.append(f"{learning_context}\n\n")
+    prompt_parts.append("Design exactly one hypothesis that is implementable by a separate coding model.")
+    prompt = "".join(prompt_parts)
     if runtime_context:
         prompt += (
             "\n\nRUNTIME_MISSION_CONTEXT_JSON_BEGIN\n"
@@ -1507,6 +1543,7 @@ def _build_coder_handoff(
         },
         "hypothesis": {
             "hypothesis_id": hypothesis_id,
+            "theme_tag": str(thinker_brief.get("theme_tag", "")),
             "strategy_name_hint": strategy_name_hint,
             "bar_configs": list(thinker_brief.get("bar_configs", [])),
             "params_template": dict(thinker_brief.get("params_template", {}))
@@ -1617,6 +1654,7 @@ def _build_task(
     code_hash: str,
     iteration: int,
     hypothesis_id: str,
+    theme_tag: str,
 ) -> dict[str, Any]:
     max_retries = int(mission.get("max_retries", 2))
     timeout_minutes = int(mission.get("task_timeout_minutes", 30))
@@ -1641,6 +1679,7 @@ def _build_task(
         "search_split": search_split,
         "selection_split": selection_split,
         "bar_config": bar_config,
+        "theme_tag": str(theme_tag),
         "params": dict(params),
         "exit_bars": exit_bars,
         "profit_target": profit_target,
@@ -1655,6 +1694,7 @@ def _build_task(
             "agent": "llm_orchestrator",
             "iteration": int(iteration),
             "hypothesis_id": str(hypothesis_id),
+            "theme_tag": str(theme_tag),
             "code_hash": code_hash,
         },
     }
@@ -1864,6 +1904,8 @@ def main() -> int:
         "queue_lock": shared_paths["queue_lock"],
         "handoffs": shared_paths["handoffs"],
         "handoffs_lock": shared_paths["handoffs_lock"],
+        "scorecard": shared_paths["scorecard"],
+        "scorecard_lock": shared_paths["scorecard_lock"],
         "orchestrator": orchestrator_state_file,
     }
     orchestrator_state = _read_json(state_paths["orchestrator"])
@@ -2060,6 +2102,10 @@ def main() -> int:
             research_log_path=research_log_path,
             orchestrator_log_path=orchestrator_log_path,
         )
+        learning_context = _build_learning_context(
+            scorecard_path=state_paths["scorecard"],
+            scorecard_lock=state_paths["scorecard_lock"],
+        )
 
         iteration_no = iterations_done + 1
         print(f"[iteration {iteration_no}/{max_iterations}] running thinker->coder pipeline")
@@ -2070,6 +2116,7 @@ def main() -> int:
                 mission=active_mission,
                 existing_strategies=existing,
                 feedback_items=feedback_items,
+                learning_context=learning_context,
                 runtime_context=runtime_context,
                 feature_knowledge=feature_knowledge,
             )
@@ -2082,7 +2129,7 @@ def main() -> int:
                 thinker_generation = _call_stage_json(
                     stage_name="quant_thinker",
                     schema_hint=(
-                        "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                        "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
                         "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                     ),
                     client=thinker_client,
@@ -2115,7 +2162,7 @@ def main() -> int:
                     quota_backoff_seconds=quota_backoff_seconds,
                     max_backoff_seconds=max_backoff_seconds,
                     schema_hint=(
-                        "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                        "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
                         "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                     ),
                 )
@@ -2153,7 +2200,7 @@ def main() -> int:
                     thinker_generation = _call_stage_json(
                         stage_name="quant_thinker",
                         schema_hint=(
-                            "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                            "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
                             "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                         ),
                         client=thinker_client,
@@ -2186,7 +2233,7 @@ def main() -> int:
                         quota_backoff_seconds=quota_backoff_seconds,
                         max_backoff_seconds=max_backoff_seconds,
                         schema_hint=(
-                            "keys: hypothesis_id, strategy_name_hint, thesis, bar_configs, params_template, "
+                            "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
                             "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                         ),
                     )
@@ -2267,6 +2314,7 @@ def main() -> int:
             chosen_bars = normalized["bar_configs"]
             code_hash = _sha256_text(code)[:16]
             hypothesis_id = str(thinker_brief.get("hypothesis_id", "hyp_unknown"))
+            theme_tag = str(thinker_brief.get("theme_tag", "other"))
 
             module_path, is_new_path = _choose_module_path(
                 signals_dir,
@@ -2399,6 +2447,7 @@ def main() -> int:
                         "bar_configs": chosen_bars,
                         "errors": validation_errors,
                         "hypothesis_id": hypothesis_id,
+                        "theme_tag": str(thinker_brief.get("theme_tag", "other")),
                         "thinker": {
                             "model": thinker_generation.model,
                             "response_id": thinker_generation.response_id,
@@ -2435,6 +2484,7 @@ def main() -> int:
                         code_hash=code_hash,
                         iteration=iteration_no,
                         hypothesis_id=hypothesis_id,
+                        theme_tag=theme_tag,
                     )
                     inserted = False
                     if not args.dry_run:
@@ -2471,6 +2521,7 @@ def main() -> int:
                                 "task_ids": enqueued_task_ids,
                                 "bar_configs": chosen_bars,
                                 "hypothesis_id": hypothesis_id,
+                                "theme_tag": theme_tag,
                             },
                         },
                     )
@@ -2485,6 +2536,7 @@ def main() -> int:
                         "iteration": iteration_no,
                         "strategy_name": module_name,
                         "hypothesis_id": hypothesis_id,
+                        "theme_tag": theme_tag,
                         "thinker_brief": thinker_brief,
                         "bar_configs": chosen_bars,
                         "params": params,

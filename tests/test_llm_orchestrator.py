@@ -23,6 +23,7 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
     mod = _load_module()
     thinker_payload = {
         "hypothesis_id": "OFI Bounce 01",
+        "theme_tag": "amt_value_area",
         "strategy_name_hint": "OFI Bounce",
         "bar_configs": ["foo", "tick_610", "time_1m"],
         "params_template": {"lookback": 12},
@@ -38,6 +39,7 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
         mission_bar_configs=["tick_610", "volume_2000"],
     )
     assert thinker["hypothesis_id"] == "ofi_bounce_01"
+    assert thinker["theme_tag"] == "amt_value_area"
     assert thinker["strategy_name_hint"] == "ofi_bounce"
     assert thinker["bar_configs"] == ["tick_610"]
     assert thinker["params_template"] == {"lookback": 12}
@@ -349,6 +351,7 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
     mod = _load_module()
     thinker = {
         "hypothesis_id": "h_01",
+        "theme_tag": "amt_value_area",
         "strategy_name_hint": "alpha_hint",
         "bar_configs": ["tick_610"],
         "params_template": {"lookback": 10},
@@ -371,6 +374,7 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
     )
     assert handoff["source_role"] == "quant_thinker"
     assert handoff["payload_hash"] == "abc123"
+    assert handoff["hypothesis"]["theme_tag"] == "amt_value_area"
     prompt = mod._build_coder_user_prompt(thinker_handoff=handoff)
     assert "THINKER_HANDOFF_JSON_BEGIN" in prompt
     assert '"hypothesis_id": "h_01"' in prompt
@@ -410,6 +414,10 @@ def test_prompts_include_feature_knowledge_markers():
         mission={
             "objective": "x",
             "bar_configs": ["tick_610"],
+            "current_focus": [
+                "AMT value area rejection and rotation (VAH/VAL/POC mean-reversion)",
+                "Orderflow divergence reversals (fade delta extremes, not follow them)",
+            ],
             "session_filter": "eth",
             "feature_group": "all",
             "notebooklm_notebook_url": "https://notebooklm.google.com/notebook/test-id",
@@ -424,6 +432,7 @@ def test_prompts_include_feature_knowledge_markers():
         },
         existing_strategies=[],
         feedback_items=[],
+        learning_context="LEARNING_SCORECARD:\nLow-sample themes: amt_value_area",
         runtime_context={"split": "validate", "min_trade_count": 30, "sample_bar_context": {"tick_610": {"sample_rows": 1200}}},
         feature_knowledge=feature_knowledge,
     )
@@ -439,6 +448,10 @@ def test_prompts_include_feature_knowledge_markers():
     assert "at least 1 source(s)" in thinker_prompt
     assert "Use high-quality trusted sources." in thinker_prompt
     assert '"common_columns"' in thinker_prompt
+    assert "Current focus anchors" in thinker_prompt
+    assert "- amt_value_area" in thinker_prompt
+    assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
+    assert "LEARNING_SCORECARD:" in thinker_prompt
 
     coder_prompt = mod._build_coder_user_prompt(
         thinker_handoff={
@@ -486,6 +499,52 @@ def test_thinker_user_prompt_omits_notebook_command_when_no_url():
     )
     assert "KNOWLEDGE_BASE_COMMAND" not in prompt
     assert "query_notebook.py" not in prompt
+
+
+def test_build_learning_context_reads_scorecard(tmp_path: Path):
+    mod = _load_module()
+    scorecard_path = tmp_path / "learning_scorecard.json"
+    scorecard_lock = tmp_path / "learning_scorecard.lock"
+    scorecard_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "rebuilt_at": "2026-03-07T14:00:00+00:00",
+                "theme_stats": {
+                    "amt_value_area": {
+                        "attempts": 4,
+                        "search_passes": 2,
+                        "search_rate": 0.50,
+                        "selection_attempts": 1,
+                        "selection_passes": 0,
+                        "selection_rate": 0.33,
+                        "fail_counts": {"alpha_decay": 2},
+                    },
+                    "orderflow_divergence": {
+                        "attempts": 1,
+                        "search_passes": 0,
+                        "search_rate": 0.33,
+                        "selection_attempts": 0,
+                        "selection_passes": 0,
+                        "selection_rate": 0.50,
+                        "fail_counts": {},
+                    }
+                },
+                "bar_config_affinity": {},
+                "near_misses": [],
+                "low_sample_themes": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    context = mod._build_learning_context(
+        scorecard_path=scorecard_path,
+        scorecard_lock=scorecard_lock,
+    )
+    assert "LEARNING_SCORECARD:" in context
+    assert "amt_value_area: 4 attempts" in context
+    assert "Low-sample themes: orderflow_divergence" in context
 
 
 def test_notebook_seed_satisfied_requires_non_fallback_quality_research():

@@ -1239,3 +1239,33 @@ def test_execute_claimed_task_supports_stateful_signal_signature(
     assert captures["accepts_state"] is True
     assert captures["model_state_type"] == "dict"
     assert captures["last_state_calls"] == 2
+
+
+def test_task_feedback_summary_preserves_theme_and_selection_fields():
+    mod = _load_runner_module()
+    summary = mod._task_feedback_summary(
+        {
+            "task_id": "t1",
+            "strategy_name": "alpha_amt",
+            "theme_tag": "amt_value_area",
+            "bar_config": "tick_610",
+            "state": "completed",
+            "verdict": "PASS",
+            "split": "train",
+            "completed_at": "2026-03-07T12:00:00+00:00",
+            "details": {
+                "metrics": {"sharpe_ratio": 1.2, "trade_count": 42, "net_pnl": 500.0},
+                "feedback_verdict": "PASS",
+                "feedback_split": "train",
+                "final_verdict": "FAIL",
+                "candidate_status": "rejected_selection",
+                "selection_result": {"verdict": "FAIL"},
+            },
+        }
+    )
+
+    assert summary["theme_tag"] == "amt_value_area"
+    assert summary["selection_attempted"] is True
+    assert summary["selection_verdict"] == "FAIL"
+    assert summary["final_verdict"] == "FAIL"
+    assert summary["candidate_status"] == "rejected_selection"

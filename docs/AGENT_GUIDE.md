@@ -130,10 +130,13 @@ that same file under `runtime`.
 Each task should contain:
 
 1. `strategy_name`
-2. `split` (research-safe, usually `validate`)
-3. `bar_config` (e.g., `tick_610`, `volume_2000`, `time_1m`)
-4. `params`
-5. optional risk/backtest controls (`stop_loss`, `profit_target`, `exit_bars`, `max_daily_loss`)
+2. `theme_tag` (concise snake_case family label chosen by the thinker)
+3. `split` / `search_split` / `selection_split`
+   `split` mirrors the active search split for queue compatibility; discovery tasks are usually `train`
+   with `selection_split=validate`
+4. `bar_config` (e.g., `tick_610`, `volume_2000`, `time_1m`)
+5. `params`
+6. optional risk/backtest controls (`stop_loss`, `profit_target`, `exit_bars`, `max_daily_loss`)
 
 Task verdicts:
 
@@ -141,6 +144,12 @@ Task verdicts:
 2. `FAIL`: ran successfully but did not meet criteria
 3. `ERROR`: runtime/contract/processing failure
 4. `NEEDS_WORK` / `ABANDON`: optional strategic labels when applicable
+
+The validator also updates a derived `research/.state/learning_scorecard.json`
+from persisted task and handoff outcomes. The scorecard tracks observed
+theme-level performance, bar-config affinity, recurring failure modes, and near
+misses. The thinker reads it as context, but `current_focus` remains soft
+guidance only; theme tags are not restricted to a fixed taxonomy.
 
 ## Candidate Promotion
 

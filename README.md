@@ -119,6 +119,7 @@ Same agent, same engine, same rules — only the feature space changes.
 │       ├── coordination.py               # File locks, task state, heartbeat
 │       ├── experiments.py                # Experiment logging
 │       ├── budget.py                     # Mission budget persistence
+│       ├── learning_scorecard.py         # Derived learning memory (themes, failures, near misses)
 │       ├── trial_counter.py              # Raw + effective trial count for deflated Sharpe
 │       ├── feature_groups.py            # A/B group feature filtering (OHLCV vs OHLCV+MBP1)
 │       └── promotion.py                  # Candidate artifact verification
@@ -130,7 +131,8 @@ Same agent, same engine, same rules — only the feature space changes.
 │   ├── agents/
 │   │   └── llm_orchestrator.yaml         # LLM generator runtime settings
 ├── .claude/
-│   └── agents/                           # Repo-tracked Claude project agents (thinker/coder)
+│   ├── agents/                           # Repo-tracked Claude project agents (thinker/coder)
+│   └── skills/                           # Repo-tracked Claude project skills
 ├── CLAUDE.md                             # Project memory for Claude Code sessions
 │
 ├── scripts/
@@ -223,6 +225,7 @@ uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.j
 
 Runner entrypoints are resume-safe by default. Use `--fresh-state` only when you intentionally want a new queue/handoff/budget state.
 NotebookLM query usage is audited to `results/logs/notebook_queries.jsonl`, and each orchestrator generation event records whether the thinker actually used the notebook during that iteration. Fresh lane notebooks require a successful seeding query before the hypothesis is accepted. Deep-research queries import all URL-backed sources they discover, while the mission and thinker prompt explicitly push NotebookLM toward high-quality trusted sources.
+Validator runs also maintain a derived `research/.state/learning_scorecard.json` cache that summarizes observed theme performance, bar-config affinity, dominant failure modes, and near misses. The thinker reads that scorecard as context, but theme tags remain dynamic: current focus only provides soft anchors, not a fixed whitelist.
 
 ## Promotion Workflow
 

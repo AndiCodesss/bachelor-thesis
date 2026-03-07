@@ -45,6 +45,7 @@ Treat NotebookLM as your research handbook.
 Return only one JSON object with these keys:
 
 - `hypothesis_id`
+- `theme_tag`
 - `strategy_name_hint`
 - `thesis`
 - `bar_configs`
@@ -54,5 +55,8 @@ Return only one JSON object with these keys:
 - `risk_controls`
 - `anti_lookahead_checks`
 - `validation_focus`
+
+Return exactly one concise `theme_tag` in snake_case.
+Reuse a current-focus anchor from the runtime prompt if it fits. If it does not, introduce a new precise tag.
 
 No markdown. No extra prose.

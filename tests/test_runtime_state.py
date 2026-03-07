@@ -18,6 +18,7 @@ def _read_json(path: Path) -> dict:
 
 def test_ensure_shared_state_is_resume_safe(tmp_path: Path):
     paths = ensure_shared_state(tmp_path, mission_name="mission_a")
+    assert _read_json(paths["scorecard"])["schema_version"] == "1.0"
     paths["queue"].write_text(
         json.dumps({"schema_version": "1.0", "tasks": [{"task_id": "t1", "state": "pending"}]}),
         encoding="utf-8",
@@ -56,6 +57,9 @@ def test_reset_shared_state_resets_queue_and_budget(tmp_path: Path):
     assert budget["mission_name"] == "mission_b"
     assert budget["experiments_run"] == 0
     assert budget["failures_by_type"] == {}
+    scorecard = _read_json(reset_paths["scorecard"])
+    assert scorecard["theme_stats"] == {}
+    assert scorecard["bar_config_affinity"] == {}
 
 
 def test_clear_orchestrator_state_removes_legacy_and_lane_files(tmp_path: Path):

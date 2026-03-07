@@ -28,6 +28,11 @@ from research.lib.atomic_io import atomic_json_write
 from research.lib.budget import MissionBudget
 from research.lib.candidates import write_candidate
 from research.lib.feature_groups import filter_strategy_inputs
+from research.lib.learning_scorecard import (
+    empty_scorecard,
+    rebuild_learning_scorecard,
+    update_learning_scorecard,
+)
 from research.lib.mission_splits import ALLOWED_RESEARCH_SPLITS, resolve_research_splits
 from research.lib.coordination import (
     claim_task,
@@ -360,7 +365,9 @@ def _evaluate_advanced_validation_gates(
 
 def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
     details = task.get("details")
+    source = task.get("source") if isinstance(task.get("source"), dict) else {}
     metrics = details.get("metrics") if isinstance(details, dict) else None
+    selection_result = details.get("selection_result") if isinstance(details, dict) else None
     feedback_verdict = (
         str(details.get("feedback_verdict", task.get("verdict", "")))
         if isinstance(details, dict)
@@ -374,6 +381,7 @@ def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {
         "task_id": str(task.get("task_id", "")),
         "strategy_name": str(task.get("strategy_name", "")),
+        "theme_tag": str(task.get("theme_tag") or source.get("theme_tag") or ""),
         "bar_config": str(task.get("bar_config", "")),
         "state": str(task.get("state", "")),
         "verdict": feedback_verdict,
@@ -387,6 +395,12 @@ def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
     if isinstance(details, dict):
         out["final_verdict"] = str(details.get("final_verdict", task.get("verdict", "")))
         out["candidate_status"] = str(details.get("candidate_status", ""))
+        out["selection_attempted"] = isinstance(selection_result, dict)
+        out["selection_verdict"] = (
+            str(selection_result.get("verdict", ""))
+            if isinstance(selection_result, dict)
+            else ""
+        )
     error = details.get("error") if isinstance(details, dict) else None
     if error:
         out["error"] = str(error)
@@ -591,6 +605,23 @@ def _complete_claimed_task_safely(
             lock_path=experiments_lock,
         )
         return False
+
+
+def _read_persisted_task_row(
+    *,
+    queue_path: Path,
+    queue_lock: Path,
+    task_id: str,
+) -> dict[str, Any] | None:
+    payload = read_json_file(
+        json_path=queue_path,
+        lock_path=queue_lock,
+        default_payload={"schema_version": "1.0", "tasks": []},
+    )
+    for row in payload.get("tasks", []):
+        if isinstance(row, dict) and str(row.get("task_id", "")).strip() == str(task_id).strip():
+            return dict(row)
+    return None
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -1169,6 +1200,7 @@ def _execute_claimed_task(
         strategy_name=strategy_name,
         strategy_module=strategy_module,
     )
+    theme_tag = str(task.get("theme_tag", "")).strip() or "other"
 
     strategy_id = compute_strategy_id(
         strategy_name, params, strategy_fn,
@@ -1259,6 +1291,7 @@ def _execute_claimed_task(
         "selection_split": selection_split,
         "feedback_split": search_split,
         "feature_group": feature_group,
+        "theme_tag": theme_tag,
         "bar_config": bar_config,
         "bar_params": parsed_bar,
         "params": params,
@@ -1336,6 +1369,7 @@ def _execute_claimed_task(
             "search_split": search_split,
             "selection_split": selection_split,
             "feature_group": feature_group,
+            "theme_tag": theme_tag,
             "bar_config": bar_config,
             "metrics": search_result["metrics"],
             "gauntlet": search_result.get("gauntlet"),
@@ -1361,6 +1395,7 @@ def _execute_claimed_task(
         "advanced_validation": search_result.get("advanced_validation"),
         "advanced_validation_gates": search_result.get("advanced_validation_gates"),
         "feature_group": feature_group,
+        "theme_tag": theme_tag,
         "feedback_split": search_split,
         "feedback_verdict": search_result["verdict"],
         "search_split": search_split,
@@ -1464,6 +1499,21 @@ def main() -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
     experiments_path = logs_dir / "research_experiments.jsonl"
     experiments_lock = logs_dir / "research_experiments.lock"
+    scorecard_path = state_paths["scorecard"]
+    scorecard_lock = state_paths["scorecard_lock"]
+    current_scorecard = read_json_file(
+        json_path=scorecard_path,
+        lock_path=scorecard_lock,
+        default_payload=empty_scorecard(),
+    )
+    if state_mode == "fresh" or current_scorecard.get("rebuilt_at") is None:
+        rebuild_learning_scorecard(
+            experiments_path=experiments_path,
+            handoffs_path=state_paths["handoffs"],
+            handoffs_lock=state_paths["handoffs_lock"],
+            scorecard_path=scorecard_path,
+            scorecard_lock=scorecard_lock,
+        )
     run_start_event_id = compute_event_id(
         run_id=run_id,
         task_id="run",
@@ -1635,7 +1685,7 @@ def main() -> None:
                     stop_heartbeat.set()
                     hb_thread.join(timeout=5)
 
-                _complete_claimed_task_safely(
+                task_completed = _complete_claimed_task_safely(
                     state_paths=state_paths,
                     agent_name=str(args.worker_agent),
                     claimed=claimed,
@@ -1645,6 +1695,18 @@ def main() -> None:
                     experiments_path=experiments_path,
                     experiments_lock=experiments_lock,
                 )
+                if task_completed:
+                    persisted_task = _read_persisted_task_row(
+                        queue_path=state_paths["queue"],
+                        queue_lock=state_paths["queue_lock"],
+                        task_id=str(claimed.get("task_id", "")),
+                    )
+                    if persisted_task is not None:
+                        update_learning_scorecard(
+                            scorecard_path=state_paths["scorecard"],
+                            scorecard_lock=state_paths["scorecard_lock"],
+                            task=persisted_task,
+                        )
                 resolved_handoffs = _finalize_ready_validation_handoffs(
                     queue_path=state_paths["queue"],
                     queue_lock=state_paths["queue_lock"],
@@ -1652,8 +1714,24 @@ def main() -> None:
                     handoffs_lock=state_paths["handoffs_lock"],
                 )
                 for handoff in resolved_handoffs:
+                    update_learning_scorecard(
+                        scorecard_path=state_paths["scorecard"],
+                        scorecard_lock=state_paths["scorecard_lock"],
+                        handoff=handoff,
+                    )
                     payload = handoff.get("payload") if isinstance(handoff.get("payload"), dict) else {}
                     result = handoff.get("result") if isinstance(handoff.get("result"), dict) else {}
+                    task_rows = result.get("tasks") if isinstance(result.get("tasks"), list) else []
+                    selection_attempted = any(
+                        bool(task_row.get("selection_attempted", False))
+                        for task_row in task_rows
+                        if isinstance(task_row, dict)
+                    )
+                    selection_passed = any(
+                        str(task_row.get("selection_verdict", "")).upper() == "PASS"
+                        for task_row in task_rows
+                        if isinstance(task_row, dict)
+                    )
                     log_experiment(
                         {
                             "run_id": run_id,
@@ -1662,11 +1740,14 @@ def main() -> None:
                             "handoff_id": str(handoff.get("handoff_id", "")),
                             "strategy_name": str(payload.get("strategy_name", "")),
                             "hypothesis_id": str(payload.get("hypothesis_id", "")),
+                            "theme_tag": str(payload.get("theme_tag", "")),
                             "task_count": result.get("task_count"),
                             "overall_verdict": result.get("overall_verdict"),
                             "pass_count": result.get("pass_count"),
                             "fail_count": result.get("fail_count"),
                             "error_count": result.get("error_count"),
+                            "selection_attempted": selection_attempted,
+                            "selection_passed": selection_passed,
                         },
                         experiments_path=experiments_path,
                         lock_path=experiments_lock,
