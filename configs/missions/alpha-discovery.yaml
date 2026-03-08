@@ -9,7 +9,7 @@ bar_configs:
 search_split: train
 selection_split: validate
 promotion_split: test
-session_filter: rth  # RTH = 09:30–16:00 ET (regular trading hours)
+session_filter: eth  # ETH = extended trading hours; use ETH cache for this run
 feature_group: all  # "ohlcv" for Group A, "all" for Group B (OHLCV + MBP1)
 
 target_sharpe: 1.5
@@ -42,7 +42,7 @@ notebooklm:
   required: true
   title_prefix: "NQ Alpha Discovery"
   require_research_on_fresh: true
-  fresh_query_mode: deep_research
+  fresh_query_mode: research
   min_fresh_imports: 1
   research_guidance: "Use high-quality trusted sources. Prefer exchanges, academic papers, execution research, market-structure research, and serious technical references. Avoid low-signal forum chatter, script marketplaces, and recycled summaries."
 

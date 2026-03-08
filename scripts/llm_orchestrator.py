@@ -27,6 +27,12 @@ from research.lib.atomic_io import atomic_json_write
 from research.lib.coordination import append_handoff, enqueue_task, read_json_file
 from research.lib.experiments import log_experiment
 from research.lib.feature_groups import filter_strategy_inputs
+from research.lib.feature_surface import (
+    build_feature_surface,
+    describe_referenced_columns,
+    format_feature_surface_context,
+    format_referenced_surface_warnings,
+)
 from research.lib.learning_scorecard import (
     format_learning_context,
     normalize_theme_tag,
@@ -340,62 +346,8 @@ def _validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
 
 
 def _diagnose_zero_signal(df: pl.DataFrame, code: str) -> str:
-    """Compute empirical firing rates for columns referenced in strategy code.
-
-    Called when a strategy generates zero signals. Returns a formatted string
-    showing per-column statistics so the coder knows which filter is the bottleneck.
-    """
-    n = len(df)
-    if n == 0:
-        return "  (empty sample frame — no statistics available)"
-
-    available = set(df.columns)
-    # Extract quoted identifiers that look like column names (≥3 chars, snake_case)
-    referenced = set(re.findall(r'"([a-z][a-z0-9_]{2,})"', code)) | \
-                 set(re.findall(r"'([a-z][a-z0-9_]{2,})'", code))
-    used_cols = sorted(referenced & available)
-
-    if not used_cols:
-        return "  (no referenced columns found in code — check column name spelling)"
-
-    lines: list[str] = []
-    for col in used_cols[:15]:  # cap to keep repair prompt compact
-        series = df[col]
-        dtype = series.dtype
-        try:
-            if dtype == pl.Boolean:
-                true_count = int(series.sum())
-                lines.append(
-                    f"  {col} (bool): True={100.0 * true_count / n:.2f}%"
-                    f" ({true_count}/{n} bars)"
-                )
-            elif dtype in (
-                pl.Int8, pl.Int16, pl.Int32, pl.Int64,
-                pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
-            ):
-                uniq = series.n_unique()
-                if uniq <= 4:
-                    for val in sorted(series.unique().to_list()):
-                        pct = 100.0 * int((series == val).sum()) / n
-                        lines.append(f"  {col}=={val}: {pct:.2f}%")
-                else:
-                    p25 = series.quantile(0.25)
-                    p75 = series.quantile(0.75)
-                    lines.append(f"  {col} (int): p25={p25} p75={p75}")
-            elif dtype in (pl.Float32, pl.Float64):
-                p10 = series.quantile(0.10)
-                p25 = series.quantile(0.25)
-                p50 = series.quantile(0.50)
-                p75 = series.quantile(0.75)
-                p90 = series.quantile(0.90)
-                lines.append(
-                    f"  {col}: p10={p10:.4f} p25={p25:.4f}"
-                    f" p50={p50:.4f} p75={p75:.4f} p90={p90:.4f}"
-                )
-        except Exception:
-            lines.append(f"  {col}: (error computing stats)")
-
-    return "\n".join(lines) if lines else "  (could not compute stats for referenced columns)"
+    """Compute empirical firing rates for columns referenced in strategy code."""
+    return describe_referenced_columns(df=df, code=code, max_columns=15)
 
 
 def _state_mode(*, fresh_state: bool) -> str:
@@ -738,6 +690,51 @@ def _notebook_seed_failure_reason(summary: dict[str, Any], requirements: dict[st
     if imported_sources < min_imports:
         return f"imported notebook sources too low ({imported_sources} < {min_imports})"
     return "notebook seed requirements not satisfied"
+
+
+def _persist_notebook_progress(
+    *,
+    notebook_meta: dict[str, Any] | None,
+    notebook_summary: dict[str, Any],
+    notebook_seed_requirements: dict[str, Any],
+    active_mission: dict[str, Any],
+    orchestrator_state: dict[str, Any],
+    state_paths: dict[str, Path],
+) -> None:
+    if notebook_meta is None:
+        return
+
+    changed = False
+    imported_sources = max(
+        int(notebook_meta.get("imported_sources", 0) or 0),
+        int(notebook_summary.get("imported_sources", 0) or 0),
+    )
+    if imported_sources != int(notebook_meta.get("imported_sources", 0) or 0):
+        notebook_meta["imported_sources"] = imported_sources
+        changed = True
+
+    if _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements):
+        if not bool(notebook_meta.get("seeded", False)):
+            notebook_meta["seeded"] = True
+            changed = True
+        if bool(notebook_meta.get("fresh", True)):
+            notebook_meta["fresh"] = False
+            changed = True
+        seed_query_count = int(notebook_summary.get("query_count", 0) or 0)
+        if int(notebook_meta.get("seed_query_count", 0) or 0) != seed_query_count:
+            notebook_meta["seed_query_count"] = seed_query_count
+            changed = True
+        seed_modes_used = list(notebook_summary.get("modes_used", []) or [])
+        if list(notebook_meta.get("seed_modes_used", []) or []) != seed_modes_used:
+            notebook_meta["seed_modes_used"] = seed_modes_used
+            changed = True
+        if bool(active_mission.get("lane_notebook_requires_research", False)):
+            active_mission["lane_notebook_requires_research"] = False
+            changed = True
+
+    if changed:
+        orchestrator_state["notebooklm"] = dict(notebook_meta)
+        atomic_json_write(state_paths["orchestrator"], orchestrator_state)
 
 
 def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
@@ -1216,6 +1213,69 @@ def _build_feature_knowledge(
     }
 
 
+def _build_feature_surface(
+    *,
+    mission_bar_configs: list[str],
+    split: str,
+    session_filter: str,
+    feature_group: str,
+    validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]],
+) -> dict[str, Any]:
+    samples_by_bar_config: dict[str, list[tuple[str, pl.DataFrame]]] = {}
+
+    for bar_config in mission_bar_configs:
+        if bar_config not in validation_sample_cache:
+            validation_sample_cache[bar_config] = _load_validation_strategy_samples(
+                split=split,
+                bar_config=bar_config,
+                session_filter=session_filter,
+                feature_group=feature_group,
+            )
+        samples_by_bar_config[bar_config] = validation_sample_cache[bar_config]
+
+    return build_feature_surface(samples_by_bar_config=samples_by_bar_config)
+
+
+def _format_feature_surface_summary(
+    feature_surface: dict[str, Any],
+    *,
+    selected_bar_configs: list[str],
+) -> str:
+    by_bar_config = feature_surface.get("by_bar_config")
+    if not isinstance(by_bar_config, dict) or not by_bar_config:
+        return "Feature surface unavailable."
+
+    parts: list[str] = []
+    for bar_config in selected_bar_configs:
+        payload = by_bar_config.get(bar_config)
+        if not isinstance(payload, dict):
+            continue
+        dead_count = len(payload.get("dead_features", []) or [])
+        sparse_count = len(payload.get("sparse_features", []) or [])
+        total_rows = int(payload.get("total_rows", 0) or 0)
+        parts.append(
+            f"{bar_config}: rows={total_rows} dead={dead_count} sparse={sparse_count}",
+        )
+    return "; ".join(parts) if parts else "Feature surface unavailable."
+
+
+def _thinker_handoff_text_fragments(thinker_handoff: dict[str, Any]) -> list[str]:
+    hypothesis = thinker_handoff.get("hypothesis")
+    if not isinstance(hypothesis, dict):
+        return []
+
+    fragments: list[str] = []
+    for key in ("thesis", "entry_logic", "exit_logic"):
+        value = hypothesis.get(key)
+        if isinstance(value, str) and value.strip():
+            fragments.append(value)
+    for key in ("risk_controls", "anti_lookahead_checks", "validation_focus"):
+        values = hypothesis.get(key)
+        if isinstance(values, list):
+            fragments.extend(str(item) for item in values if str(item).strip())
+    return fragments
+
+
 def _sample_bar_context(df: pl.DataFrame) -> dict[str, Any]:
     context: dict[str, Any] = {
         "sample_rows": int(len(df)),
@@ -1295,7 +1355,10 @@ def _validate_generated_strategy(
     sample_cache: dict[str, pl.DataFrame] | None = None,
     code: str = "",
 ) -> list[str]:
-    module = load_signal_module(strategy_name, signals_dir=signals_dir)
+    try:
+        module = load_signal_module(strategy_name, signals_dir=signals_dir)
+    except Exception as exc:
+        return [f"{strategy_name}: module validation failed: {type(exc).__name__}: {exc}"]
     strategy_fn = getattr(module, "generate_signal", None)
     if not callable(strategy_fn):
         return [f"{strategy_name}: missing callable generate_signal(df, params)"]
@@ -1389,6 +1452,7 @@ def _build_thinker_user_prompt(
     existing_strategies: list[str],
     feedback_items: list[dict[str, Any]],
     learning_context: str = "",
+    feature_surface_context: str = "",
     runtime_context: dict[str, Any] | None = None,
     feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
@@ -1426,6 +1490,8 @@ def _build_thinker_user_prompt(
     )
     if learning_context.strip():
         prompt_parts.append(f"{learning_context}\n\n")
+    if feature_surface_context.strip():
+        prompt_parts.append(f"{feature_surface_context}\n\n")
     prompt_parts.append("Design exactly one hypothesis that is implementable by a separate coding model.")
     prompt = "".join(prompt_parts)
     if runtime_context:
@@ -1458,8 +1524,9 @@ def _build_thinker_user_prompt(
             prompt += (
                 "\nFRESH NOTEBOOK REQUIREMENT:\n"
                 "Your lane notebook is fresh. Before finalising the hypothesis, decide which direction of the mission is most promising "
-                f"and run at least one successful --{preferred_mode} query to seed the notebook in that direction. "
-                f"That query must import at least {min_imports} source(s). "
+                f"and prefer a successful --{preferred_mode} query to seed the notebook in that direction. "
+                "A successful --research query also counts if it imports enough sources. "
+                f"The qualifying research query must import at least {min_imports} source(s). "
                 "Do not wait for a predefined topic list; you are responsible for choosing the angle."
             )
     if feature_knowledge:
@@ -1567,6 +1634,7 @@ def _build_coder_user_prompt(
     *,
     thinker_handoff: dict[str, Any],
     feature_knowledge: dict[str, Any] | None = None,
+    feature_surface_warning: str = "",
 ) -> str:
     prompt = (
         "Implement exactly the handoff below as a signal module.\n"
@@ -1575,6 +1643,8 @@ def _build_coder_user_prompt(
         f"{json.dumps(thinker_handoff, indent=2, sort_keys=True, default=str)}\n"
         "THINKER_HANDOFF_JSON_END\n"
     )
+    if feature_surface_warning.strip():
+        prompt += f"\n{feature_surface_warning}\n"
     if feature_knowledge:
         prompt += (
             "\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
@@ -1596,6 +1666,7 @@ def _build_coder_repair_user_prompt(
     previous_code: str,
     validation_errors: list[str],
     common_columns: list[str],
+    feature_surface_warning: str = "",
 ) -> str:
     """Build a targeted repair prompt for the coder when generated code fails validation."""
     code_snippet = previous_code
@@ -1607,6 +1678,10 @@ def _build_coder_repair_user_prompt(
     cols_hint = ", ".join(common_columns[:40]) if common_columns else "(see feature knowledge)"
 
     has_zero_rate = any("signal_rate=0" in e for e in validation_errors)
+    helper_contract_error = any(
+        "safe_f64_col" in e or "to_numpy()" in e or "copy=False" in e
+        for e in validation_errors
+    )
     if has_zero_rate:
         fix_instruction = (
             "CRITICAL: Your strategy generated ZERO signals.\n"
@@ -1615,6 +1690,13 @@ def _build_coder_repair_user_prompt(
             "ACTION: RELAX the most restrictive threshold value(s) in DEFAULT_PARAMS so the "
             "strategy fires at least 1 signal in the sample (target rate: 0.05–0.3% of bars).\n"
             "Do NOT add new conditions — only loosen existing threshold values."
+        )
+    elif helper_contract_error:
+        fix_instruction = (
+            "Fix the repo helper-contract violation exactly.\n"
+            "Use `safe_f64_col(df, \"col\", fill=0.0)` instead of direct dataframe `.to_numpy()` extraction, "
+            "and do not use `np.nan_to_num(..., copy=False)`.\n"
+            "Keep the strategy logic the same; only rewrite the column extraction / sanitization path so it passes validation."
         )
     else:
         fix_instruction = (
@@ -1626,6 +1708,8 @@ def _build_coder_repair_user_prompt(
         "ORIGINAL_THINKER_HANDOFF_JSON_BEGIN\n"
         f"{json.dumps(thinker_handoff, indent=2, sort_keys=True, default=str)}\n"
         "ORIGINAL_THINKER_HANDOFF_JSON_END\n\n"
+        + (f"{feature_surface_warning}\n\n" if feature_surface_warning.strip() else "")
+        + (
         "PREVIOUS_CODE_BEGIN\n"
         f"{code_snippet}\n"
         "PREVIOUS_CODE_END\n\n"
@@ -1633,6 +1717,7 @@ def _build_coder_repair_user_prompt(
         f"AVAILABLE_COLUMNS_HINT (common across bar configs): {cols_hint}\n\n"
         f"{fix_instruction}\n\n"
         "Return corrected JSON with same schema: strategy_name, bar_configs, params, code."
+        )
     )
 
 
@@ -2038,6 +2123,17 @@ def main() -> int:
         feature_group=feature_group,
         sample_cache=sample_cache,
     )
+    feature_surface = _build_feature_surface(
+        mission_bar_configs=mission_bar_configs,
+        split=search_split,
+        session_filter=session_filter,
+        feature_group=feature_group,
+        validation_sample_cache=validation_sample_cache,
+    )
+    feature_surface_context = format_feature_surface_context(
+        feature_surface,
+        selected_bar_configs=mission_bar_configs,
+    )
     runtime_context = _build_runtime_context(
         mission=active_mission,
         mission_bar_configs=mission_bar_configs,
@@ -2055,6 +2151,13 @@ def main() -> int:
     else:
         common_count = len(feature_knowledge.get("common_columns", []))
         print(f"Feature knowledge ready: common_columns={common_count} bar_configs={mission_bar_configs}")
+    print(
+        "Feature surface ready: "
+        + _format_feature_surface_summary(
+            feature_surface,
+            selected_bar_configs=mission_bar_configs,
+        ),
+    )
 
     print(
         "LLM orchestrator run_id="
@@ -2117,6 +2220,7 @@ def main() -> int:
                 existing_strategies=existing,
                 feedback_items=feedback_items,
                 learning_context=learning_context,
+                feature_surface_context=feature_surface_context,
                 runtime_context=runtime_context,
                 feature_knowledge=feature_knowledge,
             )
@@ -2176,6 +2280,14 @@ def main() -> int:
                         lane_id=lane_id,
                     ),
                 )
+                _persist_notebook_progress(
+                    notebook_meta=notebook_meta,
+                    notebook_summary=notebook_summary,
+                    notebook_seed_requirements=notebook_seed_requirements,
+                    active_mission=active_mission,
+                    orchestrator_state=orchestrator_state,
+                    state_paths=state_paths,
+                )
             if (
                 notebooklm_configured
                 and bool(active_mission.get("lane_notebook_requires_research", False))
@@ -2187,9 +2299,9 @@ def main() -> int:
                 retry_prompt = (
                     thinker_user_prompt
                     + "\n\nENFORCEMENT REMINDER:\n"
-                    + "The lane notebook is still fresh. Choose your own direction and run a successful --"
+                    + "The lane notebook is still fresh. Choose your own direction and complete a qualifying notebook enrichment. Prefer --"
                     + preferred_mode
-                    + " query that imports enough sources before returning the hypothesis JSON."
+                    + ", but a successful --research query also counts if it imports enough sources before returning the hypothesis JSON."
                 )
                 with notebook_audit_context(
                     run_id=run_id,
@@ -2246,18 +2358,19 @@ def main() -> int:
                         lane_id=lane_id,
                     ),
                 )
+                _persist_notebook_progress(
+                    notebook_meta=notebook_meta,
+                    notebook_summary=notebook_summary,
+                    notebook_seed_requirements=notebook_seed_requirements,
+                    active_mission=active_mission,
+                    orchestrator_state=orchestrator_state,
+                    state_paths=state_paths,
+                )
                 if not _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements):
                     raise RuntimeError(
                         "fresh lane notebook was not seeded properly before hypothesis generation: "
                         + _notebook_seed_failure_reason(notebook_summary, notebook_seed_requirements),
                     )
-            if notebook_meta is not None and bool(active_mission.get("lane_notebook_requires_research", False)):
-                if _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements):
-                    notebook_meta["seeded"] = True
-                    notebook_meta["fresh"] = False
-                    active_mission["lane_notebook_requires_research"] = False
-                    orchestrator_state["notebooklm"] = dict(notebook_meta)
-                    atomic_json_write(state_paths["orchestrator"], orchestrator_state)
             thinker_hash = _sha256_text(
                 json.dumps(thinker_brief, sort_keys=True, separators=(",", ":")),
             )[:16]
@@ -2267,10 +2380,16 @@ def main() -> int:
                 thinker_payload_hash=thinker_hash,
                 runtime_context=runtime_context,
             )
+            feature_surface_warning = format_referenced_surface_warnings(
+                surface=feature_surface,
+                selected_bar_configs=list(thinker_handoff["hypothesis"].get("bar_configs", [])),
+                text_fragments=_thinker_handoff_text_fragments(thinker_handoff),
+            )
 
             coder_user_prompt = _build_coder_user_prompt(
                 thinker_handoff=thinker_handoff,
                 feature_knowledge=feature_knowledge,
+                feature_surface_warning=feature_surface_warning,
             )
             coder_generation = _call_stage_json(
                 stage_name="coder",
@@ -2368,6 +2487,11 @@ def main() -> int:
                             previous_code=code,
                             validation_errors=validation_errors,
                             common_columns=common_cols,
+                            feature_surface_warning=format_referenced_surface_warnings(
+                                surface=feature_surface,
+                                selected_bar_configs=chosen_bars,
+                                text_fragments=[code],
+                            ),
                         )
                         repair_generation = _call_stage_json(
                             stage_name="coder_repair",
@@ -2583,6 +2707,14 @@ def main() -> int:
                         stage="quant_thinker",
                         lane_id=lane_id,
                     ),
+                )
+                _persist_notebook_progress(
+                    notebook_meta=notebook_meta,
+                    notebook_summary=notebook_summary,
+                    notebook_seed_requirements=notebook_seed_requirements,
+                    active_mission=active_mission,
+                    orchestrator_state=orchestrator_state,
+                    state_paths=state_paths,
                 )
             log_experiment(
                 {

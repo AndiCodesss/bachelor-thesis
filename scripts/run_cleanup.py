@@ -22,8 +22,12 @@ STATE_PATTERNS = [
     "research/.state/experiment_queue.lock",
     "research/.state/handoffs.json",
     "research/.state/handoffs.lock",
+    "research/.state/learning_scorecard.json",
+    "research/.state/learning_scorecard.lock",
     "research/.state/mission_budget.json",
     "research/.state/mission_budget.lock",
+    "research/.state/trial_count.json",
+    "research/.state/trial_count.lock",
     "research/.state/llm_orchestrator*.json",
 ]
 
@@ -32,6 +36,8 @@ LOG_PATTERNS = [
     "results/logs/llm_orchestrator*.jsonl",
     "results/logs/llm_orchestrator*.lock",
     "results/logs/llm_orchestrator*.out",
+    "results/logs/notebook_queries.jsonl",
+    "results/logs/notebook_queries.lock",
     "results/logs/research_experiments.jsonl",
     "results/logs/research_experiments.lock",
     "results/logs/research_worker.out",

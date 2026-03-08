@@ -410,6 +410,12 @@ def test_prompts_include_feature_knowledge_markers():
         "computation_notes": ["ema_ratio_N = close / EMA - 1"],
         "errors": {},
     }
+    feature_surface_context = (
+        "FEATURE_SURFACE_INTELLIGENCE:\n"
+        "- tick_610: 1200 sampled rows across 3 file(s)\n"
+        "  Dead features: squeeze_score (0.00% non-zero)\n"
+        "  Sparse features: failed_auction_bull (0.08% non-zero)"
+    )
     thinker_prompt = mod._build_thinker_user_prompt(
         mission={
             "objective": "x",
@@ -425,7 +431,7 @@ def test_prompts_include_feature_knowledge_markers():
             "notebook_research_guidance": "Use high-quality trusted sources.",
             "lane_notebook_seed_requirements": {
                 "preferred_mode": "deep_research",
-                "accepted_modes": ["deep_research"],
+                "accepted_modes": ["research", "deep_research"],
                 "min_successful_queries": 1,
                 "min_imported_sources": 1,
             },
@@ -433,6 +439,7 @@ def test_prompts_include_feature_knowledge_markers():
         existing_strategies=[],
         feedback_items=[],
         learning_context="LEARNING_SCORECARD:\nLow-sample themes: amt_value_area",
+        feature_surface_context=feature_surface_context,
         runtime_context={"split": "validate", "min_trade_count": 30, "sample_bar_context": {"tick_610": {"sample_rows": 1200}}},
         feature_knowledge=feature_knowledge,
     )
@@ -444,7 +451,8 @@ def test_prompts_include_feature_knowledge_markers():
     assert "--deep-research" in thinker_prompt
     assert "FRESH NOTEBOOK REQUIREMENT" in thinker_prompt
     assert "choose the research direction yourself" in thinker_prompt
-    assert "successful --deep-research query" in thinker_prompt
+    assert "prefer a successful --deep-research query" in thinker_prompt
+    assert "A successful --research query also counts" in thinker_prompt
     assert "at least 1 source(s)" in thinker_prompt
     assert "Use high-quality trusted sources." in thinker_prompt
     assert '"common_columns"' in thinker_prompt
@@ -452,6 +460,8 @@ def test_prompts_include_feature_knowledge_markers():
     assert "- amt_value_area" in thinker_prompt
     assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
     assert "LEARNING_SCORECARD:" in thinker_prompt
+    assert "FEATURE_SURFACE_INTELLIGENCE:" in thinker_prompt
+    assert "Dead features: squeeze_score" in thinker_prompt
 
     coder_prompt = mod._build_coder_user_prompt(
         thinker_handoff={
@@ -462,9 +472,14 @@ def test_prompts_include_feature_knowledge_markers():
             "hypothesis": {"hypothesis_id": "h1", "strategy_name_hint": "s1"},
         },
         feature_knowledge=feature_knowledge,
+        feature_surface_warning=(
+            "REFERENCED_FEATURE_SURFACE_WARNINGS:\n"
+            "- tick_610: squeeze_score (0.00% non-zero)"
+        ),
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in coder_prompt
     assert "Prefer precomputed features directly" in coder_prompt
+    assert "REFERENCED_FEATURE_SURFACE_WARNINGS:" in coder_prompt
 
 
 def test_coder_system_prompt_requires_safe_column_helpers():
@@ -552,13 +567,13 @@ def test_notebook_seed_satisfied_requires_non_fallback_quality_research():
     requirements = {
         "required": True,
         "preferred_mode": "deep_research",
-        "accepted_modes": ["deep_research"],
+        "accepted_modes": ["research", "deep_research"],
         "min_successful_queries": 1,
         "min_imported_sources": 1,
         "allow_fallback_to_plain": False,
     }
     summary = {
-        "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 1},
+        "non_fallback_mode_counts": {"plain": 0, "research": 1, "deep_research": 0},
         "fallback_count": 0,
         "imported_sources": 5,
     }
@@ -572,6 +587,92 @@ def test_notebook_seed_satisfied_requires_non_fallback_quality_research():
     assert mod._notebook_seed_satisfied(bad_summary, requirements) is False
     reason = mod._notebook_seed_failure_reason(bad_summary, requirements)
     assert "fell back to plain" in reason
+
+
+def test_persist_notebook_progress_marks_lane_seeded_and_persists_state(tmp_path: Path):
+    mod = _load_module()
+    notebook_meta = {
+        "configured": True,
+        "fresh": True,
+        "seeded": False,
+        "imported_sources": 0,
+    }
+    summary = {
+        "query_count": 1,
+        "modes_used": ["research"],
+        "imported_sources": 9,
+        "non_fallback_mode_counts": {"plain": 0, "research": 1, "deep_research": 0},
+    }
+    requirements = {
+        "accepted_modes": ["research", "deep_research"],
+        "min_successful_queries": 1,
+        "min_imported_sources": 1,
+    }
+    active_mission = {"lane_notebook_requires_research": True}
+    orchestrator_state = {"schema_version": "1.0"}
+    orchestrator_path = tmp_path / "orchestrator.json"
+
+    mod._persist_notebook_progress(
+        notebook_meta=notebook_meta,
+        notebook_summary=summary,
+        notebook_seed_requirements=requirements,
+        active_mission=active_mission,
+        orchestrator_state=orchestrator_state,
+        state_paths={"orchestrator": orchestrator_path},
+    )
+
+    assert notebook_meta["seeded"] is True
+    assert notebook_meta["fresh"] is False
+    assert notebook_meta["imported_sources"] == 9
+    assert notebook_meta["seed_query_count"] == 1
+    assert notebook_meta["seed_modes_used"] == ["research"]
+    assert active_mission["lane_notebook_requires_research"] is False
+
+    persisted = json.loads(orchestrator_path.read_text(encoding="utf-8"))
+    assert persisted["notebooklm"]["seeded"] is True
+    assert persisted["notebooklm"]["imported_sources"] == 9
+
+
+def test_persist_notebook_progress_preserves_partial_imports_without_seeding(tmp_path: Path):
+    mod = _load_module()
+    notebook_meta = {
+        "configured": True,
+        "fresh": True,
+        "seeded": False,
+        "imported_sources": 0,
+    }
+    summary = {
+        "query_count": 1,
+        "modes_used": ["plain"],
+        "imported_sources": 4,
+        "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
+    }
+    requirements = {
+        "accepted_modes": ["research", "deep_research"],
+        "min_successful_queries": 1,
+        "min_imported_sources": 1,
+    }
+    active_mission = {"lane_notebook_requires_research": True}
+    orchestrator_state = {"schema_version": "1.0"}
+    orchestrator_path = tmp_path / "orchestrator.json"
+
+    mod._persist_notebook_progress(
+        notebook_meta=notebook_meta,
+        notebook_summary=summary,
+        notebook_seed_requirements=requirements,
+        active_mission=active_mission,
+        orchestrator_state=orchestrator_state,
+        state_paths={"orchestrator": orchestrator_path},
+    )
+
+    assert notebook_meta["seeded"] is False
+    assert notebook_meta["fresh"] is True
+    assert notebook_meta["imported_sources"] == 4
+    assert active_mission["lane_notebook_requires_research"] is True
+
+    persisted = json.loads(orchestrator_path.read_text(encoding="utf-8"))
+    assert persisted["notebooklm"]["seeded"] is False
+    assert persisted["notebooklm"]["imported_sources"] == 4
 
 
 def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):
@@ -720,12 +821,14 @@ def test_build_coder_repair_user_prompt_includes_errors_and_code():
         previous_code=previous_code,
         validation_errors=validation_errors,
         common_columns=["close", "ema_ratio_8", "cvd_price_divergence_6"],
+        feature_surface_warning="REFERENCED_FEATURE_SURFACE_WARNINGS:\n- tick_610: bad_col (0.00% non-zero)",
     )
     assert "bad_col" in prompt
     assert "KeyError" in prompt
     assert "NaN" in prompt
     assert "generate_signal" in prompt
     assert "ema_ratio_8" in prompt
+    assert "REFERENCED_FEATURE_SURFACE_WARNINGS:" in prompt
 
 
 def test_build_coder_repair_user_prompt_truncates_long_code():
@@ -911,6 +1014,38 @@ def test_validate_generated_strategy_passes_for_healthy_signal_rate(tmp_path):
     assert errors == []
 
 
+def test_validate_generated_strategy_returns_module_validation_errors(tmp_path):
+    mod = _load_module()
+
+    code = (
+        "from __future__ import annotations\n"
+        "import numpy as np\n"
+        "DEFAULT_PARAMS = {}\n"
+        "def generate_signal(df, params):\n"
+        '    values = df["close"].to_numpy()\n'
+        "    return np.sign(values).astype(np.int8)\n"
+        'STRATEGY_METADATA = {"name": "bad_numpy", "version": "1.0", "features_required": ["close"], "description": "test"}\n'
+    )
+    (tmp_path / "bad_numpy.py").write_text(code, encoding="utf-8")
+
+    sample_df = pl.DataFrame({"close": [1.0, 2.0, 3.0]})
+
+    errors = mod._validate_generated_strategy(
+        strategy_name="bad_numpy",
+        signals_dir=tmp_path,
+        params={},
+        bar_configs=["tick_610"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        sample_cache={"tick_610": sample_df},
+        code=code,
+    )
+    assert len(errors) == 1
+    assert "module validation failed" in errors[0]
+    assert "to_numpy()" in errors[0]
+
+
 def test_repair_prompt_includes_signal_rate_guidance_on_zero_rate():
     mod = _load_module()
     thinker_handoff = {"hypothesis": {"hypothesis_id": "h001", "thesis": "test"}}
@@ -951,3 +1086,18 @@ def test_repair_prompt_uses_standard_instruction_for_non_rate_errors():
     )
     assert "Fix ONLY the validation errors" in prompt
     assert "ZERO signals" not in prompt
+
+
+def test_repair_prompt_targets_helper_contract_errors():
+    mod = _load_module()
+    prompt = mod._build_coder_repair_user_prompt(
+        thinker_handoff={},
+        previous_code='def generate_signal(df, params):\n    return df["close"].to_numpy()\n',
+        validation_errors=[
+            "bad_numpy: module validation failed: ValueError: Strategy module /tmp/bad_numpy.py may not call to_numpy(); use safe_f64_col(...) instead",
+        ],
+        common_columns=["close"],
+    )
+    assert "safe_f64_col" in prompt
+    assert "to_numpy()" in prompt
+    assert "Keep the strategy logic the same" in prompt

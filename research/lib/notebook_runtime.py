@@ -317,12 +317,8 @@ def _normalize_fresh_query_mode(value: Any) -> str:
 
 
 def _build_seed_requirements(cfg: dict[str, Any], *, required: bool) -> dict[str, Any]:
-    preferred_mode = str(cfg.get("fresh_query_mode", "deep_research"))
-    accepted_modes = (
-        ["research", "deep_research"]
-        if preferred_mode == "research"
-        else ["deep_research"]
-    )
+    preferred_mode = str(cfg.get("fresh_query_mode", "deep_research")).strip().lower() or "deep_research"
+    accepted_modes = ["research", "deep_research"]
     return {
         "required": bool(required),
         "preferred_mode": preferred_mode,
