@@ -41,11 +41,14 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
         ).strip()
         bootstrap_queries = _clean_text_list(cfg.get("bootstrap_queries") or [])
         fresh_query_mode = _normalize_fresh_query_mode(
-            cfg.get("fresh_query_mode", "deep_research" if mode == "lane_fresh" else "research"),
+            cfg.get("fresh_query_mode", "research"),
         )
         min_fresh_imports = max(
             0,
             int(cfg.get("min_fresh_imports", 1 if mode == "lane_fresh" else 0)),
+        )
+        query_budget = _normalize_iteration_query_budget(
+            cfg.get("iteration_query_budget"),
         )
         return {
             "enabled": bool(notebook_url) or mode == "lane_fresh",
@@ -62,6 +65,7 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
             "fresh_query_mode": fresh_query_mode,
             "min_fresh_imports": min_fresh_imports,
             "research_guidance": str(cfg.get("research_guidance", "")).strip(),
+            "iteration_query_budget": query_budget,
         }
 
     notebook_url = str(mission.get("notebooklm_notebook_url", "")).strip()
@@ -78,6 +82,7 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
         "fresh_query_mode": "research",
         "min_fresh_imports": 0,
         "research_guidance": "",
+        "iteration_query_budget": _normalize_iteration_query_budget(None),
     }
 
 
@@ -119,6 +124,7 @@ def ensure_lane_notebook(
             "lane_notebook_requires_research": False,
             "notebook_research_guidance": str(cfg.get("research_guidance", "")),
             "lane_notebook_seed_requirements": _build_seed_requirements(cfg, required=False),
+            "lane_notebook_query_budget": dict(cfg.get("iteration_query_budget", {})),
         }
         return result
 
@@ -140,6 +146,7 @@ def ensure_lane_notebook(
                     cfg,
                     required=bool(cfg.get("require_research_on_fresh", True) and not bool(existing.get("seeded", False))),
                 ),
+                "lane_notebook_query_budget": dict(cfg.get("iteration_query_budget", {})),
             }
             return result
 
@@ -161,6 +168,7 @@ def ensure_lane_notebook(
             cfg,
             required=bool(cfg.get("require_research_on_fresh", True) and not notebook_meta.get("seeded", False)),
         ),
+        "lane_notebook_query_budget": dict(cfg.get("iteration_query_budget", {})),
     }
     return result
 
@@ -310,15 +318,24 @@ def _normalize_seed_mode(value: Any) -> str:
 
 
 def _normalize_fresh_query_mode(value: Any) -> str:
-    mode = str(value or "deep_research").strip().lower()
+    mode = str(value or "research").strip().lower()
     if mode not in {"research", "deep_research"}:
         raise ValueError(f"Unsupported NotebookLM fresh_query_mode '{value}'")
     return mode
 
 
+def _normalize_iteration_query_budget(value: Any) -> dict[str, int]:
+    payload = dict(value) if isinstance(value, dict) else {}
+    return {
+        "max_total_queries": max(0, int(payload.get("max_total_queries", 3) or 0)),
+        "max_research_queries": max(0, int(payload.get("max_research_queries", 1) or 0)),
+        "max_deep_research_queries": max(0, int(payload.get("max_deep_research_queries", 0) or 0)),
+    }
+
+
 def _build_seed_requirements(cfg: dict[str, Any], *, required: bool) -> dict[str, Any]:
-    preferred_mode = str(cfg.get("fresh_query_mode", "deep_research")).strip().lower() or "deep_research"
-    accepted_modes = ["research", "deep_research"]
+    preferred_mode = str(cfg.get("fresh_query_mode", "research")).strip().lower() or "research"
+    accepted_modes = ["research"] if preferred_mode == "research" else ["deep_research", "research"]
     return {
         "required": bool(required),
         "preferred_mode": preferred_mode,

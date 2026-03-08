@@ -28,8 +28,9 @@ This agent is preloaded with the project skill `notebook-alpha-research`.
 Treat NotebookLM as your research handbook.
 
 - Plain query: use for precise lookups against existing notebook content.
-- `--research`: use when the notebook needs additional sources quickly.
-- `--deep-research`: use for fresh notebooks, new directions, or when source quality matters.
+- `--research`: use for one pointed source-enrichment question when the notebook needs additional sources.
+- In the autonomy loop, `--deep-research` is disabled because it is too slow for iteration-time use.
+- Treat NotebookLM time as scarce: ask one precise `--research` question, then use plain follow-ups only if they materially sharpen the same hypothesis.
 - The preloaded skill defines how to frame the research, what evidence to trust, and how to convert it into a hypothesis.
 
 ## What Good Hypotheses Look Like

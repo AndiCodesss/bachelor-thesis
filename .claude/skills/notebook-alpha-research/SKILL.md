@@ -14,20 +14,22 @@ Turn NotebookLM research into one concrete hypothesis, not a vague theme list.
 ## Workflow
 
 1. Choose one direction from the mission, recent failures, and notebook state.
-2. Use `--deep-research` for fresh notebooks, new directions, or when evidence quality matters.
-3. Ask explicitly for high-quality trusted sources:
+2. Ask one pointed `--research` question if the notebook needs new sources.
+3. Use plain notebook queries only for narrow follow-ups on that same direction.
+4. Do not use `--deep-research` in the autonomy loop; the runtime disables it because it is too slow for iteration-time use.
+5. Ask explicitly for high-quality trusted sources:
    - exchange or operator documentation
    - academic papers
    - serious market-structure or execution research
    - broker or execution studies
    - technical references with real methodology
-4. Avoid spending time on generic strategy summaries. If the research comes back shallow, pivot the question.
-5. Extract only the evidence that changes the trade design:
+6. Avoid spending time on generic strategy summaries. If the research comes back shallow, pivot the hypothesis, not the query budget.
+7. Extract only the evidence that changes the trade design:
    - structural level or regime condition
    - orderflow / footprint confirmation
    - expected failure mode
    - causal rationale
-6. Convert the evidence into one falsifiable hypothesis with:
+8. Convert the evidence into one falsifiable hypothesis with:
    - setup
    - trigger
    - invalidation
@@ -36,7 +38,7 @@ Turn NotebookLM research into one concrete hypothesis, not a vague theme list.
 
 ## Query Patterns
 
-Prefer pointed questions over broad brainstorming.
+Prefer one pointed question over broad brainstorming.
 
 Good patterns:
 
@@ -81,4 +83,4 @@ That hypothesis should be:
 - assigned to exactly one concise `theme_tag` in snake_case
 - reuse a current-focus anchor when it fits; otherwise mint a more precise tag if the evidence clearly justifies it
 
-If research does not justify a strong idea, pivot and ask a better NotebookLM question before finalizing.
+If research does not justify a strong idea, use the notebook you already have and finalize the best falsifiable hypothesis you can defend within the iteration budget.

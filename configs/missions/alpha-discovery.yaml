@@ -44,6 +44,10 @@ notebooklm:
   require_research_on_fresh: true
   fresh_query_mode: research
   min_fresh_imports: 1
+  iteration_query_budget:
+    max_total_queries: 3
+    max_research_queries: 1
+    max_deep_research_queries: 0
   research_guidance: "Use high-quality trusted sources. Prefer exchanges, academic papers, execution research, market-structure research, and serious technical references. Avoid low-signal forum chatter, script marketplaces, and recycled summaries."
 
 current_focus:

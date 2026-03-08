@@ -46,7 +46,11 @@ from research.lib.llm_client import (
     extract_json_object,
 )
 from research.lib.mission_splits import resolve_research_splits
-from research.lib.notebook_guidance import notebook_research_guidance_context
+from research.lib.notebook_guidance import (
+    normalize_notebook_query_budget,
+    notebook_query_budget_context,
+    notebook_research_guidance_context,
+)
 from research.lib.notebook_runtime import ensure_lane_notebook
 from research.lib.notebook_audit import notebook_audit_context, summarize_notebook_queries
 from research.lib.runtime_state import (
@@ -626,8 +630,8 @@ def _default_notebook_summary(*, configured: bool) -> dict[str, Any]:
 def _default_notebook_seed_requirements() -> dict[str, Any]:
     return {
         "required": False,
-        "preferred_mode": "deep_research",
-        "accepted_modes": ["deep_research"],
+        "preferred_mode": "research",
+        "accepted_modes": ["research"],
         "min_successful_queries": 0,
         "min_imported_sources": 0,
         "allow_fallback_to_plain": False,
@@ -642,19 +646,23 @@ def _resolve_notebook_seed_requirements(mission: dict[str, Any]) -> dict[str, An
     out.update(dict(payload))
     accepted_modes = out.get("accepted_modes")
     if not isinstance(accepted_modes, list) or not accepted_modes:
-        accepted_modes = [str(out.get("preferred_mode", "deep_research"))]
+        accepted_modes = [str(out.get("preferred_mode", "research"))]
     cleaned_modes = []
     for mode in accepted_modes:
         value = str(mode or "").strip().lower()
         if value in {"research", "deep_research"} and value not in cleaned_modes:
             cleaned_modes.append(value)
-    out["accepted_modes"] = cleaned_modes or ["deep_research"]
-    out["preferred_mode"] = str(out.get("preferred_mode", "deep_research")).strip().lower() or "deep_research"
+    out["accepted_modes"] = cleaned_modes or ["research"]
+    out["preferred_mode"] = str(out.get("preferred_mode", "research")).strip().lower() or "research"
     out["min_successful_queries"] = max(0, int(out.get("min_successful_queries", 0) or 0))
     out["min_imported_sources"] = max(0, int(out.get("min_imported_sources", 0) or 0))
     out["allow_fallback_to_plain"] = bool(out.get("allow_fallback_to_plain", False))
     out["required"] = bool(out.get("required", False))
     return out
+
+
+def _resolve_notebook_query_budget(mission: dict[str, Any]) -> dict[str, int]:
+    return normalize_notebook_query_budget(mission.get("lane_notebook_query_budget"))
 
 
 def _notebook_seed_satisfied(summary: dict[str, Any], requirements: dict[str, Any]) -> bool:
@@ -1463,6 +1471,7 @@ def _build_thinker_user_prompt(
     notebooklm_url = str(mission.get("notebooklm_notebook_url", "")).strip()
     lane_notebook_requires_research = bool(mission.get("lane_notebook_requires_research", False))
     seed_requirements = _resolve_notebook_seed_requirements(mission)
+    notebook_query_budget = _resolve_notebook_query_budget(mission)
     notebook_research_guidance = str(mission.get("notebook_research_guidance", "")).strip()
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     focus_anchors = resolve_focus_anchors(mission)
@@ -1504,30 +1513,44 @@ def _build_thinker_user_prompt(
     if notebooklm_url:
         import os as _os
         cwd = _os.getcwd()
+        commands = [
+            f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" "question"',
+        ]
+        if int(notebook_query_budget.get("max_research_queries", 0) or 0) > 0:
+            commands.append(
+                f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --research "question"',
+            )
+        if int(notebook_query_budget.get("max_deep_research_queries", 0) or 0) > 0:
+            commands.append(
+                f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --deep-research "question"',
+            )
         prompt += (
             "\n\nKNOWLEDGE_BASE_COMMAND (copy these exact commands — do not modify the path):\n"
-            f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" "question"\n'
-            f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --research "question"\n'
-            f'  uv --directory "{cwd}" run python scripts/query_notebook.py --notebook-url "{notebooklm_url}" --deep-research "question"\n'
+            + "\n".join(commands)
+            + "\n"
             "This notebook is private to your lane and persists across iterations for this lane only. "
             "You must choose the research direction yourself based on the mission, recent results, and what the notebook already contains. "
-            "Start with the plain form for precision lookups; use --research or --deep-research when you need to enrich the notebook with new sources."
+            f"Hard runtime budget this iteration: at most {int(notebook_query_budget.get('max_research_queries', 0) or 0)} --research query "
+            f"and {int(notebook_query_budget.get('max_total_queries', 0) or 0)} total notebook queries. "
+            "Use the single --research query only for one pointed source-enrichment question, then use plain queries only if they are necessary to sharpen the hypothesis. "
+            "Once the budget is spent, stop querying and finalize the hypothesis."
         )
+        if int(notebook_query_budget.get("max_deep_research_queries", 0) or 0) <= 0:
+            prompt += "\n--deep-research is disabled for the autonomy thinker loop because it is too slow for iteration-time use."
         if notebook_research_guidance:
             prompt += (
                 "\nNotebookLM research guidance:\n"
                 f"- {notebook_research_guidance}"
             )
         if lane_notebook_requires_research:
-            preferred_mode = str(seed_requirements.get("preferred_mode", "deep_research")).replace("_", "-")
+            preferred_mode = str(seed_requirements.get("preferred_mode", "research")).replace("_", "-")
             min_imports = int(seed_requirements.get("min_imported_sources", 0) or 0)
             prompt += (
                 "\nFRESH NOTEBOOK REQUIREMENT:\n"
                 "Your lane notebook is fresh. Before finalising the hypothesis, decide which direction of the mission is most promising "
-                f"and prefer a successful --{preferred_mode} query to seed the notebook in that direction. "
-                "A successful --research query also counts if it imports enough sources. "
+                f"and complete one successful --{preferred_mode} query to seed the notebook in that direction. "
                 f"The qualifying research query must import at least {min_imports} source(s). "
-                "Do not wait for a predefined topic list; you are responsible for choosing the angle."
+                "Do not spend the whole iteration browsing. Ask one precise research question, import the sources, then move to the hypothesis."
             )
     if feature_knowledge:
         prompt += (
@@ -2089,6 +2112,7 @@ def main() -> int:
     active_mission.update(dict(notebook_bootstrap.get("mission_overrides", {})))
     notebook_research_guidance = str(active_mission.get("notebook_research_guidance", "")).strip()
     notebook_seed_requirements = _resolve_notebook_seed_requirements(active_mission)
+    notebook_query_budget = _resolve_notebook_query_budget(active_mission)
     notebook_meta = (
         dict(notebook_bootstrap["notebook"])
         if isinstance(notebook_bootstrap.get("notebook"), dict)
@@ -2229,7 +2253,9 @@ def main() -> int:
                 iteration=iteration_no,
                 stage="quant_thinker",
                 lane_id=lane_id,
-            ), notebook_research_guidance_context(notebook_research_guidance):
+            ), notebook_research_guidance_context(notebook_research_guidance), notebook_query_budget_context(
+                notebook_query_budget,
+            ):
                 thinker_generation = _call_stage_json(
                     stage_name="quant_thinker",
                     schema_hint=(
@@ -2293,84 +2319,10 @@ def main() -> int:
                 and bool(active_mission.get("lane_notebook_requires_research", False))
                 and not _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements)
             ):
-                preferred_mode = str(
-                    notebook_seed_requirements.get("preferred_mode", "deep_research"),
-                ).replace("_", "-")
-                retry_prompt = (
-                    thinker_user_prompt
-                    + "\n\nENFORCEMENT REMINDER:\n"
-                    + "The lane notebook is still fresh. Choose your own direction and complete a qualifying notebook enrichment. Prefer --"
-                    + preferred_mode
-                    + ", but a successful --research query also counts if it imports enough sources before returning the hypothesis JSON."
+                raise RuntimeError(
+                    "fresh lane notebook was not seeded properly before hypothesis generation: "
+                    + _notebook_seed_failure_reason(notebook_summary, notebook_seed_requirements),
                 )
-                with notebook_audit_context(
-                    run_id=run_id,
-                    iteration=iteration_no,
-                    stage="quant_thinker",
-                    lane_id=lane_id,
-                ), notebook_research_guidance_context(notebook_research_guidance):
-                    thinker_generation = _call_stage_json(
-                        stage_name="quant_thinker",
-                        schema_hint=(
-                            "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
-                            "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
-                        ),
-                        client=thinker_client,
-                        system_prompt=_build_thinker_system_prompt(),
-                        user_prompt=retry_prompt,
-                        temperature=float(thinker_role["temperature"]),
-                        max_output_tokens=int(thinker_role["max_output_tokens"]),
-                        max_attempts=stage_max_attempts,
-                        json_repair_attempts=json_repair_attempts,
-                        stage_backoff_seconds=stage_backoff_seconds,
-                        quota_backoff_seconds=quota_backoff_seconds,
-                        max_backoff_seconds=max_backoff_seconds,
-                    )
-                    thinker_brief, thinker_generation = _normalize_with_semantic_retry(
-                        stage_name="quant_thinker",
-                        stage_result=thinker_generation,
-                        normalize_fn=lambda payload: _normalize_thinker_brief(
-                            payload,
-                            mission_bar_configs=mission_bar_configs,
-                        ),
-                        client=thinker_client,
-                        system_prompt=_build_thinker_system_prompt(),
-                        base_user_prompt=retry_prompt,
-                        temperature=float(thinker_role["temperature"]),
-                        max_output_tokens=int(thinker_role["max_output_tokens"]),
-                        max_semantic_retries=semantic_retry_attempts,
-                        max_attempts=stage_max_attempts,
-                        json_repair_attempts=json_repair_attempts,
-                        stage_backoff_seconds=stage_backoff_seconds,
-                        quota_backoff_seconds=quota_backoff_seconds,
-                        max_backoff_seconds=max_backoff_seconds,
-                        schema_hint=(
-                            "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
-                            "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
-                        ),
-                    )
-                notebook_summary = _default_notebook_summary(configured=True)
-                notebook_summary.update(
-                    summarize_notebook_queries(
-                        run_id=run_id,
-                        iteration=iteration_no,
-                        stage="quant_thinker",
-                        lane_id=lane_id,
-                    ),
-                )
-                _persist_notebook_progress(
-                    notebook_meta=notebook_meta,
-                    notebook_summary=notebook_summary,
-                    notebook_seed_requirements=notebook_seed_requirements,
-                    active_mission=active_mission,
-                    orchestrator_state=orchestrator_state,
-                    state_paths=state_paths,
-                )
-                if not _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements):
-                    raise RuntimeError(
-                        "fresh lane notebook was not seeded properly before hypothesis generation: "
-                        + _notebook_seed_failure_reason(notebook_summary, notebook_seed_requirements),
-                    )
             thinker_hash = _sha256_text(
                 json.dumps(thinker_brief, sort_keys=True, separators=(",", ":")),
             )[:16]

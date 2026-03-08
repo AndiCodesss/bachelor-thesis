@@ -33,11 +33,59 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research.lib.notebook_audit import log_notebook_query
-from research.lib.notebook_guidance import load_notebook_research_guidance
+from research.lib.notebook_audit import audit_context_from_env, summarize_notebook_queries
+from research.lib.notebook_guidance import (
+    load_notebook_query_budget,
+    load_notebook_research_guidance,
+)
 
 _RESEARCH_POLL_INTERVAL = 5    # seconds between status polls
 _FAST_RESEARCH_TIMEOUT = 300   # seconds max for fast mode (5 min)
 _DEEP_RESEARCH_TIMEOUT = 900   # seconds max for deep mode (15 min)
+
+
+def _query_budget_error(mode: str) -> str | None:
+    budget = load_notebook_query_budget()
+    context = audit_context_from_env()
+    run_id = context.get("run_id")
+    iteration = context.get("iteration")
+    stage = context.get("stage")
+    if not run_id or iteration is None or not stage:
+        return None
+
+    summary = summarize_notebook_queries(
+        run_id=str(run_id),
+        iteration=int(iteration),
+        stage=str(stage),
+        lane_id=context.get("lane_id"),
+    )
+    max_total = int(budget.get("max_total_queries", 0) or 0)
+    if max_total >= 0 and int(summary.get("query_count", 0) or 0) >= max_total:
+        return (
+            "iteration notebook query budget exhausted "
+            f"({summary.get('query_count', 0)}/{max_total} total queries already used)"
+        )
+
+    mode_counts = summary.get("mode_counts") if isinstance(summary.get("mode_counts"), dict) else {}
+    if mode == "research":
+        max_research = int(budget.get("max_research_queries", 0) or 0)
+        if int(mode_counts.get("research", 0) or 0) >= max_research:
+            return (
+                "iteration notebook research budget exhausted "
+                f"({mode_counts.get('research', 0)}/{max_research} --research queries already used)"
+            )
+    if mode == "deep_research":
+        max_deep = int(budget.get("max_deep_research_queries", 0) or 0)
+        if int(mode_counts.get("deep_research", 0) or 0) >= max_deep:
+            return (
+                "deep research is disabled for this autonomy iteration"
+                if max_deep == 0
+                else (
+                    "iteration notebook deep-research budget exhausted "
+                    f"({mode_counts.get('deep_research', 0)}/{max_deep} --deep-research queries already used)"
+                )
+            )
+    return None
 
 
 def _notebook_id_from_url(url: str) -> str:
@@ -151,6 +199,13 @@ def main() -> None:
         mode = "research"
     elif args.deep_research:
         mode = "deep_research"
+    budget_error = _query_budget_error(mode)
+    if budget_error:
+        print(
+            f"[NotebookLM query blocked: {budget_error}. Use existing notebook context and finalize the hypothesis.]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     start = time.monotonic()
     try:
         if args.research:

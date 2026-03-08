@@ -430,10 +430,15 @@ def test_prompts_include_feature_knowledge_markers():
             "lane_notebook_requires_research": True,
             "notebook_research_guidance": "Use high-quality trusted sources.",
             "lane_notebook_seed_requirements": {
-                "preferred_mode": "deep_research",
-                "accepted_modes": ["research", "deep_research"],
+                "preferred_mode": "research",
+                "accepted_modes": ["research"],
                 "min_successful_queries": 1,
                 "min_imported_sources": 1,
+            },
+            "lane_notebook_query_budget": {
+                "max_total_queries": 3,
+                "max_research_queries": 1,
+                "max_deep_research_queries": 0,
             },
         },
         existing_strategies=[],
@@ -448,11 +453,13 @@ def test_prompts_include_feature_knowledge_markers():
     assert "KNOWLEDGE_BASE_COMMAND" in thinker_prompt
     assert "https://notebooklm.google.com/notebook/test-id" in thinker_prompt
     assert "query_notebook.py" in thinker_prompt
-    assert "--deep-research" in thinker_prompt
+    assert "--research" in thinker_prompt
+    assert '--deep-research "question"' not in thinker_prompt
     assert "FRESH NOTEBOOK REQUIREMENT" in thinker_prompt
     assert "choose the research direction yourself" in thinker_prompt
-    assert "prefer a successful --deep-research query" in thinker_prompt
-    assert "A successful --research query also counts" in thinker_prompt
+    assert "Hard runtime budget this iteration: at most 1 --research query and 3 total notebook queries." in thinker_prompt
+    assert "--deep-research is disabled for the autonomy thinker loop" in thinker_prompt
+    assert "complete one successful --research query" in thinker_prompt
     assert "at least 1 source(s)" in thinker_prompt
     assert "Use high-quality trusted sources." in thinker_prompt
     assert '"common_columns"' in thinker_prompt
@@ -514,6 +521,15 @@ def test_thinker_user_prompt_omits_notebook_command_when_no_url():
     )
     assert "KNOWLEDGE_BASE_COMMAND" not in prompt
     assert "query_notebook.py" not in prompt
+
+
+def test_resolve_notebook_query_budget_defaults_to_bounded_runtime_policy():
+    mod = _load_module()
+    assert mod._resolve_notebook_query_budget({}) == {
+        "max_total_queries": 3,
+        "max_research_queries": 1,
+        "max_deep_research_queries": 0,
+    }
 
 
 def test_build_learning_context_reads_scorecard(tmp_path: Path):
