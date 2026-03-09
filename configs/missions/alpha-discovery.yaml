@@ -4,8 +4,6 @@ started_at: "2026-02-18T00:00:00Z"
 
 bar_configs:
   - tick_610
-  - volume_2000
-  - time_1m
 search_split: train
 selection_split: validate
 promotion_split: test
