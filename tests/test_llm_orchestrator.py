@@ -73,6 +73,21 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
     assert out["code"].endswith("\n")
 
 
+def test_normalize_coder_payload_preserves_single_thinker_bar_config():
+    mod = _load_module()
+    out = mod._normalize_coder_payload(
+        {
+            "strategy_name": "bar_spread_case",
+            "bar_configs": ["volume_2000", "tick_610"],
+            "params": {"lookback": 12},
+            "code": "import numpy as np\nimport polars as pl\n\ndef generate_signal(df, params):\n    return np.zeros(len(df), dtype=np.int8)\n",
+        },
+        mission_bar_configs=["tick_610", "volume_2000"],
+        thinker_brief={"bar_configs": ["tick_610"]},
+    )
+    assert out["bar_configs"] == ["tick_610"]
+
+
 def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
     mod = _load_module()
     with pytest.raises(ValueError, match="remove volume_2000 from bar_configs"):
@@ -93,6 +108,31 @@ def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
             mission_bar_configs=["volume_2000"],
             sample_bar_context={"volume_2000": {"range_ticks": {"median": 59.0}}},
         )
+
+
+def test_normalize_thinker_brief_prunes_legacy_multi_bar_risk_floor_payload():
+    mod = _load_module()
+    out = mod._normalize_thinker_brief(
+        {
+            "hypothesis_id": "risk_floor_prune_case",
+            "theme_tag": "amt_value_area",
+            "strategy_name_hint": "risk_floor_prune_case",
+            "bar_configs": ["tick_610", "volume_2000"],
+            "params_template": {"pt_ticks": 60, "sl_ticks": 20},
+            "entry_conditions": [
+                {"feature": "volume_ratio", "op": ">", "param_key": "sl_ticks", "role": "primary"}
+            ],
+            "thesis": "x",
+            "entry_logic": "y",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610", "volume_2000"],
+        sample_bar_context={
+            "tick_610": {"range_ticks": {"median": 40.0}},
+            "volume_2000": {"range_ticks": {"median": 59.0}},
+        },
+    )
+    assert out["bar_configs"] == ["tick_610"]
 
 
 def test_format_results_table_sorts_by_sharpe_and_marks_near_misses():
@@ -513,6 +553,7 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Current focus anchors" in thinker_prompt
     assert "- amt_value_area" in thinker_prompt
     assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
+    assert "Return exactly one selected `bar_config` inside `bar_configs`" in thinker_prompt
     assert "LEARNING_SCORECARD:" in thinker_prompt
     assert "FEATURE_SURFACE_INTELLIGENCE:" in thinker_prompt
     assert "Dead features: squeeze_score" in thinker_prompt
@@ -535,6 +576,7 @@ def test_prompts_include_feature_knowledge_markers():
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in coder_prompt
     assert "Prefer precomputed features directly" in coder_prompt
     assert "REFERENCED_FEATURE_SURFACE_WARNINGS:" in coder_prompt
+    assert "Keep the handoff's single selected `bar_config` unchanged." in coder_prompt
 
 
 def test_coder_system_prompt_requires_safe_column_helpers():
@@ -543,6 +585,7 @@ def test_coder_system_prompt_requires_safe_column_helpers():
     assert "nq-signal-coder" in prompt
     assert "Signal Coding Contract Skill" in prompt
     assert "Return only the required JSON object" in prompt
+    assert "Preserve the handoff's single selected bar_config" in prompt
 
 
 def test_thinker_system_prompt_requires_internal_brainstorm():
@@ -1145,6 +1188,50 @@ def test_normalize_and_assess_thinker_brief_auto_repairs_over_signal_threshold()
         },
     )
     assert out["params_template"]["delta_min"] > 90.0
+
+
+def test_normalize_and_assess_thinker_brief_prunes_to_single_best_bar_config():
+    mod = _load_module()
+    out = mod._normalize_and_assess_thinker_brief(
+        {
+            "hypothesis_id": "bar_prune_case",
+            "theme_tag": "orderflow_divergence",
+            "strategy_name_hint": "bar_prune_case",
+            "bar_configs": ["tick_610", "volume_2000"],
+            "params_template": {"vol_ratio_min": 1.25, "pt_ticks": 60, "sl_ticks": 40},
+            "entry_conditions": [
+                {
+                    "feature": "volume_ratio",
+                    "op": ">",
+                    "param_key": "vol_ratio_min",
+                    "role": "primary",
+                }
+            ],
+            "thesis": "x",
+            "entry_logic": "y",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610", "volume_2000"],
+        sample_bar_context={
+            "tick_610": {"range_ticks": {"median": 40.0}},
+            "volume_2000": {"range_ticks": {"median": 59.0}},
+        },
+        validation_sample_cache={
+            "tick_610": [
+                (
+                    "tick_day",
+                    pl.DataFrame({"volume_ratio": [1.0] * 98 + [1.3, 1.4]}),
+                )
+            ],
+            "volume_2000": [
+                (
+                    "volume_day",
+                    pl.DataFrame({"volume_ratio": [1.0] * 120}),
+                )
+            ],
+        },
+    )
+    assert out["bar_configs"] == ["tick_610"]
 
 
 def test_validate_generated_strategy_errors_on_high_signal_rate(tmp_path):

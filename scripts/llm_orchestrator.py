@@ -724,6 +724,9 @@ def _persist_notebook_progress(
 
 
 _BAR_MIN_SL_TICKS = {"tick_610": 20, "volume_2000": 40, "time_1m": 4}
+_TARGET_SIGNAL_RATE_LOW_PCT = 0.05
+_TARGET_SIGNAL_RATE_HIGH_PCT = 0.3
+_TARGET_SIGNAL_RATE_MID_PCT = (_TARGET_SIGNAL_RATE_LOW_PCT + _TARGET_SIGNAL_RATE_HIGH_PCT) / 2.0
 
 
 def _bar_range_hint(sample_bar_context: dict[str, Any] | None, bar_config: str) -> str:
@@ -753,6 +756,134 @@ def _format_bar_risk_floor_context(runtime_context: dict[str, Any] | None) -> st
     for bar_config, min_sl in _BAR_MIN_SL_TICKS.items():
         lines.append(f"- {bar_config}: sl_ticks >= {min_sl} ({_bar_range_hint(sample_bar_context, bar_config)})")
     return "\n".join(lines)
+
+
+def _normalize_requested_bar_configs(
+    raw_cfgs: Any,
+    *,
+    mission_bar_configs: list[str],
+) -> list[str]:
+    requested = [str(v).strip() for v in raw_cfgs] if isinstance(raw_cfgs, list) else []
+    allowed = {str(v).strip() for v in mission_bar_configs}
+    chosen: list[str] = []
+    seen: set[str] = set()
+    for cfg in requested:
+        if not cfg or cfg not in allowed or cfg in seen:
+            continue
+        chosen.append(cfg)
+        seen.add(cfg)
+    return chosen
+
+
+def _risk_floor_error_message(
+    *,
+    bar_config: str,
+    sl_ticks: float,
+    sample_bar_context: dict[str, Any] | None,
+) -> str:
+    return (
+        f"sl_ticks={int(sl_ticks)} too tight for {bar_config} "
+        f"({_bar_range_hint(sample_bar_context, str(bar_config))}) — "
+        f"minimum sl_ticks={_BAR_MIN_SL_TICKS.get(str(bar_config).strip(), 0)} required to survive entry bar noise; "
+        f"either widen sl_ticks or remove {bar_config} from bar_configs"
+    )
+
+
+def _prune_bar_configs_for_risk_floor(
+    bar_configs: list[str],
+    *,
+    sl_ticks: float,
+) -> tuple[list[str], list[str]]:
+    kept: list[str] = []
+    dropped: list[str] = []
+    for bar_config in bar_configs:
+        min_sl = _BAR_MIN_SL_TICKS.get(str(bar_config).strip(), 0)
+        if min_sl and float(sl_ticks) < float(min_sl):
+            dropped.append(str(bar_config))
+        else:
+            kept.append(str(bar_config))
+    return kept, dropped
+
+
+def _bar_config_selection_key(
+    rows: list[dict[str, Any]],
+    *,
+    requested_index: int,
+) -> tuple[Any, ...]:
+    non_empty_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("status", "")) != "empty_sample"
+    ]
+    if not non_empty_rows:
+        return (1, 0, 0, 0, 0, float("inf"), float("inf"), requested_index)
+
+    failing_rows = [
+        row
+        for row in non_empty_rows
+        if str(row.get("status", "")) not in {"ok", "empty_sample"}
+    ]
+    dead_count = sum(str(row.get("status", "")) == "dead_feature_primary" for row in failing_rows)
+    zero_count = sum(str(row.get("status", "")) == "zero_signal" for row in failing_rows)
+    over_count = sum(str(row.get("status", "")) == "over_signal" for row in failing_rows)
+    other_count = len(failing_rows) - dead_count - zero_count - over_count
+    ok_rates = [
+        float(row.get("signal_rate_pct", 0.0) or 0.0)
+        for row in non_empty_rows
+        if str(row.get("status", "")) == "ok"
+    ]
+    avg_ok_penalty = (
+        sum(abs(rate - _TARGET_SIGNAL_RATE_MID_PCT) for rate in ok_rates) / len(ok_rates)
+        if ok_rates else float("inf")
+    )
+    best_ok_penalty = min(
+        (abs(rate - _TARGET_SIGNAL_RATE_MID_PCT) for rate in ok_rates),
+        default=float("inf"),
+    )
+    return (
+        0,
+        dead_count,
+        other_count,
+        len(failing_rows),
+        zero_count,
+        over_count,
+        avg_ok_penalty,
+        best_ok_penalty,
+        requested_index,
+    )
+
+
+def _prune_brief_to_single_bar_config(
+    brief: dict[str, Any],
+    feasibility_report: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    raw_bar_configs = brief.get("bar_configs")
+    bar_configs = [str(cfg).strip() for cfg in raw_bar_configs] if isinstance(raw_bar_configs, list) else []
+    if len(bar_configs) <= 1:
+        return None, None
+
+    bar_results = feasibility_report.get("bar_results") if isinstance(feasibility_report, dict) else None
+    grouped: dict[str, list[dict[str, Any]]] = {cfg: [] for cfg in bar_configs}
+    if isinstance(bar_results, list):
+        for row in bar_results:
+            if not isinstance(row, dict):
+                continue
+            bar_config = str(row.get("bar_config", "")).strip()
+            if bar_config in grouped:
+                grouped[bar_config].append(row)
+
+    requested_index = {cfg: idx for idx, cfg in enumerate(bar_configs)}
+    chosen = min(
+        bar_configs,
+        key=lambda cfg: _bar_config_selection_key(
+            grouped.get(cfg, []),
+            requested_index=requested_index.get(cfg, len(bar_configs)),
+        ),
+    )
+    pruned = dict(brief)
+    pruned["bar_configs"] = [chosen]
+    dropped = [cfg for cfg in bar_configs if cfg != chosen]
+    return pruned, f"{bar_configs} -> {[chosen]} (dropped {dropped})"
 
 
 def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
@@ -1168,6 +1299,17 @@ def _normalize_and_assess_thinker_brief(
         sample_bar_context=sample_bar_context,
     )
     current_brief = thinker_brief
+    if len(list(current_brief.get("bar_configs", []))) > 1:
+        initial_report = assess_entry_condition_feasibility(
+            entry_conditions=list(current_brief.get("entry_conditions", [])),
+            params_template=dict(current_brief.get("params_template", {})),
+            selected_bar_configs=list(current_brief.get("bar_configs", [])),
+            validation_sample_cache=validation_sample_cache,
+        )
+        pruned_brief, prune_action = _prune_brief_to_single_bar_config(current_brief, initial_report)
+        if pruned_brief is not None:
+            print(f"  thinker discovery bar_config prune: {prune_action}")
+            current_brief = pruned_brief
     max_repairs = min(
         _MAX_THINKER_FEASIBILITY_REPAIR_ATTEMPTS,
         max(2, len(list(current_brief.get("entry_conditions", []))) * 2),
@@ -1242,6 +1384,14 @@ def _normalize_thinker_brief(
         params_template=params_template,
     )
 
+    raw_cfgs = payload.get("bar_configs", [])
+    chosen = _normalize_requested_bar_configs(
+        raw_cfgs,
+        mission_bar_configs=mission_bar_configs,
+    )
+    if not chosen:
+        chosen = [mission_bar_configs[0]]
+
     # Enforce minimum 1.5:1 RR and bar-type-aware minimum SL
     _pt = params_template.get("pt_ticks")
     _sl = params_template.get("sl_ticks")
@@ -1256,18 +1406,15 @@ def _normalize_thinker_brief(
                     f"RR violation: pt_ticks={pt_val} < 1.5 × sl_ticks={sl_val} "
                     f"(minimum 1.5:1 required, got {pt_val/sl_val:.2f}:1)"
                 )
-            # Check bar-type minimum SL
-            raw_cfgs_check = payload.get("bar_configs", [])
-            if isinstance(raw_cfgs_check, list):
-                for bc in raw_cfgs_check:
-                    min_sl = _BAR_MIN_SL_TICKS.get(str(bc).strip(), 0)
-                    if min_sl and sl_val < min_sl:
-                        raise ValueError(
-                            f"sl_ticks={int(sl_val)} too tight for {bc} "
-                            f"({_bar_range_hint(sample_bar_context, str(bc))}) — "
-                            f"minimum sl_ticks={min_sl} required to survive entry bar noise; "
-                            f"either widen sl_ticks or remove {bc} from bar_configs"
-                        )
+            chosen, dropped = _prune_bar_configs_for_risk_floor(chosen, sl_ticks=sl_val)
+            if dropped and not chosen:
+                raise ValueError(
+                    _risk_floor_error_message(
+                        bar_config=dropped[0],
+                        sl_ticks=sl_val,
+                        sample_bar_context=sample_bar_context,
+                    )
+                )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid pt_ticks/sl_ticks in params_template: {exc}") from exc
 
@@ -1288,13 +1435,6 @@ def _normalize_thinker_brief(
         anti_lookahead_checks = ["No forward shifts.", "No global future aggregates."]
     if not validation_focus:
         validation_focus = ["Sharpe robustness", "Sufficient trade count", "Gauntlet pass likelihood"]
-
-    raw_cfgs = payload.get("bar_configs", [])
-    requested = [str(v).strip() for v in raw_cfgs] if isinstance(raw_cfgs, list) else []
-    allowed = {str(v).strip() for v in mission_bar_configs}
-    chosen = [cfg for cfg in requested if cfg in allowed]
-    if not chosen:
-        chosen = [mission_bar_configs[0]]
 
     return {
         "hypothesis_id": hypothesis_id,
@@ -1338,13 +1478,21 @@ def _normalize_coder_payload(
     raw_cfgs = payload.get("bar_configs", payload.get("bar_config", []))
     if isinstance(raw_cfgs, str):
         raw_cfgs = [raw_cfgs]
-    requested = [str(v).strip() for v in raw_cfgs] if isinstance(raw_cfgs, list) else []
-    allowed = {str(v).strip() for v in mission_bar_configs}
-    chosen = [cfg for cfg in requested if cfg in allowed]
-    if not chosen:
-        thinker_cfgs = thinker_brief.get("bar_configs")
-        if isinstance(thinker_cfgs, list):
-            chosen = [cfg for cfg in thinker_cfgs if cfg in allowed]
+    chosen = _normalize_requested_bar_configs(
+        raw_cfgs,
+        mission_bar_configs=mission_bar_configs,
+    )
+    thinker_cfgs = _normalize_requested_bar_configs(
+        thinker_brief.get("bar_configs", []),
+        mission_bar_configs=mission_bar_configs,
+    )
+    thinker_primary = thinker_cfgs[0] if thinker_cfgs else ""
+    if thinker_primary and thinker_primary in chosen:
+        chosen = [thinker_primary]
+    elif chosen:
+        chosen = [chosen[0]]
+    elif thinker_primary:
+        chosen = [thinker_primary]
     if not chosen:
         chosen = [mission_bar_configs[0]]
 
@@ -2026,6 +2174,10 @@ def _build_thinker_user_prompt(
         "otherwise introduce a new precise tag if the evidence points elsewhere.\n\n",
     )
     prompt_parts.append(
+        "Return exactly one selected `bar_config` inside `bar_configs` (list length 1). "
+        "Do not spread one hypothesis across multiple bar types in the same iteration.\n\n",
+    )
+    prompt_parts.append(
         "You must also return `entry_conditions`: a machine-checkable list of the core gates that must be true before a signal can fire.\n"
         "Use 2-6 conditions total. Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.\n"
         "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
@@ -2111,6 +2263,7 @@ def _build_coder_system_prompt() -> str:
         "`strategy_name`, `bar_configs`, `params`, and `code`.",
         "Treat `hypothesis.entry_conditions` as the required core entry gates. The final code should implement",
         "those conditions directly and use `entry_logic` only to refine direction or execution details.",
+        "Preserve the handoff's single selected bar_config; do not broaden the strategy to additional bar types.",
         "Hard runtime reminders: the final signal array must be dtype `np.int8` and should end with",
         "`.astype(np.int8)`, and `shift(-1)` is forbidden.",
     ]
@@ -2208,6 +2361,7 @@ def _build_coder_user_prompt(
     prompt = (
         "Implement exactly the handoff below as a signal module.\n"
         "Use only this handoff JSON as source of truth.\n\n"
+        "Keep the handoff's single selected `bar_config` unchanged.\n\n"
         "THINKER_HANDOFF_JSON_BEGIN\n"
         f"{json.dumps(thinker_handoff, indent=2, sort_keys=True, default=str)}\n"
         "THINKER_HANDOFF_JSON_END\n"

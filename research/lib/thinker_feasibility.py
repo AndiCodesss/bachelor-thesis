@@ -270,6 +270,34 @@ def _combined_mask(rows: list[dict[str, Any]], total_count: int) -> np.ndarray:
     return mask
 
 
+def _failing_bar_result_priority(row: dict[str, Any]) -> tuple[Any, ...]:
+    status = str(row.get("status", "")).strip()
+    signal_rate_pct = float(row.get("signal_rate_pct", 0.0) or 0.0)
+    status_rank = {
+        "dead_feature_primary": 0,
+        "zero_signal": 1,
+        "over_signal": 2,
+    }.get(status, 3)
+    severity_rank = -signal_rate_pct if status == "over_signal" else 0.0
+    return (
+        status_rank,
+        severity_rank,
+        str(row.get("bar_config", "")),
+        str(row.get("sample_label", "")),
+    )
+
+
+def _select_relevant_bar_result(bar_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    failing_rows = [
+        row
+        for row in bar_results
+        if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
+    ]
+    if not failing_rows:
+        return None
+    return min(failing_rows, key=_failing_bar_result_priority)
+
+
 def assess_entry_condition_feasibility(
     *,
     entry_conditions: list[dict[str, Any]],
@@ -282,8 +310,7 @@ def assess_entry_condition_feasibility(
 
     for bar_config in selected_bar_configs:
         samples = validation_sample_cache.get(bar_config) or []
-        frames = [df for _, df in samples if len(df) > 0]
-        if not frames:
+        if not samples:
             report["bar_results"].append(
                 {
                     "bar_config": bar_config,
@@ -294,81 +321,98 @@ def assess_entry_condition_feasibility(
             )
             continue
 
-        combined = pl.concat(frames, how="vertical_relaxed")
-        labels = [str(label) for label, _ in samples[:3]]
-        sample_label = ", ".join(labels)
-        rows = [_evaluate_condition(df=combined, condition=condition, params_template=params_template) for condition in entry_conditions]
-        public_rows = [_public_condition_row(row) for row in rows]
-        total_count = len(combined)
-        combined_mask = _combined_mask(rows, total_count)
-        combined_count = int(np.sum(combined_mask))
-        combined_rate_pct = 100.0 * combined_count / total_count if total_count > 0 else 0.0
+        for sample_label, sample_df in samples:
+            label = str(sample_label)
+            if len(sample_df) == 0:
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": label,
+                        "status": "empty_sample",
+                        "error": "empty sample frame",
+                    }
+                )
+                continue
 
-        dead_primary = next(
-            (
-                row for row in rows
-                if str(row.get("role", "primary")) == "primary"
-                and str(row.get("severity", "")) == "dead_feature"
-            ),
-            None,
-        )
-        if dead_primary is not None:
-            report["bar_results"].append(
-                {
-                    "bar_config": bar_config,
-                    "sample_label": sample_label,
-                    "status": "dead_feature_primary",
-                    "error": (
-                        f"primary feature {dead_primary['column']} has no finite values on {bar_config} "
-                        f"({sample_label})"
-                    ),
-                    "nonzero": 0,
-                    "total": total_count,
-                    "signal_rate_pct": 0.0,
-                    "condition_rows": public_rows,
-                }
+            rows = [
+                _evaluate_condition(
+                    df=sample_df,
+                    condition=condition,
+                    params_template=params_template,
+                )
+                for condition in entry_conditions
+            ]
+            public_rows = [_public_condition_row(row) for row in rows]
+            total_count = len(sample_df)
+            combined_mask = _combined_mask(rows, total_count)
+            combined_count = int(np.sum(combined_mask))
+            combined_rate_pct = 100.0 * combined_count / total_count if total_count > 0 else 0.0
+
+            dead_primary = next(
+                (
+                    row for row in rows
+                    if str(row.get("role", "primary")) == "primary"
+                    and str(row.get("severity", "")) == "dead_feature"
+                ),
+                None,
             )
-            continue
+            if dead_primary is not None:
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": label,
+                        "status": "dead_feature_primary",
+                        "error": (
+                            f"primary feature {dead_primary['column']} has no finite values on {bar_config} "
+                            f"({label})"
+                        ),
+                        "nonzero": 0,
+                        "total": total_count,
+                        "signal_rate_pct": 0.0,
+                        "condition_rows": public_rows,
+                    }
+                )
+                continue
 
-        if combined_count == 0:
+            if combined_count == 0:
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": label,
+                        "status": "zero_signal",
+                        "nonzero": 0,
+                        "total": total_count,
+                        "signal_rate_pct": 0.0,
+                        "condition_rows": public_rows,
+                    }
+                )
+                continue
+
+            if combined_rate_pct > float(over_signal_threshold_pct):
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": label,
+                        "status": "over_signal",
+                        "nonzero": combined_count,
+                        "total": total_count,
+                        "signal_rate_pct": combined_rate_pct,
+                        "condition_rows": public_rows,
+                    }
+                )
+                continue
+
             report["bar_results"].append(
                 {
                     "bar_config": bar_config,
-                    "sample_label": sample_label,
-                    "status": "zero_signal",
-                    "nonzero": 0,
-                    "total": total_count,
-                    "signal_rate_pct": 0.0,
-                    "condition_rows": public_rows,
-                }
-            )
-            continue
-
-        if combined_rate_pct > float(over_signal_threshold_pct):
-            report["bar_results"].append(
-                {
-                    "bar_config": bar_config,
-                    "sample_label": sample_label,
-                    "status": "over_signal",
+                    "sample_label": label,
+                    "status": "ok",
                     "nonzero": combined_count,
                     "total": total_count,
                     "signal_rate_pct": combined_rate_pct,
                     "condition_rows": public_rows,
                 }
             )
-            continue
-
-        report["bar_results"].append(
-            {
-                "bar_config": bar_config,
-                "sample_label": sample_label,
-                "status": "ok",
-                "nonzero": combined_count,
-                "total": total_count,
-                "signal_rate_pct": combined_rate_pct,
-                "condition_rows": public_rows,
-            }
-        )
 
     return report
 
@@ -694,13 +738,8 @@ def repair_thinker_brief_for_feasibility(
     if not isinstance(bar_results, list):
         return None, []
 
-    relevant = next(
-        (
-            row
-            for row in bar_results
-            if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
-        ),
-        None,
+    relevant = _select_relevant_bar_result(
+        [row for row in bar_results if isinstance(row, dict)],
     )
     if not isinstance(relevant, dict):
         return None, []
@@ -748,13 +787,8 @@ def format_feasibility_error(report: dict[str, Any]) -> str:
     if not isinstance(bar_results, list) or not bar_results:
         return "Thinker feasibility failed unexpectedly. Return corrected JSON only."
 
-    relevant = next(
-        (
-            row
-            for row in bar_results
-            if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
-        ),
-        None,
+    relevant = _select_relevant_bar_result(
+        [row for row in bar_results if isinstance(row, dict)],
     )
     if not isinstance(relevant, dict):
         return "Thinker feasibility failed unexpectedly. Return corrected JSON only."

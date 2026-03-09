@@ -69,6 +69,33 @@ def test_assess_entry_condition_feasibility_detects_zero_signal_combination():
     assert "Combined entry_conditions pass-through is 0/4 bars" in format_feasibility_error(report)
 
 
+def test_assess_entry_condition_feasibility_scores_each_sample_independently():
+    report = assess_entry_condition_feasibility(
+        entry_conditions=[
+            {"feature": "volume_ratio", "op": ">", "param_key": "vol_ratio_min", "role": "primary"},
+        ],
+        params_template={"vol_ratio_min": 1.25},
+        selected_bar_configs=["tick_610"],
+        validation_sample_cache={
+            "tick_610": [
+                (
+                    "day_one",
+                    pl.DataFrame({"volume_ratio": [1.0, 1.1, 1.2]}),
+                ),
+                (
+                    "day_two",
+                    pl.DataFrame({"volume_ratio": [1.0] * 98 + [1.3, 1.4]}),
+                ),
+            ]
+        },
+    )
+
+    assert [(row["sample_label"], row["status"]) for row in report["bar_results"]] == [
+        ("day_one", "zero_signal"),
+        ("day_two", "ok"),
+    ]
+
+
 def test_assess_entry_condition_feasibility_accepts_sparse_but_nonzero_conditions():
     report = assess_entry_condition_feasibility(
         entry_conditions=[
