@@ -9,6 +9,24 @@ import polars as pl
 _EPSILON = 1e-12
 _SPARSE_NONZERO_RATE = 0.005
 _MAX_FORMAT_FEATURES = 8
+_PARAM_HINT_PATTERNS = (
+    "zscore",
+    "ratio",
+    "position",
+    "width",
+    "bandwidth",
+    "velocity",
+    "intensity",
+    "imbalance",
+    "distance",
+    "progress",
+    "wick",
+    "delta",
+    "cvd",
+    "volume",
+    "range",
+    "pctb",
+)
 
 _NUMERIC_DTYPES = {
     pl.Boolean,
@@ -236,6 +254,82 @@ def format_feature_surface_context(
     return "\n".join(lines)
 
 
+def _param_hint_priority(name: str, stats: dict[str, Any]) -> tuple[int, float, str]:
+    lowered = str(name).lower()
+    score = 0
+    if any(pattern in lowered for pattern in _PARAM_HINT_PATTERNS):
+        score += 4
+    if str(stats.get("kind", "")) == "variable":
+        score += 2
+    if float(stats.get("null_rate", 1.0) or 1.0) == 0.0:
+        score += 1
+    p10 = stats.get("p10")
+    p90 = stats.get("p90")
+    spread = 0.0
+    if isinstance(p10, (int, float)) and isinstance(p90, (int, float)):
+        spread = abs(float(p90) - float(p10))
+        if spread > _EPSILON:
+            score += 1
+    return (-score, -spread, lowered)
+
+
+def format_param_feasibility_context(
+    surface: dict[str, Any],
+    *,
+    selected_bar_configs: list[str] | None = None,
+    max_features_per_bar: int = 6,
+) -> str:
+    by_bar_config = surface.get("by_bar_config")
+    if not isinstance(by_bar_config, dict) or not by_bar_config:
+        return ""
+
+    chosen = selected_bar_configs or sorted(by_bar_config)
+    lines = [
+        "PARAM_FEASIBILITY_HINTS:",
+        "For first-pass params, keep thresholds near the observed p10-p90 band on the chosen bar_config.",
+        "Values outside these bands are intentionally rare and should only be used with very simple conjunctions.",
+    ]
+
+    wrote_bar = False
+    for bar_config in chosen:
+        payload = by_bar_config.get(bar_config)
+        if not isinstance(payload, dict):
+            continue
+        stats = payload.get("feature_stats")
+        if not isinstance(stats, dict) or not stats:
+            continue
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for name, feature_stats in stats.items():
+            if not isinstance(feature_stats, dict):
+                continue
+            kind = str(feature_stats.get("kind", ""))
+            if kind not in {"variable", "binary_active"}:
+                continue
+            p10 = feature_stats.get("p10")
+            p50 = feature_stats.get("p50")
+            p90 = feature_stats.get("p90")
+            if not all(isinstance(value, (int, float)) for value in (p10, p50, p90)):
+                continue
+            if abs(float(p90) - float(p10)) <= _EPSILON:
+                continue
+            candidates.append((str(name), feature_stats))
+        if not candidates:
+            continue
+
+        candidates.sort(key=lambda item: _param_hint_priority(item[0], item[1]))
+        lines.append(f"- {bar_config}:")
+        wrote_bar = True
+        for name, feature_stats in candidates[:max_features_per_bar]:
+            lines.append(
+                "  "
+                + f"{name}: p10={float(feature_stats['p10']):.4f} "
+                + f"p50={float(feature_stats['p50']):.4f} "
+                + f"p90={float(feature_stats['p90']):.4f}"
+            )
+
+    return "\n".join(lines) if wrote_bar else ""
+
+
 def format_referenced_surface_warnings(
     *,
     surface: dict[str, Any],
@@ -370,15 +464,59 @@ def diagnose_condition_passthrough(
     params: dict[str, Any],
     max_conditions: int = 20,
 ) -> str:
+    rows = collect_condition_passthrough(
+        df=df,
+        code=code,
+        params=params,
+        max_conditions=max_conditions,
+        include_mask=True,
+    )
+    if not rows:
+        return ""
+
+    n = int(rows[0]["total_count"])
+    lines = ["  Per-condition pass-through (each evaluated independently):"]
+    for row in rows:
+        pass_pct = float(row["pass_rate_pct"])
+        tag = ""
+        if str(row.get("severity", "")) == "blocks_all":
+            tag = "  <-- BLOCKS ALL"
+        elif str(row.get("severity", "")) == "restrictive":
+            tag = "  <-- RESTRICTIVE"
+        lines.append(
+            f"    {row['column']} {row['operator']} {row['threshold']} ({row['param_key']}): "
+            f"{pass_pct:.2f}% pass ({int(row['pass_count'])}/{n}){tag}"
+        )
+
+    combined_count = int(np.prod([1], dtype=np.int64)[0])
+    combined_mask = np.ones(n, dtype=bool)
+    for row in rows:
+        mask = row.get("_mask")
+        if isinstance(mask, np.ndarray):
+            combined_mask &= mask
+    combined_count = int(np.sum(combined_mask))
+    combined_pct = 100.0 * combined_count / n if n > 0 else 0.0
+    lines.append(f"    -> Combined (all AND'd): {combined_pct:.2f}% ({combined_count}/{n})")
+
+    return "\n".join(lines)
+
+
+def collect_condition_passthrough(
+    *,
+    df: pl.DataFrame,
+    code: str,
+    params: dict[str, Any],
+    max_conditions: int = 20,
+    include_mask: bool = False,
+) -> list[dict[str, Any]]:
     """Evaluate each threshold condition independently and report pass-through rates.
 
     Parses safe_*_col assignments and ``var OP params["key"]`` comparisons from
-    the generated code, evaluates each on *df*, and returns a human-readable
-    breakdown showing which condition(s) are the bottleneck.
+    the generated code, evaluates each on *df*, and returns structured rows.
     """
     n = len(df)
     if n == 0:
-        return ""
+        return []
 
     # Step 1: map local variable names → canonical column names
     var_to_col: dict[str, str] = {}
@@ -386,7 +524,7 @@ def diagnose_condition_passthrough(
         var_to_col[m.group(1)] = m.group(2)
 
     if not var_to_col:
-        return ""
+        return []
 
     # Step 2: collect (column, operator, param_key, threshold) tuples
     conditions: list[tuple[str, str, str, float]] = []
@@ -415,15 +553,11 @@ def diagnose_condition_passthrough(
             _add(col, _REVERSE_OPS[op], key1 or key2)
 
     if not conditions:
-        return ""
+        return []
 
-    # Step 3: evaluate each condition independently
-    lines = ["  Per-condition pass-through (each evaluated independently):"]
-    combined_mask = np.ones(n, dtype=bool)
-
+    rows: list[dict[str, Any]] = []
     for col, op, param_key, threshold in conditions[:max_conditions]:
         if col not in df.columns:
-            lines.append(f"    {col} {op} {threshold} ({param_key}): column not in frame")
             continue
 
         try:
@@ -434,7 +568,6 @@ def diagnose_condition_passthrough(
                 else series.to_numpy()
             )
         except Exception:
-            lines.append(f"    {col} {op} {threshold} ({param_key}): could not cast to float")
             continue
 
         valid = ~np.isnan(values) if np.issubdtype(values.dtype, np.floating) else np.ones(n, dtype=bool)
@@ -445,32 +578,37 @@ def diagnose_condition_passthrough(
         mask = op_fn(values, threshold) & valid
         pass_count = int(np.sum(mask))
         pass_pct = 100.0 * pass_count / n
-        combined_mask &= mask
 
+        severity = "normal"
         if pass_pct == 0.0:
-            tag = "  <-- BLOCKS ALL"
+            severity = "blocks_all"
         elif pass_pct < 1.0:
-            tag = "  <-- RESTRICTIVE"
-        else:
-            tag = ""
+            severity = "restrictive"
 
-        lines.append(
-            f"    {col} {op} {threshold} ({param_key}): "
-            f"{pass_pct:.2f}% pass ({pass_count}/{n}){tag}"
-        )
+        row = {
+            "column": col,
+            "operator": op,
+            "param_key": param_key,
+            "threshold": float(threshold),
+            "pass_count": pass_count,
+            "total_count": int(n),
+            "pass_rate_pct": float(pass_pct),
+            "severity": severity,
+        }
+        if include_mask:
+            row["_mask"] = mask
+        rows.append(row)
 
-    combined_count = int(np.sum(combined_mask))
-    combined_pct = 100.0 * combined_count / n
-    lines.append(f"    -> Combined (all AND'd): {combined_pct:.2f}% ({combined_count}/{n})")
-
-    return "\n".join(lines)
+    return rows
 
 
 __all__ = [
     "build_feature_surface",
+    "collect_condition_passthrough",
     "describe_referenced_columns",
     "diagnose_condition_passthrough",
     "extract_referenced_columns",
     "format_feature_surface_context",
+    "format_param_feasibility_context",
     "format_referenced_surface_warnings",
 ]

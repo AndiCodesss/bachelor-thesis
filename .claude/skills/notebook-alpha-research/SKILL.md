@@ -82,5 +82,6 @@ That hypothesis should be:
 - robust enough to justify coding
 - assigned to exactly one concise `theme_tag` in snake_case
 - reuse a current-focus anchor when it fits; otherwise mint a more precise tag if the evidence clearly justifies it
+- expressed as a small set of machine-checkable `entry_conditions` that can be evaluated on sample data before coding
 
 If research does not justify a strong idea, use the notebook you already have and finalize the best falsifiable hypothesis you can defend within the iteration budget.

@@ -8,6 +8,8 @@ from research.lib.runtime_state import (
     ensure_orchestrator_state,
     ensure_shared_state,
     list_orchestrator_state_files,
+    thinker_memory_lock_path,
+    thinker_memory_path,
     reset_shared_state,
 )
 
@@ -66,6 +68,11 @@ def test_clear_orchestrator_state_removes_legacy_and_lane_files(tmp_path: Path):
     ensure_orchestrator_state(tmp_path, mission_name="mission_a")
     ensure_orchestrator_state(tmp_path, mission_name="mission_a", lane_id="A")
     ensure_orchestrator_state(tmp_path, mission_name="mission_a", lane_id="B")
+    thinker_memory_path(tmp_path, lane_id="A").parent.mkdir(parents=True, exist_ok=True)
+    thinker_memory_path(tmp_path, lane_id="A").write_text("{}", encoding="utf-8")
+    thinker_memory_lock_path(tmp_path, lane_id="A").write_text("", encoding="utf-8")
+    thinker_memory_path(tmp_path, lane_id="B").write_text("{}", encoding="utf-8")
+    thinker_memory_lock_path(tmp_path, lane_id="B").write_text("", encoding="utf-8")
 
     names_before = [path.name for path in list_orchestrator_state_files(tmp_path)]
     assert names_before == [
@@ -76,5 +83,17 @@ def test_clear_orchestrator_state_removes_legacy_and_lane_files(tmp_path: Path):
 
     removed = clear_orchestrator_state(tmp_path)
 
-    assert [path.name for path in removed] == names_before
+    removed_names = sorted(path.name for path in removed)
+    assert removed_names == sorted(
+        names_before
+        + [
+            "llm_orchestrator.lock",
+            "llm_orchestrator_A.lock",
+            "llm_orchestrator_B.lock",
+            "thinker_memory_A.json",
+            "thinker_memory_A.lock",
+            "thinker_memory_B.json",
+            "thinker_memory_B.lock",
+        ]
+    )
     assert list_orchestrator_state_files(tmp_path) == []

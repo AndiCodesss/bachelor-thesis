@@ -133,9 +133,11 @@ def _terminate_process(proc) -> None:
         try:
             pgid = os.getpgid(pid)
             os.killpg(pgid, signal.SIGTERM)
-            time.sleep(0.2)
-            if _process_alive(pid):
+            time.sleep(3)
+            try:
                 os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             return
         except Exception:
             pass
@@ -144,12 +146,11 @@ def _terminate_process(proc) -> None:
         proc.terminate()
     except Exception:
         pass
-    time.sleep(0.2)
-    if _process_alive(pid):
-        try:
-            proc.kill()
-        except Exception:
-            pass
+    time.sleep(3)
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
 
 
 def _process_alive(pid: int) -> bool:
@@ -158,6 +159,35 @@ def _process_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _terminate_process_group(procs) -> None:
+    """Send SIGTERM to all process groups, wait once, then SIGKILL all."""
+    pgids = []
+    for proc in procs:
+        pid = getattr(proc, "pid", None)
+        if pid is None or getattr(proc, "returncode", None) is not None:
+            continue
+        try:
+            pgids.append(os.getpgid(pid))
+        except OSError:
+            continue
+
+    for pgid in pgids:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    time.sleep(3)
+
+    for pgid in pgids:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
 
 
 def _subprocess_exec_kwargs() -> dict:
@@ -716,8 +746,7 @@ def stop_run(run_id: str):
             return {"error": str(e)}
 
     if r_info.get("type") == "autonomy" and "processes" in r_info:
-        for p in r_info["processes"]:
-            _terminate_process(p)
+        _terminate_process_group(r_info["processes"])
         r_info["status"] = "failed"
         r_info["logs"].append("\n--- Processes forcefully terminated by user ---")
         return {"status": "stopped"}

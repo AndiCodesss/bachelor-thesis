@@ -26,7 +26,15 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
         "theme_tag": "amt_value_area",
         "strategy_name_hint": "OFI Bounce",
         "bar_configs": ["foo", "tick_610", "time_1m"],
-        "params_template": {"lookback": 12},
+        "params_template": {"lookback": 12, "vol_ratio_min": 1.1},
+        "entry_conditions": [
+            {
+                "feature": "volume_ratio",
+                "op": ">",
+                "param_key": "vol_ratio_min",
+                "role": "primary",
+            }
+        ],
         "thesis": "test thesis",
         "entry_logic": "entry",
         "exit_logic": "exit",
@@ -42,7 +50,8 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
     assert thinker["theme_tag"] == "amt_value_area"
     assert thinker["strategy_name_hint"] == "ofi_bounce"
     assert thinker["bar_configs"] == ["tick_610"]
-    assert thinker["params_template"] == {"lookback": 12}
+    assert thinker["params_template"] == {"lookback": 12, "vol_ratio_min": 1.1}
+    assert thinker["entry_conditions"][0]["feature"] == "volume_ratio"
 
     coder_payload = {
         "strategy_name": " OFI Reversal v1 ",
@@ -73,6 +82,9 @@ def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
                 "strategy_name_hint": "risk_floor_case",
                 "bar_configs": ["volume_2000"],
                 "params_template": {"pt_ticks": 60, "sl_ticks": 22},
+                "entry_conditions": [
+                    {"feature": "volume_ratio", "op": ">", "param_key": "sl_ticks", "role": "primary"}
+                ],
                 "thesis": "x",
                 "entry_logic": "y",
                 "exit_logic": "z",
@@ -374,6 +386,14 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
         "strategy_name_hint": "alpha_hint",
         "bar_configs": ["tick_610"],
         "params_template": {"lookback": 10},
+        "entry_conditions": [
+            {
+                "feature": "volume_ratio",
+                "op": ">",
+                "param_key": "lookback",
+                "role": "primary",
+            }
+        ],
         "thesis": "x",
         "entry_logic": "y",
         "exit_logic": "z",
@@ -394,9 +414,11 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
     assert handoff["source_role"] == "quant_thinker"
     assert handoff["payload_hash"] == "abc123"
     assert handoff["hypothesis"]["theme_tag"] == "amt_value_area"
+    assert handoff["hypothesis"]["entry_conditions"][0]["feature"] == "volume_ratio"
     prompt = mod._build_coder_user_prompt(thinker_handoff=handoff)
     assert "THINKER_HANDOFF_JSON_BEGIN" in prompt
     assert '"hypothesis_id": "h_01"' in prompt
+    assert '"entry_conditions"' in prompt
     assert "THINKER_HANDOFF_JSON_END" in prompt
 
 
@@ -457,6 +479,11 @@ def test_prompts_include_feature_knowledge_markers():
         feedback_items=[],
         learning_context="LEARNING_SCORECARD:\nLow-sample themes: amt_value_area",
         feature_surface_context=feature_surface_context,
+        param_feasibility_context=(
+            "PARAM_FEASIBILITY_HINTS:\n"
+            "- tick_610:\n"
+            "  bb_bandwidth_20: p10=0.0016 p50=0.0025 p90=0.0042"
+        ),
         runtime_context={
             "split": "validate",
             "min_trade_count": 30,
@@ -488,6 +515,7 @@ def test_prompts_include_feature_knowledge_markers():
     assert "LEARNING_SCORECARD:" in thinker_prompt
     assert "FEATURE_SURFACE_INTELLIGENCE:" in thinker_prompt
     assert "Dead features: squeeze_score" in thinker_prompt
+    assert "PARAM_FEASIBILITY_HINTS:" in thinker_prompt
 
     coder_prompt = mod._build_coder_user_prompt(
         thinker_handoff={
@@ -512,7 +540,7 @@ def test_coder_system_prompt_requires_safe_column_helpers():
     mod = _load_module()
     prompt = mod._build_coder_system_prompt()
     assert "nq-signal-coder" in prompt
-    assert "nq-signal-coding-contract" in prompt
+    assert "Signal Coding Contract Skill" in prompt
     assert "Return only the required JSON object" in prompt
 
 
@@ -520,7 +548,7 @@ def test_thinker_system_prompt_requires_internal_brainstorm():
     mod = _load_module()
     prompt = mod._build_thinker_system_prompt()
     assert "quant-thinker" in prompt
-    assert "notebook-alpha-research" in prompt
+    assert "Notebook Alpha Research Skill" in prompt
     assert "runtime mission context" in prompt
 
 
@@ -951,7 +979,7 @@ def test_validate_generated_strategy_errors_on_zero_signal_rate(tmp_path):
         "absorption_signal": [i % 20 == 0 for i in range(100)],
     })
 
-    errors = mod._validate_generated_strategy(
+    errors, report = mod._validate_generated_strategy(
         strategy_name="zero_strat",
         signals_dir=tmp_path,
         params={},
@@ -966,6 +994,86 @@ def test_validate_generated_strategy_errors_on_zero_signal_rate(tmp_path):
     assert "signal_rate=0.0%" in errors[0]
     assert "absorption_signal" in errors[0]
     assert "ACTION REQUIRED" in errors[0]
+    assert report["bar_results"][0]["status"] == "zero_signal"
+
+
+def test_normalize_and_assess_thinker_brief_rejects_dead_primary_feature():
+    mod = _load_module()
+    with pytest.raises(mod.ThinkerFeasibilityError, match="DEAD"):
+        mod._normalize_and_assess_thinker_brief(
+            {
+                "hypothesis_id": "dead_feature_case",
+                "theme_tag": "amt_value_area",
+                "strategy_name_hint": "dead_feature_case",
+                "bar_configs": ["tick_610"],
+                "params_template": {"vol_ratio_min": 1.05, "pt_ticks": 40, "sl_ticks": 20},
+                "entry_conditions": [
+                    {
+                        "feature": "prev_day_va_position",
+                        "op": ">",
+                        "param_key": "vol_ratio_min",
+                        "role": "primary",
+                    }
+                ],
+                "thesis": "x",
+                "entry_logic": "y",
+                "exit_logic": "z",
+            },
+            mission_bar_configs=["tick_610"],
+            sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
+            validation_sample_cache={
+                "tick_610": [
+                    (
+                        "sample_day",
+                        pl.DataFrame(
+                            {
+                                "prev_day_va_position": [None, None, None],
+                                "volume_ratio": [1.0, 1.1, 1.2],
+                            }
+                        ),
+                    )
+                ]
+            },
+        )
+
+
+def test_normalize_and_assess_thinker_brief_accepts_feasible_conditions():
+    mod = _load_module()
+    out = mod._normalize_and_assess_thinker_brief(
+        {
+            "hypothesis_id": "feasible_case",
+            "theme_tag": "amt_value_area",
+            "strategy_name_hint": "feasible_case",
+            "bar_configs": ["tick_610"],
+            "params_template": {"vol_ratio_min": 1.05, "pt_ticks": 40, "sl_ticks": 20},
+            "entry_conditions": [
+                {
+                    "feature": "volume_ratio",
+                    "op": ">",
+                    "param_key": "vol_ratio_min",
+                    "role": "primary",
+                }
+            ],
+            "thesis": "x",
+            "entry_logic": "y",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610"],
+        sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
+        validation_sample_cache={
+            "tick_610": [
+                (
+                    "sample_day",
+                    pl.DataFrame(
+                        {
+                            "volume_ratio": [1.0] * 98 + [1.2, 1.3],
+                        }
+                    ),
+                )
+            ]
+        },
+    )
+    assert out["entry_conditions"][0]["feature"] == "volume_ratio"
 
 
 def test_validate_generated_strategy_errors_on_high_signal_rate(tmp_path):
@@ -986,7 +1094,7 @@ def test_validate_generated_strategy_errors_on_high_signal_rate(tmp_path):
 
     sample_df = pl.DataFrame({"close": [float(i) for i in range(100)]})
 
-    errors = mod._validate_generated_strategy(
+    errors, report = mod._validate_generated_strategy(
         strategy_name="always_long",
         signals_dir=tmp_path,
         params={},
@@ -1000,6 +1108,7 @@ def test_validate_generated_strategy_errors_on_high_signal_rate(tmp_path):
     assert len(errors) == 1
     assert "signal_rate=" in errors[0]
     assert "cost destruction" in errors[0]
+    assert report["bar_results"][0]["status"] == "over_signal"
 
 
 def test_validate_generated_strategy_passes_for_healthy_signal_rate(tmp_path):
@@ -1023,7 +1132,7 @@ def test_validate_generated_strategy_passes_for_healthy_signal_rate(tmp_path):
 
     sample_df = pl.DataFrame({"close": [float(i) for i in range(100)]})
 
-    errors = mod._validate_generated_strategy(
+    errors, report = mod._validate_generated_strategy(
         strategy_name="sparse_strat",
         signals_dir=tmp_path,
         params={},
@@ -1035,6 +1144,7 @@ def test_validate_generated_strategy_passes_for_healthy_signal_rate(tmp_path):
         code=code,
     )
     assert errors == []
+    assert report["bar_results"][0]["status"] == "ok"
 
 
 def test_validate_generated_strategy_returns_module_validation_errors(tmp_path):
@@ -1053,7 +1163,7 @@ def test_validate_generated_strategy_returns_module_validation_errors(tmp_path):
 
     sample_df = pl.DataFrame({"close": [1.0, 2.0, 3.0]})
 
-    errors = mod._validate_generated_strategy(
+    errors, report = mod._validate_generated_strategy(
         strategy_name="bad_numpy",
         signals_dir=tmp_path,
         params={},
@@ -1067,6 +1177,206 @@ def test_validate_generated_strategy_returns_module_validation_errors(tmp_path):
     assert len(errors) == 1
     assert "module validation failed" in errors[0]
     assert "to_numpy()" in errors[0]
+    assert report["bar_results"][0]["status"] == "module_validation_failed"
+
+
+def test_build_validation_attempt_record_captures_blocking_conditions_and_params():
+    mod = _load_module()
+    record = mod._build_validation_attempt_record(
+        iteration=4,
+        hypothesis_id="h004",
+        theme_tag="vol_compression",
+        strategy_name="compression_ignition",
+        bar_configs=["tick_610"],
+        params={"squeeze_threshold": 0.5, "volume_ratio_min": 1.8},
+        validation_report={
+            "bar_results": [
+                {
+                    "status": "zero_signal",
+                    "bar_config": "tick_610",
+                    "sample_label": "nq_2023-03-06",
+                    "nonzero": 0,
+                    "total": 523,
+                    "signal_rate_pct": 0.0,
+                    "condition_rows": [
+                        {
+                            "column": "squeeze_score",
+                            "operator": ">",
+                            "param_key": "squeeze_threshold",
+                            "threshold": 0.5,
+                            "pass_rate_pct": 0.0,
+                            "severity": "blocks_all",
+                        },
+                        {
+                            "column": "volume_ratio",
+                            "operator": ">",
+                            "param_key": "volume_ratio_min",
+                            "threshold": 1.8,
+                            "pass_rate_pct": 2.0,
+                            "severity": "normal",
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+    assert record is not None
+    assert record["failure_type"] == "zero_signal"
+    assert record["summary"] == "0/523 bars on tick_610 (nq_2023-03-06)."
+    assert record["conditions_label"] == "Blocking"
+    assert record["highlighted_conditions"][0]["column"] == "squeeze_score"
+    assert record["offending_params"] == {"squeeze_threshold": 0.5}
+
+
+def test_build_exception_attempt_record_captures_invalid_risk_floor_params():
+    mod = _load_module()
+    record = mod._build_exception_attempt_record(
+        iteration=2,
+        hypothesis_id="h002",
+        theme_tag="va_rejection",
+        bar_configs=["tick_610", "volume_2000"],
+        params={"sl_ticks": 22, "pt_ticks": 60},
+        exc=ValueError(
+            "Invalid pt_ticks/sl_ticks in params_template: "
+            "sl_ticks=22 too tight for volume_2000 (median bar range ~94t) — minimum sl_ticks=40 required to survive entry bar noise"
+        ),
+    )
+    assert record["failure_type"] == "invalid_risk_floor"
+    assert record["bar_config"] == "volume_2000"
+    assert record["offending_params"] == {"sl_ticks": 22}
+
+
+def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
+    mod = _load_module()
+    exc = mod.ThinkerFeasibilityError(
+        "THINKER_FEASIBILITY on tick_610 (sample_day): primary feature prev_day_va_position has no finite values",
+        report={
+            "bar_results": [
+                {
+                    "status": "dead_feature_primary",
+                    "bar_config": "tick_610",
+                    "sample_label": "sample_day",
+                    "error": "primary feature prev_day_va_position has no finite values",
+                    "condition_rows": [
+                        {
+                            "column": "prev_day_va_position",
+                            "operator": ">",
+                            "param_key": "va_pos_min",
+                            "threshold": "1.2",
+                            "severity": "dead_feature",
+                            "pass_rate_pct": 0.0,
+                        }
+                    ],
+                }
+            ]
+        },
+        brief={
+            "hypothesis_id": "h_dead",
+            "theme_tag": "amt_value_area",
+            "bar_configs": ["tick_610"],
+            "params_template": {"va_pos_min": 1.2},
+        },
+    )
+    record = mod._build_exception_attempt_record(
+        iteration=7,
+        hypothesis_id="iter_7",
+        theme_tag="unknown",
+        bar_configs=[],
+        params={},
+        exc=exc,
+    )
+    assert record["failure_type"] == "dead_feature_primary"
+    assert record["bar_config"] == "tick_610"
+    assert record["offending_params"] == {"va_pos_min": 1.2}
+
+
+def test_should_attempt_coder_repair_skips_hypothesis_level_failures():
+    mod = _load_module()
+    assert (
+        mod._should_attempt_coder_repair(
+            validation_report={
+                "bar_results": [
+                    {"status": "zero_signal"},
+                    {"status": "over_signal"},
+                ]
+            }
+        )
+        is False
+    )
+    assert (
+        mod._should_attempt_coder_repair(
+            validation_report={
+                "bar_results": [
+                    {"status": "dead_feature_primary"},
+                    {"status": "ok"},
+                ]
+            }
+        )
+        is False
+    )
+    assert (
+        mod._should_attempt_coder_repair(
+            validation_report={
+                "bar_results": [
+                    {"status": "zero_signal"},
+                    {"status": "ok"},
+                ]
+            }
+        )
+        is False
+    )
+    assert (
+        mod._should_attempt_coder_repair(
+            validation_report={
+                "bar_results": [
+                    {"status": "over_signal"},
+                    {"status": "empty_sample"},
+                ]
+            }
+        )
+        is False
+    )
+
+
+def test_should_attempt_coder_repair_keeps_runtime_and_contract_failures():
+    mod = _load_module()
+    assert (
+        mod._should_attempt_coder_repair(
+            validation_report={
+                "bar_results": [
+                    {"status": "runtime_error"},
+                ]
+            }
+        )
+        is True
+    )
+    assert (
+        mod._should_attempt_coder_repair(
+            validation_report={
+                "bar_results": [
+                    {"status": "contract_failed"},
+                ]
+            }
+        )
+        is True
+    )
+
+
+def test_build_thinker_prompt_includes_recent_attempt_memory():
+    mod = _load_module()
+    prompt = mod._build_thinker_user_prompt(
+        mission={"bar_configs": ["tick_610"], "session_filter": "eth", "feature_group": "all"},
+        existing_strategies=[],
+        feedback_items=[],
+        thinker_memory_context=(
+            "RECENT_ATTEMPT_MEMORY (last 3 iterations, this lane):\n"
+            "[iter 4] vol_compression -> REJECTED (zero_signal): 0/523 bars on tick_610.\n"
+            "  Blocking: squeeze_score > 0.5 (0.0% pass)\n"
+            "  Params: squeeze_threshold=0.5"
+        ),
+    )
+    assert "RECENT_ATTEMPT_MEMORY" in prompt
+    assert "vol_compression" in prompt
 
 
 def test_repair_prompt_includes_signal_rate_guidance_on_zero_rate():

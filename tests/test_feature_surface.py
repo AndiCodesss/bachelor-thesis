@@ -6,6 +6,7 @@ from research.lib.feature_surface import (
     build_feature_surface,
     describe_referenced_columns,
     format_feature_surface_context,
+    format_param_feasibility_context,
     format_referenced_surface_warnings,
 )
 
@@ -107,6 +108,52 @@ def test_format_referenced_surface_warnings_matches_bare_feature_names():
     )
     assert "squeeze_score" in warning
     assert "price_velocity_z" not in warning
+
+
+def test_format_param_feasibility_context_prioritizes_live_threshold_features():
+    surface = {
+        "by_bar_config": {
+            "tick_610": {
+                "feature_stats": {
+                    "bb_bandwidth_20": {
+                        "kind": "variable",
+                        "null_rate": 0.0,
+                        "p10": 0.0016,
+                        "p50": 0.0025,
+                        "p90": 0.0042,
+                    },
+                    "range_compression_z": {
+                        "kind": "variable",
+                        "null_rate": 0.0,
+                        "p10": -1.3154,
+                        "p50": -0.0695,
+                        "p90": 1.4829,
+                    },
+                    "close": {
+                        "kind": "variable",
+                        "null_rate": 0.0,
+                        "p10": 19000.0,
+                        "p50": 19100.0,
+                        "p90": 19200.0,
+                    },
+                    "dead_feature": {
+                        "kind": "constant_zero",
+                        "null_rate": 0.0,
+                        "p10": 0.0,
+                        "p50": 0.0,
+                        "p90": 0.0,
+                    },
+                },
+            },
+        },
+    }
+
+    context = format_param_feasibility_context(surface, selected_bar_configs=["tick_610"])
+    assert "PARAM_FEASIBILITY_HINTS:" in context
+    assert "tick_610:" in context
+    assert "bb_bandwidth_20: p10=0.0016 p50=0.0025 p90=0.0042" in context
+    assert "range_compression_z: p10=-1.3154 p50=-0.0695 p90=1.4829" in context
+    assert "dead_feature" not in context
 
 
 def test_describe_referenced_columns_reports_sparse_boolean_and_percentiles():

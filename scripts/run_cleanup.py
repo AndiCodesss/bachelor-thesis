@@ -26,9 +26,12 @@ STATE_PATTERNS = [
     "research/.state/learning_scorecard.lock",
     "research/.state/mission_budget.json",
     "research/.state/mission_budget.lock",
+    "research/.state/thinker_memory*.json",
+    "research/.state/thinker_memory*.lock",
     "research/.state/trial_count.json",
     "research/.state/trial_count.lock",
     "research/.state/llm_orchestrator*.json",
+    "research/.state/llm_orchestrator*.lock",
 ]
 
 # Log files to delete

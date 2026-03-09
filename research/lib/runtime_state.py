@@ -76,8 +76,17 @@ def orchestrator_state_path(root: Path, lane_id: str | None = None) -> Path:
     return state_dir(root) / filename
 
 
+def thinker_memory_path(root: Path, lane_id: str | None = None) -> Path:
+    filename = f"thinker_memory_{lane_id}.json" if lane_id else "thinker_memory.json"
+    return state_dir(root) / filename
+
+
 def orchestrator_state_lock_path(root: Path, lane_id: str | None = None) -> Path:
     return orchestrator_state_path(root, lane_id=lane_id).with_suffix(".lock")
+
+
+def thinker_memory_lock_path(root: Path, lane_id: str | None = None) -> Path:
+    return thinker_memory_path(root, lane_id=lane_id).with_suffix(".lock")
 
 
 def orchestrator_state_lock_path_for(state_path: Path) -> Path:
@@ -117,11 +126,29 @@ def list_orchestrator_state_files(root: Path) -> list[Path]:
     return sorted(state_root.glob("llm_orchestrator*.json"))
 
 
+def list_thinker_memory_files(root: Path) -> list[Path]:
+    state_root = state_dir(root)
+    if not state_root.exists():
+        return []
+    return sorted(state_root.glob("thinker_memory*.json"))
+
+
 def clear_orchestrator_state(root: Path) -> list[Path]:
     removed: list[Path] = []
     for path in list_orchestrator_state_files(root):
         path.unlink(missing_ok=True)
         removed.append(path)
+        lock_path = path.with_suffix(".lock")
+        if lock_path.exists():
+            lock_path.unlink(missing_ok=True)
+            removed.append(lock_path)
+    for path in list_thinker_memory_files(root):
+        path.unlink(missing_ok=True)
+        removed.append(path)
+        lock_path = path.with_suffix(".lock")
+        if lock_path.exists():
+            lock_path.unlink(missing_ok=True)
+            removed.append(lock_path)
     return removed
 
 

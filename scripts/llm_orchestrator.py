@@ -29,9 +29,11 @@ from research.lib.experiments import log_experiment
 from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.feature_surface import (
     build_feature_surface,
+    collect_condition_passthrough,
     describe_referenced_columns,
     diagnose_condition_passthrough,
     format_feature_surface_context,
+    format_param_feasibility_context,
     format_referenced_surface_warnings,
 )
 from research.lib.learning_scorecard import (
@@ -59,7 +61,20 @@ from research.lib.runtime_state import (
     ensure_shared_state,
     read_orchestrator_state,
     reset_orchestrator_state,
+    thinker_memory_lock_path,
+    thinker_memory_path,
     write_orchestrator_state,
+)
+from research.lib.thinker_memory import (
+    append_thinker_attempt,
+    format_thinker_memory_context,
+    read_thinker_memory,
+)
+from research.lib.thinker_feasibility import (
+    ThinkerFeasibilityError,
+    assess_entry_condition_feasibility,
+    format_feasibility_error,
+    normalize_entry_conditions,
 )
 from research.signals import check_signal_causality, load_signal_module
 from src.framework.api import (
@@ -816,6 +831,331 @@ def _build_learning_context(
     return format_learning_context(scorecard)
 
 
+def _format_attempt_params(params: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in keys:
+        if key in params:
+            out[key] = params[key]
+    return out
+
+
+def _select_highlighted_conditions(
+    *,
+    condition_rows: list[dict[str, Any]],
+    failure_type: str,
+    max_items: int = 2,
+) -> tuple[str, list[dict[str, Any]]]:
+    rows = [dict(row) for row in condition_rows if isinstance(row, dict)]
+    if not rows:
+        return "", []
+
+    if failure_type == "over_signal":
+        rows.sort(key=lambda row: (-float(row.get("pass_rate_pct", 0.0)), str(row.get("param_key", ""))))
+        return "Loosest", rows[:max_items]
+
+    rows.sort(
+        key=lambda row: (
+            float(row.get("pass_rate_pct", 0.0)),
+            0 if str(row.get("severity", "")) == "blocks_all" else 1,
+            str(row.get("param_key", "")),
+        )
+    )
+    blocking = [
+        row
+        for row in rows
+        if str(row.get("severity", "")) in {"blocks_all", "restrictive"}
+    ]
+    chosen = blocking[:max_items] if blocking else rows[:max_items]
+    return "Blocking", chosen
+
+
+def _build_validation_attempt_record(
+    *,
+    iteration: int,
+    hypothesis_id: str,
+    theme_tag: str,
+    strategy_name: str,
+    bar_configs: list[str],
+    params: dict[str, Any],
+    validation_report: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(validation_report, dict):
+        return None
+    bar_results = validation_report.get("bar_results")
+    if not isinstance(bar_results, list) or not bar_results:
+        return None
+
+    relevant = None
+    for status in (
+        "dead_feature_primary",
+        "zero_signal",
+        "over_signal",
+        "contract_failed",
+        "causality_failed",
+        "runtime_error",
+    ):
+        relevant = next(
+            (row for row in bar_results if isinstance(row, dict) and str(row.get("status", "")) == status),
+            None,
+        )
+        if relevant is not None:
+            break
+    if relevant is None:
+        return None
+
+    failure_type = str(relevant.get("status", "runtime_error"))
+    sample_label = str(relevant.get("sample_label", "")).strip()
+    bar_config = str(relevant.get("bar_config", "")).strip()
+    nonzero = int(relevant.get("nonzero", 0) or 0)
+    total = int(relevant.get("total", 0) or 0)
+    signal_rate_pct = float(relevant.get("signal_rate_pct", 0.0) or 0.0)
+    condition_rows = relevant.get("condition_rows") if isinstance(relevant.get("condition_rows"), list) else []
+    conditions_label, highlighted_conditions = _select_highlighted_conditions(
+        condition_rows=condition_rows,
+        failure_type=failure_type,
+    )
+    offending_params = _format_attempt_params(
+        params,
+        [str(row.get("param_key", "")).strip() for row in highlighted_conditions if str(row.get("param_key", "")).strip()],
+    )
+
+    if failure_type == "dead_feature_primary":
+        summary = str(relevant.get("error", "")).strip()[:180] or f"dead primary feature on {bar_config}."
+        status_label = "REJECTED (dead_feature_primary)"
+    elif failure_type == "zero_signal":
+        summary = f"0/{total} bars on {bar_config} ({sample_label})."
+        status_label = "REJECTED (zero_signal)"
+    elif failure_type == "over_signal":
+        summary = (
+            f"{nonzero}/{total} bars on {bar_config} ({signal_rate_pct:.2f}% signal rate; target 0.05–0.3%) "
+            f"({sample_label})."
+        )
+        status_label = "REJECTED (over_signal)"
+    else:
+        summary = str(relevant.get("error", "")).strip()[:180] or f"{failure_type} on {bar_config} ({sample_label})."
+        status_label = f"REJECTED ({failure_type})"
+
+    return {
+        "iteration": iteration,
+        "hypothesis_id": hypothesis_id,
+        "theme_tag": theme_tag,
+        "strategy_name": strategy_name,
+        "bar_configs": list(bar_configs),
+        "status": "rejected_pre_enqueue",
+        "status_label": status_label,
+        "failure_type": failure_type,
+        "summary": summary,
+        "conditions_label": conditions_label,
+        "highlighted_conditions": highlighted_conditions,
+        "offending_params": offending_params,
+        "signal_rate_pct": signal_rate_pct,
+        "sample_label": sample_label,
+        "bar_config": bar_config,
+    }
+
+
+def _build_feasibility_attempt_record(
+    *,
+    iteration: int,
+    hypothesis_id: str,
+    theme_tag: str,
+    bar_configs: list[str],
+    params: dict[str, Any],
+    feasibility_report: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    return _build_validation_attempt_record(
+        iteration=iteration,
+        hypothesis_id=hypothesis_id,
+        theme_tag=theme_tag,
+        strategy_name="thinker_hypothesis",
+        bar_configs=bar_configs,
+        params=params,
+        validation_report=feasibility_report,
+    )
+
+
+def _build_exception_attempt_record(
+    *,
+    iteration: int,
+    hypothesis_id: str,
+    theme_tag: str,
+    bar_configs: list[str],
+    params: dict[str, Any],
+    exc: Exception,
+) -> dict[str, Any]:
+    if isinstance(exc, ThinkerFeasibilityError):
+        brief = exc.brief if isinstance(exc.brief, dict) else {}
+        if brief:
+            hypothesis_id = str(brief.get("hypothesis_id") or hypothesis_id)
+            theme_tag = str(brief.get("theme_tag") or theme_tag)
+            if not bar_configs:
+                bar_configs = [str(v) for v in brief.get("bar_configs", []) if str(v).strip()]
+            if not params:
+                raw_params = brief.get("params_template")
+                if isinstance(raw_params, dict):
+                    params = dict(raw_params)
+        record = _build_feasibility_attempt_record(
+            iteration=iteration,
+            hypothesis_id=hypothesis_id,
+            theme_tag=theme_tag,
+            bar_configs=bar_configs,
+            params=params,
+            feasibility_report=exc.report,
+        )
+        if record is not None:
+            return record
+
+    message = str(exc).strip()
+    risk_match = re.search(
+        r"sl_ticks=(?P<actual>\d+)\s+too tight for\s+(?P<bar>\w+).*minimum sl_ticks=(?P<minimum>\d+)",
+        message,
+    )
+    if risk_match:
+        actual = int(risk_match.group("actual"))
+        minimum = int(risk_match.group("minimum"))
+        bar_config = str(risk_match.group("bar"))
+        offending_params = {}
+        for key, value in params.items():
+            key_text = str(key)
+            if key_text.startswith("sl_ticks") and str(actual) == str(value):
+                offending_params[key_text] = value
+        if not offending_params:
+            offending_params["sl_ticks"] = actual
+        return {
+            "iteration": iteration,
+            "hypothesis_id": hypothesis_id,
+            "theme_tag": theme_tag,
+            "bar_configs": list(bar_configs),
+            "status": "generation_error",
+            "status_label": "ERROR (invalid_risk_floor)",
+            "failure_type": "invalid_risk_floor",
+            "summary": f"{bar_config} stop too tight: sl_ticks={actual}, minimum={minimum}.",
+            "conditions_label": "",
+            "highlighted_conditions": [],
+            "offending_params": offending_params,
+            "bar_config": bar_config,
+        }
+
+    return {
+        "iteration": iteration,
+        "hypothesis_id": hypothesis_id,
+        "theme_tag": theme_tag,
+        "bar_configs": list(bar_configs),
+        "status": "generation_error",
+        "status_label": "ERROR",
+        "failure_type": "generation_error",
+        "summary": message[:180] or type(exc).__name__,
+        "conditions_label": "",
+        "highlighted_conditions": [],
+        "offending_params": {},
+    }
+
+
+def _build_success_attempt_record(
+    *,
+    iteration: int,
+    hypothesis_id: str,
+    theme_tag: str,
+    strategy_name: str,
+    bar_configs: list[str],
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    param_keys = [
+        key
+        for key in (
+            "sl_ticks",
+            "pt_ticks",
+            "sl_ticks_tick_610",
+            "sl_ticks_volume_2000",
+            "sl_ticks_time_1m",
+            "pt_ticks_tick_610",
+            "pt_ticks_volume_2000",
+            "pt_ticks_time_1m",
+        )
+        if key in params
+    ]
+    return {
+        "iteration": iteration,
+        "hypothesis_id": hypothesis_id,
+        "theme_tag": theme_tag,
+        "strategy_name": strategy_name,
+        "bar_configs": list(bar_configs),
+        "status": "accepted_for_validation",
+        "status_label": "ACCEPTED",
+        "failure_type": "accepted",
+        "summary": f"accepted for validation on {', '.join(bar_configs)}.",
+        "conditions_label": "",
+        "highlighted_conditions": [],
+        "offending_params": _format_attempt_params(params, param_keys),
+    }
+
+
+def _should_attempt_coder_repair(
+    *,
+    validation_report: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(validation_report, dict):
+        return True
+    bar_results = validation_report.get("bar_results")
+    if not isinstance(bar_results, list) or not bar_results:
+        return True
+
+    neutral_statuses = {"ok", "empty_sample"}
+    hypothesis_level_statuses = {"dead_feature_primary", "zero_signal", "over_signal"}
+    actionable_coder_statuses = {
+        "module_validation_failed",
+        "runtime_error",
+        "contract_failed",
+        "causality_failed",
+    }
+
+    statuses = {
+        str(row.get("status", "")).strip()
+        for row in bar_results
+        if isinstance(row, dict)
+    }
+    statuses -= neutral_statuses
+    if not statuses:
+        return False
+    if statuses <= hypothesis_level_statuses:
+        return False
+    if statuses & actionable_coder_statuses:
+        return True
+    return True
+
+
+def _normalize_and_assess_thinker_brief(
+    payload: dict[str, Any],
+    *,
+    mission_bar_configs: list[str],
+    sample_bar_context: dict[str, Any] | None,
+    validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]],
+) -> dict[str, Any]:
+    thinker_brief = _normalize_thinker_brief(
+        payload,
+        mission_bar_configs=mission_bar_configs,
+        sample_bar_context=sample_bar_context,
+    )
+    feasibility_report = assess_entry_condition_feasibility(
+        entry_conditions=list(thinker_brief.get("entry_conditions", [])),
+        params_template=dict(thinker_brief.get("params_template", {})),
+        selected_bar_configs=list(thinker_brief.get("bar_configs", [])),
+        validation_sample_cache=validation_sample_cache,
+    )
+    failing = [
+        row
+        for row in feasibility_report.get("bar_results", [])
+        if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
+    ]
+    if failing:
+        raise ThinkerFeasibilityError(
+            format_feasibility_error(feasibility_report),
+            report=feasibility_report,
+            brief=thinker_brief,
+        )
+    return thinker_brief
+
+
 def _normalize_thinker_brief(
     payload: dict[str, Any],
     *,
@@ -841,6 +1181,11 @@ def _normalize_thinker_brief(
     params_template = payload.get("params_template", {})
     if not isinstance(params_template, dict):
         params_template = {}
+
+    entry_conditions = normalize_entry_conditions(
+        payload.get("entry_conditions"),
+        params_template=params_template,
+    )
 
     # Enforce minimum 1.5:1 RR and bar-type-aware minimum SL
     _pt = params_template.get("pt_ticks")
@@ -902,6 +1247,7 @@ def _normalize_thinker_brief(
         "strategy_name_hint": strategy_name_hint,
         "bar_configs": chosen,
         "params_template": dict(params_template),
+        "entry_conditions": entry_conditions,
         "thesis": thesis,
         "entry_logic": entry_logic,
         "exit_logic": exit_logic,
@@ -1125,7 +1471,23 @@ FEATURE_COMPUTATION_NOTES = [
     "Profile distance features such as `poc_distance` and `rolling_poc_distance` are ATR-normalized; `*_raw` variants stay in points.",
 ]
 
-_FEATURE_CATALOG_PATH = Path(__file__).resolve().parent.parent / "research" / "feature_catalog.md"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_FEATURE_CATALOG_PATH = _REPO_ROOT / "research" / "feature_catalog.md"
+_SKILLS_DIR = _REPO_ROOT / ".claude" / "skills"
+
+
+def _load_skill(name: str) -> str:
+    """Load a skill SKILL.md, stripping the YAML front-matter."""
+    path = _SKILLS_DIR / name / "SKILL.md"
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    # Strip YAML front-matter (--- ... ---)
+    if text.startswith("---"):
+        end = text.find("---", 3)
+        if end != -1:
+            text = text[end + 3:].lstrip("\n")
+    return text.strip()
 
 
 def _load_feature_catalog() -> list[str]:
@@ -1267,6 +1629,16 @@ def _thinker_handoff_text_fragments(thinker_handoff: dict[str, Any]) -> list[str
         values = hypothesis.get(key)
         if isinstance(values, list):
             fragments.extend(str(item) for item in values if str(item).strip())
+    entry_conditions = hypothesis.get("entry_conditions")
+    if isinstance(entry_conditions, list):
+        for row in entry_conditions:
+            if not isinstance(row, dict):
+                continue
+            feature = str(row.get("feature", "")).strip()
+            op = str(row.get("op", "")).strip()
+            role = str(row.get("role", "")).strip()
+            if feature and op:
+                fragments.append(f"{feature} {op} ({role})")
     return fragments
 
 
@@ -1348,14 +1720,30 @@ def _validate_generated_strategy(
     validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]] | None = None,
     sample_cache: dict[str, pl.DataFrame] | None = None,
     code: str = "",
-) -> list[str]:
+) -> tuple[list[str], dict[str, Any]]:
     try:
         module = load_signal_module(strategy_name, signals_dir=signals_dir)
     except Exception as exc:
-        return [f"{strategy_name}: module validation failed: {type(exc).__name__}: {exc}"]
+        return [f"{strategy_name}: module validation failed: {type(exc).__name__}: {exc}"], {
+            "strategy_name": strategy_name,
+            "bar_results": [
+                {
+                    "status": "module_validation_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            ],
+        }
     strategy_fn = getattr(module, "generate_signal", None)
     if not callable(strategy_fn):
-        return [f"{strategy_name}: missing callable generate_signal(df, params)"]
+        return [f"{strategy_name}: missing callable generate_signal(df, params)"], {
+            "strategy_name": strategy_name,
+            "bar_results": [
+                {
+                    "status": "module_validation_failed",
+                    "error": "missing callable generate_signal(df, params)",
+                }
+            ],
+        }
 
     if validation_sample_cache is None:
         validation_sample_cache = {}
@@ -1364,6 +1752,7 @@ def _validate_generated_strategy(
             validation_sample_cache.setdefault(str(bar_config), [("cached_sample", df)])
 
     errors: list[str] = []
+    report: dict[str, Any] = {"strategy_name": strategy_name, "bar_results": []}
     for bar_config in bar_configs:
         if bar_config not in validation_sample_cache:
             validation_sample_cache[bar_config] = _load_validation_strategy_samples(
@@ -1375,6 +1764,14 @@ def _validate_generated_strategy(
         for sample_label, strategy_df in validation_sample_cache[bar_config]:
             if len(strategy_df) == 0:
                 errors.append(f"{strategy_name}: empty sample frame for {bar_config} ({sample_label})")
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "empty_sample",
+                        "error": "empty sample frame",
+                    }
+                )
                 continue
 
             try:
@@ -1389,9 +1786,25 @@ def _validate_generated_strategy(
                     f"{strategy_name}: causality check crashed for {bar_config} "
                     f"({sample_label}): {type(exc).__name__}: {exc}",
                 )
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "causality_failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
                 continue
             if causality:
                 errors.append(f"{strategy_name}: non-causal for {bar_config} ({sample_label}): {causality[0]}")
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "causality_failed",
+                        "error": str(causality[0]),
+                    }
+                )
                 continue
 
             try:
@@ -1401,17 +1814,36 @@ def _validate_generated_strategy(
                     f"{strategy_name}: generate_signal failed for {bar_config} "
                     f"({sample_label}): {type(exc).__name__}: {exc}",
                 )
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "runtime_error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
                 continue
             signal_errors = _validate_signal_array(raw, len(strategy_df))
             if signal_errors:
                 errors.append(
                     f"{strategy_name}: contract failed for {bar_config} ({sample_label}): {signal_errors[0]}",
                 )
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "contract_failed",
+                        "error": str(signal_errors[0]),
+                    }
+                )
                 continue
 
             nonzero = int(np.count_nonzero(raw))
             total = len(raw)
             rate_pct = 100.0 * nonzero / total if total > 0 else 0.0
+            condition_rows = collect_condition_passthrough(
+                df=strategy_df, code=code, params=params,
+            )
             condition_diag = diagnose_condition_passthrough(
                 df=strategy_df, code=code, params=params,
             )
@@ -1425,6 +1857,17 @@ def _validate_generated_strategy(
                     + f"ACTION REQUIRED: Relax the condition(s) marked BLOCKS ALL / RESTRICTIVE above "
                     f"to produce at least 1 signal in this {total}-bar sample."
                 )
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "zero_signal",
+                        "nonzero": nonzero,
+                        "total": total,
+                        "signal_rate_pct": rate_pct,
+                        "condition_rows": condition_rows,
+                    }
+                )
             elif rate_pct > 2.0:
                 errors.append(
                     f"{strategy_name}: signal_rate={rate_pct:.2f}% for {bar_config} ({sample_label}) "
@@ -1432,17 +1875,42 @@ def _validate_generated_strategy(
                     + (f"{condition_diag}\n" if condition_diag else "")
                     + "Tighten the loosest entry filter(s) to avoid cost destruction."
                 )
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "over_signal",
+                        "nonzero": nonzero,
+                        "total": total,
+                        "signal_rate_pct": rate_pct,
+                        "condition_rows": condition_rows,
+                    }
+                )
+            else:
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": sample_label,
+                        "status": "ok",
+                        "nonzero": nonzero,
+                        "total": total,
+                        "signal_rate_pct": rate_pct,
+                    }
+                )
 
-    return errors
+    return errors, report
 
 
 def _build_thinker_system_prompt() -> str:
-    return (
-        "Use the project Claude agent `quant-thinker` from `.claude/agents/quant-thinker.md`.\n"
-        "That agent includes the preloaded project skill `notebook-alpha-research`.\n"
-        "Treat the runtime mission context in the user prompt as the source of truth for split, session filter,\n"
-        "thresholds, and allowed bar configs. Return only the required JSON object."
-    )
+    skill = _load_skill("notebook-alpha-research")
+    parts = [
+        "You are the quant-thinker agent for the NQ alpha discovery loop.",
+        "Treat the runtime mission context in the user prompt as the source of truth for split, session filter,",
+        "thresholds, and allowed bar configs. Return only the required JSON object.",
+    ]
+    if skill:
+        parts.append(f"\n## Notebook Alpha Research Skill\n\n{skill}")
+    return "\n".join(parts)
 
 
 def _disable_notebooklm_runtime_mission(mission: dict[str, Any]) -> dict[str, Any]:
@@ -1465,7 +1933,9 @@ def _build_thinker_user_prompt(
     existing_strategies: list[str],
     feedback_items: list[dict[str, Any]],
     learning_context: str = "",
+    thinker_memory_context: str = "",
     feature_surface_context: str = "",
+    param_feasibility_context: str = "",
     runtime_context: dict[str, Any] | None = None,
     feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
@@ -1500,10 +1970,22 @@ def _build_thinker_user_prompt(
         "Return exactly one concise `theme_tag` in snake_case. Reuse a focus anchor if it fits; "
         "otherwise introduce a new precise tag if the evidence points elsewhere.\n\n",
     )
+    prompt_parts.append(
+        "You must also return `entry_conditions`: a machine-checkable list of the core gates that must be true before a signal can fire.\n"
+        "Use 2-6 conditions total. Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.\n"
+        "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
+        "For comparison ops, reference a numeric key from `params_template` via `param_key`.\n"
+        "For `between`, use `param_key_low` and `param_key_high`.\n"
+        "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be rejected before coder runs.\n\n",
+    )
     if learning_context.strip():
         prompt_parts.append(f"{learning_context}\n\n")
+    if thinker_memory_context.strip():
+        prompt_parts.append(f"{thinker_memory_context}\n\n")
     if feature_surface_context.strip():
         prompt_parts.append(f"{feature_surface_context}\n\n")
+    if param_feasibility_context.strip():
+        prompt_parts.append(f"{param_feasibility_context}\n\n")
     prompt_parts.append(f"{_format_bar_risk_floor_context(runtime_context)}\n\n")
     prompt_parts.append("Design exactly one hypothesis that is implementable by a separate coding model.")
     prompt = "".join(prompt_parts)
@@ -1565,14 +2047,19 @@ def _build_thinker_user_prompt(
 
 
 def _build_coder_system_prompt() -> str:
-    return (
-        "Use the project Claude agent `nq-signal-coder` from `.claude/agents/nq-signal-coder.md`.\n"
-        "That agent includes the preloaded project skill `nq-signal-coding-contract`.\n"
-        "Follow that agent plus the user prompt exactly. Return only the required JSON object with keys\n"
-        "`strategy_name`, `bar_configs`, `params`, and `code`.\n"
-        "Hard runtime reminders: the final signal array must be dtype `np.int8` and should end with "
-        "`.astype(np.int8)`, and `shift(-1)` is forbidden."
-    )
+    skill = _load_skill("nq-signal-coding-contract")
+    parts = [
+        "You are the nq-signal-coder agent for the NQ alpha discovery loop.",
+        "Follow the user prompt exactly. Return only the required JSON object with keys",
+        "`strategy_name`, `bar_configs`, `params`, and `code`.",
+        "Treat `hypothesis.entry_conditions` as the required core entry gates. The final code should implement",
+        "those conditions directly and use `entry_logic` only to refine direction or execution details.",
+        "Hard runtime reminders: the final signal array must be dtype `np.int8` and should end with",
+        "`.astype(np.int8)`, and `shift(-1)` is forbidden.",
+    ]
+    if skill:
+        parts.append(f"\n## Signal Coding Contract Skill\n\n{skill}")
+    return "\n".join(parts)
 
 
 def _build_coder_handoff(
@@ -1638,6 +2125,9 @@ def _build_coder_handoff(
             "params_template": dict(thinker_brief.get("params_template", {}))
             if isinstance(thinker_brief.get("params_template"), dict)
             else {},
+            "entry_conditions": list(thinker_brief.get("entry_conditions", []))
+            if isinstance(thinker_brief.get("entry_conditions"), list)
+            else [],
             "thesis": _clip_text(thinker_brief.get("thesis", ""), 520),
             "entry_logic": _clip_text(thinker_brief.get("entry_logic", ""), 780),
             "exit_logic": _clip_text(thinker_brief.get("exit_logic", ""), 520),
@@ -2024,6 +2514,8 @@ def main() -> int:
         "scorecard": shared_paths["scorecard"],
         "scorecard_lock": shared_paths["scorecard_lock"],
         "orchestrator": orchestrator_state_file,
+        "thinker_memory": thinker_memory_path(root, lane_id=lane_id),
+        "thinker_memory_lock": thinker_memory_lock_path(root, lane_id=lane_id),
     }
     orchestrator_state = _read_json(state_paths["orchestrator"])
     iterations_done = int(orchestrator_state.get("iterations_completed", 0))
@@ -2175,6 +2667,10 @@ def main() -> int:
         feature_surface,
         selected_bar_configs=mission_bar_configs,
     )
+    param_feasibility_context = format_param_feasibility_context(
+        feature_surface,
+        selected_bar_configs=mission_bar_configs,
+    )
     runtime_context = _build_runtime_context(
         mission=active_mission,
         mission_bar_configs=mission_bar_configs,
@@ -2252,10 +2748,24 @@ def main() -> int:
             scorecard_path=state_paths["scorecard"],
             scorecard_lock=state_paths["scorecard_lock"],
         )
+        thinker_memory_context = format_thinker_memory_context(
+            read_thinker_memory(
+                path=state_paths["thinker_memory"],
+                lock_path=state_paths["thinker_memory_lock"],
+                lane_id=lane_id,
+                window_size=3,
+            )
+        )
 
         iteration_no = iterations_done + 1
         print(f"[iteration {iteration_no}/{max_iterations}] running thinker->coder pipeline")
         notebook_summary = _default_notebook_summary(configured=notebooklm_configured)
+        thinker_brief: dict[str, Any] = {}
+        hypothesis_id = f"iter_{iteration_no}"
+        theme_tag = "unknown"
+        chosen_bars: list[str] = []
+        params: dict[str, Any] = {}
+        strategy_name = ""
 
         try:
             thinker_user_prompt = _build_thinker_user_prompt(
@@ -2263,7 +2773,9 @@ def main() -> int:
                 existing_strategies=existing,
                 feedback_items=feedback_items,
                 learning_context=learning_context,
+                thinker_memory_context=thinker_memory_context,
                 feature_surface_context=feature_surface_context,
+                param_feasibility_context=param_feasibility_context,
                 runtime_context=runtime_context,
                 feature_knowledge=feature_knowledge,
             )
@@ -2280,7 +2792,7 @@ def main() -> int:
                     stage_name="quant_thinker",
                     schema_hint=(
                         "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
-                        "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
+                        "entry_conditions, entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                     ),
                     client=thinker_client,
                     system_prompt=_build_thinker_system_prompt(),
@@ -2296,10 +2808,11 @@ def main() -> int:
                 thinker_brief, thinker_generation = _normalize_with_semantic_retry(
                     stage_name="quant_thinker",
                     stage_result=thinker_generation,
-                    normalize_fn=lambda payload: _normalize_thinker_brief(
+                    normalize_fn=lambda payload: _normalize_and_assess_thinker_brief(
                         payload,
                         mission_bar_configs=mission_bar_configs,
                         sample_bar_context=runtime_context.get("sample_bar_context"),
+                        validation_sample_cache=validation_sample_cache,
                     ),
                     client=thinker_client,
                     system_prompt=_build_thinker_system_prompt(),
@@ -2313,8 +2826,8 @@ def main() -> int:
                     quota_backoff_seconds=quota_backoff_seconds,
                     max_backoff_seconds=max_backoff_seconds,
                     schema_hint=(
-                        "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
-                        "entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
+                "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
+                        "entry_conditions, entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                     ),
                 )
             if notebooklm_configured:
@@ -2404,6 +2917,7 @@ def main() -> int:
             )
             module_name = module_path.stem
 
+            validation_report: dict[str, Any] | None = None
             if args.dry_run:
                 validation_errors = []
             else:
@@ -2422,7 +2936,7 @@ def main() -> int:
                     raise RuntimeError(
                         f"Could not reserve unique module path for strategy {strategy_name}",
                     )
-                validation_errors = _validate_generated_strategy(
+                validation_errors, validation_report = _validate_generated_strategy(
                     strategy_name=module_name,
                     signals_dir=signals_dir,
                     params=params,
@@ -2436,7 +2950,13 @@ def main() -> int:
 
             # Inline repair loop: retry coder with injected errors
             _last_coder_generation = coder_generation
-            if validation_errors and not args.dry_run and max_code_repair_attempts > 0:
+            should_repair = _should_attempt_coder_repair(validation_report=validation_report)
+            if (
+                validation_errors
+                and not args.dry_run
+                and max_code_repair_attempts > 0
+                and should_repair
+            ):
                 common_cols = list(feature_knowledge.get("common_columns", []))
                 for repair_attempt in range(max_code_repair_attempts):
                     print(
@@ -2502,7 +3022,7 @@ def main() -> int:
                         _atomic_write_text(module_path, code)
 
                         # Re-validate repaired code
-                        validation_errors = _validate_generated_strategy(
+                        validation_errors, validation_report = _validate_generated_strategy(
                             strategy_name=module_name,
                             signals_dir=signals_dir,
                             params=params,
@@ -2519,10 +3039,32 @@ def main() -> int:
                     except (LLMClientError, ValueError, RuntimeError, OSError) as repair_exc:
                         print(f"  repair call failed: {type(repair_exc).__name__}: {repair_exc}")
                         break
+            elif validation_errors and not args.dry_run and not should_repair:
+                print(
+                    "  skipping coder repair: validation failure is hypothesis-level "
+                    "(use thinker memory to adjust next iteration)"
+                )
 
             if validation_errors:
                 if not args.dry_run and is_new_path and module_path.exists():
                     module_path.unlink()
+                attempt_record = _build_validation_attempt_record(
+                    iteration=iteration_no,
+                    hypothesis_id=hypothesis_id,
+                    theme_tag=theme_tag,
+                    strategy_name=module_name,
+                    bar_configs=chosen_bars,
+                    params=params,
+                    validation_report=validation_report,
+                )
+                if attempt_record is not None:
+                    append_thinker_attempt(
+                        path=state_paths["thinker_memory"],
+                        lock_path=state_paths["thinker_memory_lock"],
+                        lane_id=lane_id,
+                        attempt=attempt_record,
+                        window_size=3,
+                    )
                 log_experiment(
                     {
                         "run_id": run_id,
@@ -2552,6 +3094,7 @@ def main() -> int:
                             "payload_hash": _sha256_text(_last_coder_generation.raw_text),
                         },
                         "notebooklm": notebook_summary,
+                        "validation_report": validation_report,
                     },
                     experiments_path=orchestrator_log_path,
                     lock_path=orchestrator_log_lock,
@@ -2614,6 +3157,20 @@ def main() -> int:
 
                 total_tasks += len(enqueued_task_ids)
                 generated_modules.append(module_name)
+                append_thinker_attempt(
+                    path=state_paths["thinker_memory"],
+                    lock_path=state_paths["thinker_memory_lock"],
+                    lane_id=lane_id,
+                    attempt=_build_success_attempt_record(
+                        iteration=iteration_no,
+                        hypothesis_id=hypothesis_id,
+                        theme_tag=theme_tag,
+                        strategy_name=module_name,
+                        bar_configs=chosen_bars,
+                        params=params,
+                    ),
+                    window_size=3,
+                )
                 log_experiment(
                     {
                         "run_id": run_id,
@@ -2676,6 +3233,20 @@ def main() -> int:
                     orchestrator_state=orchestrator_state,
                     state_paths=state_paths,
                 )
+            append_thinker_attempt(
+                path=state_paths["thinker_memory"],
+                lock_path=state_paths["thinker_memory_lock"],
+                lane_id=lane_id,
+                attempt=_build_exception_attempt_record(
+                    iteration=iteration_no,
+                    hypothesis_id=hypothesis_id,
+                    theme_tag=theme_tag,
+                    bar_configs=chosen_bars,
+                    params=params,
+                    exc=exc,
+                ),
+                window_size=3,
+            )
             log_experiment(
                 {
                     "run_id": run_id,

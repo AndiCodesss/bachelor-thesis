@@ -14,7 +14,7 @@ def _load_module():
     return mod
 
 
-def test_collect_state_files_includes_runtime_scorecard_and_trial_state(tmp_path: Path, monkeypatch):
+def test_collect_state_files_includes_runtime_scorecard_trial_and_thinker_memory(tmp_path: Path, monkeypatch):
     mod = _load_module()
     monkeypatch.setattr(mod, "ROOT", tmp_path)
 
@@ -30,6 +30,9 @@ def test_collect_state_files_includes_runtime_scorecard_and_trial_state(tmp_path
         "trial_count.lock",
         "llm_orchestrator.json",
         "llm_orchestrator_A.json",
+        "llm_orchestrator_A.lock",
+        "thinker_memory_A.json",
+        "thinker_memory_A.lock",
     ):
         (state_dir / rel).write_text("", encoding="utf-8")
 
@@ -41,6 +44,9 @@ def test_collect_state_files_includes_runtime_scorecard_and_trial_state(tmp_path
     assert "research/.state/trial_count.lock" in files
     assert "research/.state/llm_orchestrator.json" in files
     assert "research/.state/llm_orchestrator_A.json" in files
+    assert "research/.state/llm_orchestrator_A.lock" in files
+    assert "research/.state/thinker_memory_A.json" in files
+    assert "research/.state/thinker_memory_A.lock" in files
 
 
 def test_collect_log_files_includes_lane_logs(tmp_path: Path, monkeypatch):

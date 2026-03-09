@@ -52,11 +52,24 @@ Return only one JSON object with these keys:
 - `thesis`
 - `bar_configs`
 - `params_template`
+- `entry_conditions`
 - `entry_logic`
 - `exit_logic`
 - `risk_controls`
 - `anti_lookahead_checks`
 - `validation_focus`
+
+`entry_conditions` must be a machine-checkable list of the core gates that must be true before a signal can fire.
+Use 2-6 conditions total. Each item must contain:
+
+- `feature`
+- `op`
+- `role`
+
+And additionally:
+
+- `param_key` for `>`, `>=`, `<`, `<=`
+- `param_key_low` and `param_key_high` for `between`
 
 Return exactly one concise `theme_tag` in snake_case.
 Reuse a current-focus anchor from the runtime prompt if it fits. If it does not, introduce a new precise tag.
