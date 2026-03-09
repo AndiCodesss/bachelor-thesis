@@ -195,6 +195,24 @@ def test_autonomy_run_rejects_invalid_worker_selection(client: TestClient):
     assert "validator-only" in resp.json()["detail"]
 
 
+def test_build_autonomy_commands_disables_notebooklm_only_for_orchestrators():
+    req = dashboard_main.AutonomyRunRequest(
+        mission="configs/missions/alpha-discovery.yaml",
+        agent_config="configs/agents/llm_orchestrator.yaml",
+        use_notebooklm=False,
+        lane_count=2,
+    )
+
+    commands = dashboard_main._build_autonomy_commands(req)
+
+    assert commands[0]["name"] == "Validator"
+    assert "--disable-notebooklm" not in commands[0]["cmd"]
+    assert commands[1]["name"] == "Orchestrator-A"
+    assert commands[2]["name"] == "Orchestrator-B"
+    assert commands[1]["cmd"][-1] == "--disable-notebooklm"
+    assert commands[2]["cmd"][-1] == "--disable-notebooklm"
+
+
 def test_stop_run_uses_tree_termination_for_single_process(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):

@@ -1430,7 +1430,7 @@ def _validate_generated_strategy(
                     f"{strategy_name}: signal_rate={rate_pct:.2f}% for {bar_config} ({sample_label}) "
                     f"({nonzero}/{total} bars non-zero — target 0.05–0.3%). "
                     + (f"{condition_diag}\n" if condition_diag else "")
-                    + f"Tighten the loosest entry filter(s) to avoid cost destruction."
+                    + "Tighten the loosest entry filter(s) to avoid cost destruction."
                 )
 
     return errors
@@ -1443,6 +1443,20 @@ def _build_thinker_system_prompt() -> str:
         "Treat the runtime mission context in the user prompt as the source of truth for split, session filter,\n"
         "thresholds, and allowed bar configs. Return only the required JSON object."
     )
+
+
+def _disable_notebooklm_runtime_mission(mission: dict[str, Any]) -> dict[str, Any]:
+    runtime_mission = dict(mission)
+    runtime_mission.pop("notebooklm", None)
+    runtime_mission["notebooklm_disabled_for_run"] = True
+    runtime_mission["notebooklm_notebook_url"] = ""
+    runtime_mission["notebook_research_guidance"] = ""
+    runtime_mission["lane_notebook_query_budget"] = {
+        "max_total_queries": 0,
+        "max_research_queries": 0,
+        "max_deep_research_queries": 0,
+    }
+    return runtime_mission
 
 
 def _build_thinker_user_prompt(
@@ -1532,6 +1546,11 @@ def _build_thinker_user_prompt(
                 "\nNotebookLM research guidance:\n"
                 f"- {notebook_research_guidance}"
             )
+    elif bool(mission.get("notebooklm_disabled_for_run", False)):
+        prompt += (
+            "\n\nNotebookLM is disabled for this run. Use your built-in knowledge plus the provided runtime, "
+            "feature-surface, and feature-catalog context only."
+        )
     if feature_knowledge:
         prompt += (
             "\n\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
@@ -1944,6 +1963,11 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Generate and validate only; do not write files/tasks.")
     parser.add_argument("--lane", type=str, default=None, help="Lane ID (e.g. A, B, C) for parallel execution. Namespaces state and log files.")
+    parser.add_argument(
+        "--disable-notebooklm",
+        action="store_true",
+        help="Disable NotebookLM for this orchestrator run and rely only on built-in model knowledge.",
+    )
     args = parser.parse_args()
     if args.resume and args.fresh_state:
         parser.error("Use at most one of --resume or --fresh-state.")
@@ -1963,22 +1987,27 @@ def main() -> int:
         raise FileNotFoundError(f"Agent config file not found: {agent_cfg_path}")
 
     mission = _load_yaml(mission_path)
+    runtime_mission = (
+        _disable_notebooklm_runtime_mission(mission)
+        if bool(args.disable_notebooklm)
+        else dict(mission)
+    )
     agent_cfg = _load_yaml(agent_cfg_path)
-    mission_name = str(mission.get("mission_name", mission_path.stem))
-    bar_configs_raw = mission.get("bar_configs", ["tick_610"])
+    mission_name = str(runtime_mission.get("mission_name", mission_path.stem))
+    bar_configs_raw = runtime_mission.get("bar_configs", ["tick_610"])
     mission_bar_configs = [str(v) for v in bar_configs_raw] if isinstance(bar_configs_raw, list) else ["tick_610"]
     if not mission_bar_configs:
         raise ValueError("mission.bar_configs cannot be empty")
 
-    split_plan = resolve_research_splits(mission)
+    split_plan = resolve_research_splits(runtime_mission)
     search_split = str(split_plan["search_split"])
     selection_split = (
         str(split_plan["selection_split"])
         if split_plan["selection_split"] is not None
         else None
     )
-    session_filter = str(mission.get("session_filter", "eth")).lower()
-    feature_group = str(mission.get("feature_group", "all")).lower()
+    session_filter = str(runtime_mission.get("session_filter", "eth")).lower()
+    feature_group = str(runtime_mission.get("feature_group", "all")).lower()
 
     state_mode = _state_mode(fresh_state=bool(args.fresh_state))
     shared_paths = ensure_shared_state(root, mission_name=mission_name)
@@ -2082,13 +2111,22 @@ def main() -> int:
     run_id = f"llm_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{_slug(mission_name)}{log_suffix}"
     start_monotonic = time.monotonic()
 
-    notebook_bootstrap = ensure_lane_notebook(
-        mission=mission,
-        lane_id=lane_id,
-        state_payload=orchestrator_state,
-        run_id=run_id,
+    notebook_bootstrap = (
+        ensure_lane_notebook(
+            mission=runtime_mission,
+            lane_id=lane_id,
+            state_payload=orchestrator_state,
+            run_id=run_id,
+        )
+        if not args.disable_notebooklm
+        else {
+            "configured": False,
+            "mode": "disabled",
+            "notebook": None,
+            "mission_overrides": {},
+        }
     )
-    active_mission = dict(mission)
+    active_mission = dict(runtime_mission)
     active_mission.update(dict(notebook_bootstrap.get("mission_overrides", {})))
     notebook_research_guidance = str(active_mission.get("notebook_research_guidance", "")).strip()
     notebook_query_budget = _resolve_notebook_query_budget(active_mission)
@@ -2179,6 +2217,8 @@ def main() -> int:
             f"seeded={bool(notebook_meta.get('seeded', False))} "
             f"imported_sources={notebook_meta.get('imported_sources', 0)}",
         )
+    elif bool(args.disable_notebooklm):
+        print("notebooklm=disabled")
     print(f"state_mode={state_mode}")
     print(f"max_iterations={max_iterations} dry_run={bool(args.dry_run)}")
 

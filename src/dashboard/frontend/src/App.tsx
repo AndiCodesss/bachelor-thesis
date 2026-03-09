@@ -125,6 +125,7 @@ export default function App() {
   const [aAgent, setAAgent] = useState('configs/agents/llm_orchestrator.yaml')
   const [aNoResume, setANoResume] = useState(false)
   const [aAllowBootstrap, setAAllowBootstrap] = useState(false)
+  const [aUseNotebookLM, setAUseNotebookLM] = useState(true)
   const [aValidatorOnly, setAValidatorOnly] = useState(false)
   const [aOrchestratorOnly, setAOrchestratorOnly] = useState(false)
   const [aLaneCount, setALaneCount] = useState(2)
@@ -261,7 +262,8 @@ export default function App() {
 
   const startAutonomy = () => triggerRun('autonomy', {
     mission: aMission, agent_config: aAgent, no_resume: aNoResume,
-    allow_bootstrap: aAllowBootstrap, validator_only: aValidatorOnly, orchestrator_only: aOrchestratorOnly,
+    allow_bootstrap: aAllowBootstrap, use_notebooklm: aUseNotebookLM,
+    validator_only: aValidatorOnly, orchestrator_only: aOrchestratorOnly,
     lane_count: aLaneCount
   })
 
@@ -493,6 +495,9 @@ export default function App() {
                   </label>
                   <label className={`checkbox-label ${aAllowBootstrap ? 'active' : ''}`}>
                     <input type="checkbox" checked={aAllowBootstrap} onChange={e => setAAllowBootstrap(e.target.checked)}/> Allow Bootstrap
+                  </label>
+                  <label className={`checkbox-label ${aUseNotebookLM ? 'active' : ''}`}>
+                    <input type="checkbox" checked={aUseNotebookLM} onChange={e => setAUseNotebookLM(e.target.checked)}/> Use NotebookLM Research
                   </label>
                 </div>
               </div>

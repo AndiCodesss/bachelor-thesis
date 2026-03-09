@@ -542,6 +542,39 @@ def test_thinker_user_prompt_omits_notebook_command_when_no_url():
     assert "query_notebook.py" not in prompt
 
 
+def test_disable_notebooklm_runtime_mission_removes_notebook_context():
+    mod = _load_module()
+    runtime_mission = mod._disable_notebooklm_runtime_mission(
+        {
+            "objective": "x",
+            "bar_configs": ["tick_610"],
+            "notebooklm": {"mode": "lane_fresh"},
+            "notebooklm_notebook_url": "https://notebooklm.google.com/notebook/test-id",
+            "notebook_research_guidance": "Use trusted sources.",
+            "lane_notebook_query_budget": {
+                "max_total_queries": 3,
+                "max_research_queries": 1,
+                "max_deep_research_queries": 0,
+            },
+        }
+    )
+    assert "notebooklm" not in runtime_mission
+    assert runtime_mission["notebooklm_notebook_url"] == ""
+    assert runtime_mission["notebook_research_guidance"] == ""
+    assert runtime_mission["lane_notebook_query_budget"] == {
+        "max_total_queries": 0,
+        "max_research_queries": 0,
+        "max_deep_research_queries": 0,
+    }
+    prompt = mod._build_thinker_user_prompt(
+        mission=runtime_mission,
+        existing_strategies=[],
+        feedback_items=[],
+    )
+    assert "KNOWLEDGE_BASE_COMMAND" not in prompt
+    assert "NotebookLM is disabled for this run." in prompt
+
+
 def test_resolve_notebook_query_budget_defaults_to_bounded_runtime_policy():
     mod = _load_module()
     assert mod._resolve_notebook_query_budget({}) == {

@@ -45,6 +45,7 @@ class AutonomyRunRequest(BaseModel):
     agent_config: str = "configs/agents/llm_orchestrator.yaml"
     no_resume: bool = False
     allow_bootstrap: bool = False
+    use_notebooklm: bool = True
     validator_only: bool = False
     orchestrator_only: bool = False
     lane_count: int = Field(default=2, ge=1, le=10)
@@ -594,9 +595,8 @@ async def start_cache_run(req: CacheRunRequest):
 async def start_autonomy_run(req: AutonomyRunRequest):
     run_id = f"autonomy-{uuid.uuid4().hex[:8]}"
 
-    commands = []
+    commands = _build_autonomy_commands(req)
     fresh_state = bool(req.no_resume)
-    state_flag = ["--resume"]
 
     if req.validator_only and req.orchestrator_only:
         raise HTTPException(status_code=400, detail="Cannot request validator-only and orchestrator-only at the same time.")
@@ -607,8 +607,30 @@ async def start_autonomy_run(req: AutonomyRunRequest):
         mission_name = _load_mission_name(req.mission)
         _reset_runtime_state(mission_name)
 
+    if not commands:
+        raise HTTPException(status_code=400, detail="No autonomy workers selected.")
+
+    runs[run_id] = {"logs": [], "status": "running", "cmd": f"Directly running {len(commands)} background processes", "type": "autonomy"}
+    asyncio.create_task(direct_run_autonomy(run_id, commands))
+    return {"run_id": run_id, "status": "started", "cmd": runs[run_id]["cmd"]}
+
+
+def _build_autonomy_commands(req: AutonomyRunRequest) -> list[dict[str, list[str] | str]]:
+    commands: list[dict[str, list[str] | str]] = []
+    state_flag = ["--resume"]
+
     if not req.orchestrator_only:
-        val_cmd = [sys.executable, "-u", "scripts/research.py", "--mission", req.mission, "--auto-mode", "--worker-agent", "validator"] + state_flag
+        val_cmd = [
+            sys.executable,
+            "-u",
+            "scripts/research.py",
+            "--mission",
+            req.mission,
+            "--auto-mode",
+            "--worker-agent",
+            "validator",
+            *state_flag,
+        ]
         if not req.allow_bootstrap:
             val_cmd.append("--no-bootstrap")
         commands.append({"name": "Validator", "cmd": val_cmd})
@@ -616,16 +638,24 @@ async def start_autonomy_run(req: AutonomyRunRequest):
     if not req.validator_only:
         lane_count = max(1, min(10, req.lane_count))
         for i in range(lane_count):
-            lane_letter = chr(ord('A') + i)
-            orch_cmd = [sys.executable, "-u", "scripts/llm_orchestrator.py", "--mission", req.mission, "--agent-config", req.agent_config, "--lane", lane_letter] + state_flag
+            lane_letter = chr(ord("A") + i)
+            orch_cmd = [
+                sys.executable,
+                "-u",
+                "scripts/llm_orchestrator.py",
+                "--mission",
+                req.mission,
+                "--agent-config",
+                req.agent_config,
+                "--lane",
+                lane_letter,
+                *state_flag,
+            ]
+            if not req.use_notebooklm:
+                orch_cmd.append("--disable-notebooklm")
             commands.append({"name": f"Orchestrator-{lane_letter}", "cmd": orch_cmd})
 
-    if not commands:
-        raise HTTPException(status_code=400, detail="No autonomy workers selected.")
-
-    runs[run_id] = {"logs": [], "status": "running", "cmd": f"Directly running {len(commands)} background processes", "type": "autonomy"}
-    asyncio.create_task(direct_run_autonomy(run_id, commands))
-    return {"run_id": run_id, "status": "started", "cmd": runs[run_id]["cmd"]}
+    return commands
 
 @app.post("/api/run/cleanup")
 async def start_cleanup_run(req: CleanupRunRequest):
