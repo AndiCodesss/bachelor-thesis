@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from research.lib.thinker_memory import (
     append_thinker_attempt,
     format_thinker_memory_context,
@@ -63,3 +65,43 @@ def test_format_thinker_memory_context_is_compact_and_includes_params():
     assert "[iter 4] vol_compression -> REJECTED (zero_signal): 0/523 bars on tick_610." in text
     assert "Blocking: squeeze_score > 0.5 (0.0% pass)" in text
     assert "Params: squeeze_threshold=0.5" in text
+
+
+def test_append_thinker_attempt_strips_private_fields_and_numpy_values(tmp_path: Path):
+    path = tmp_path / "thinker_memory_B.json"
+    lock_path = tmp_path / "thinker_memory_B.lock"
+
+    append_thinker_attempt(
+        path=path,
+        lock_path=lock_path,
+        lane_id="B",
+        attempt={
+            "iteration": 1,
+            "theme_tag": "amt_value_area",
+            "status_label": "REJECTED (zero_signal)",
+            "summary": "0/5609 bars on tick_610.",
+            "_debug_mask": np.array([True, False, True]),
+            "highlighted_conditions": [
+                {
+                    "column": "high_low_vol_ratio",
+                    "operator": ">=",
+                    "threshold": np.float64(0.25),
+                    "pass_rate_pct": np.float64(0.0),
+                    "_mask": np.array([False, False, False]),
+                }
+            ],
+        },
+        window_size=3,
+    )
+
+    payload = read_thinker_memory(
+        path=path,
+        lock_path=lock_path,
+        lane_id="B",
+        window_size=3,
+    )
+    row = payload["recent_attempts"][0]
+    assert "_debug_mask" not in row
+    assert row["highlighted_conditions"][0]["threshold"] == 0.25
+    assert row["highlighted_conditions"][0]["pass_rate_pct"] == 0.0
+    assert "_mask" not in row["highlighted_conditions"][0]

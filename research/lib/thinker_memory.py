@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import portalocker
 
 from research.lib.atomic_io import atomic_json_write
@@ -58,11 +59,29 @@ def append_thinker_attempt(
         window_size=window_size,
     )
     attempts = list(payload.get("recent_attempts", []))
-    attempts.append(dict(attempt))
+    attempts.append(_sanitize_for_storage(dict(attempt)))
     payload["recent_attempts"] = attempts[-max(1, int(payload.get("window_size", window_size))):]
     with portalocker.Lock(lock_path, mode="a", timeout=5):
         atomic_json_write(path, payload)
     return payload
+
+
+def _sanitize_for_storage(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text.startswith("_"):
+                continue
+            out[key_text] = _sanitize_for_storage(item)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_storage(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def format_thinker_memory_context(

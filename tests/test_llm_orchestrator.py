@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -1228,6 +1229,45 @@ def test_build_validation_attempt_record_captures_blocking_conditions_and_params
     assert record["offending_params"] == {"squeeze_threshold": 0.5}
 
 
+def test_build_validation_attempt_record_strips_internal_condition_payload():
+    mod = _load_module()
+    record = mod._build_validation_attempt_record(
+        iteration=5,
+        hypothesis_id="h005",
+        theme_tag="amt_value_area",
+        strategy_name="va_rejection",
+        bar_configs=["tick_610"],
+        params={"vol_ratio_min": 1.2},
+        validation_report={
+            "bar_results": [
+                {
+                    "status": "zero_signal",
+                    "bar_config": "tick_610",
+                    "sample_label": "sample_day",
+                    "nonzero": 0,
+                    "total": 100,
+                    "signal_rate_pct": 0.0,
+                    "condition_rows": [
+                        {
+                            "column": "volume_ratio",
+                            "operator": ">=",
+                            "param_key": "vol_ratio_min",
+                            "threshold": np.float64(1.2),
+                            "pass_rate_pct": np.float64(0.0),
+                            "severity": "blocks_all",
+                            "_mask": np.array([False, False, False]),
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert record is not None
+    assert record["highlighted_conditions"][0]["threshold"] == 1.2
+    assert record["highlighted_conditions"][0]["pass_rate_pct"] == 0.0
+    assert "_mask" not in record["highlighted_conditions"][0]
+
+
 def test_build_exception_attempt_record_captures_invalid_risk_floor_params():
     mod = _load_module()
     record = mod._build_exception_attempt_record(
@@ -1262,9 +1302,10 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
                             "column": "prev_day_va_position",
                             "operator": ">",
                             "param_key": "va_pos_min",
-                            "threshold": "1.2",
+                            "threshold": np.float64(1.2),
                             "severity": "dead_feature",
-                            "pass_rate_pct": 0.0,
+                            "pass_rate_pct": np.float64(0.0),
+                            "_mask": np.array([False, False, False]),
                         }
                     ],
                 }
@@ -1288,6 +1329,7 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
     assert record["failure_type"] == "dead_feature_primary"
     assert record["bar_config"] == "tick_610"
     assert record["offending_params"] == {"va_pos_min": 1.2}
+    assert "_mask" not in record["highlighted_conditions"][0]
 
 
 def test_should_attempt_coder_repair_skips_hypothesis_level_failures():

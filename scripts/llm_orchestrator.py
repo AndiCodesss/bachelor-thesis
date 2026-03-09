@@ -839,13 +839,37 @@ def _format_attempt_params(params: dict[str, Any], keys: list[str]) -> dict[str,
     return out
 
 
+def _sanitize_attempt_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text.startswith("_"):
+                continue
+            out[key_text] = _sanitize_attempt_value(item)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_attempt_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def _select_highlighted_conditions(
     *,
     condition_rows: list[dict[str, Any]],
     failure_type: str,
     max_items: int = 2,
 ) -> tuple[str, list[dict[str, Any]]]:
-    rows = [dict(row) for row in condition_rows if isinstance(row, dict)]
+    rows = [
+        sanitized
+        for row in condition_rows
+        if isinstance(row, dict)
+        for sanitized in [_sanitize_attempt_value(row)]
+        if isinstance(sanitized, dict)
+    ]
     if not rows:
         return "", []
 

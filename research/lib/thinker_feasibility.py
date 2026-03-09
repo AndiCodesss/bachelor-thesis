@@ -217,6 +217,19 @@ def _evaluate_condition(
     return row
 
 
+def _public_condition_row(row: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in row.items():
+        key_text = str(key)
+        if key_text.startswith("_"):
+            continue
+        if isinstance(value, np.generic):
+            out[key_text] = value.item()
+        else:
+            out[key_text] = value
+    return out
+
+
 def _format_condition_line(row: dict[str, Any]) -> str:
     column = str(row.get("column", "?"))
     operator = str(row.get("operator", "?"))
@@ -281,6 +294,7 @@ def assess_entry_condition_feasibility(
         labels = [str(label) for label, _ in samples[:3]]
         sample_label = ", ".join(labels)
         rows = [_evaluate_condition(df=combined, condition=condition, params_template=params_template) for condition in entry_conditions]
+        public_rows = [_public_condition_row(row) for row in rows]
         total_count = len(combined)
         combined_mask = _combined_mask(rows, total_count)
         combined_count = int(np.sum(combined_mask))
@@ -307,7 +321,7 @@ def assess_entry_condition_feasibility(
                     "nonzero": 0,
                     "total": total_count,
                     "signal_rate_pct": 0.0,
-                    "condition_rows": rows,
+                    "condition_rows": public_rows,
                 }
             )
             continue
@@ -321,7 +335,7 @@ def assess_entry_condition_feasibility(
                     "nonzero": 0,
                     "total": total_count,
                     "signal_rate_pct": 0.0,
-                    "condition_rows": rows,
+                    "condition_rows": public_rows,
                 }
             )
             continue
@@ -335,7 +349,7 @@ def assess_entry_condition_feasibility(
                     "nonzero": combined_count,
                     "total": total_count,
                     "signal_rate_pct": combined_rate_pct,
-                    "condition_rows": rows,
+                    "condition_rows": public_rows,
                 }
             )
             continue
@@ -348,7 +362,7 @@ def assess_entry_condition_feasibility(
                 "nonzero": combined_count,
                 "total": total_count,
                 "signal_rate_pct": combined_rate_pct,
-                "condition_rows": rows,
+                "condition_rows": public_rows,
             }
         )
 

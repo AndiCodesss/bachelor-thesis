@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import polars as pl
 import pytest
 
@@ -61,6 +63,8 @@ def test_assess_entry_condition_feasibility_detects_zero_signal_combination():
         },
     )
     assert report["bar_results"][0]["status"] == "zero_signal"
+    assert "_mask" not in report["bar_results"][0]["condition_rows"][0]
+    json.dumps(report)
     assert "Combined entry_conditions pass-through is 0/4 bars" in format_feasibility_error(report)
 
 
