@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -9,6 +10,7 @@ _EPSILON = 1e-12
 _SUPPORTED_OPS = {">", ">=", "<", "<=", "between", "bool_true", "bool_false"}
 _SUPPORTED_ROLES = {"primary", "confirmation"}
 _MAX_CONDITIONS = 6
+_PROTECTED_PARAM_PREFIXES = ("sl_ticks", "pt_ticks")
 
 
 class ThinkerFeasibilityError(ValueError):
@@ -205,9 +207,11 @@ def _evaluate_condition(
         "pass_rate_pct": float(pass_rate_pct),
         "severity": severity,
         "threshold": _condition_threshold_blob(condition, params_template),
+        "p02": float(np.quantile(finite_values, 0.02)),
         "p10": float(np.quantile(finite_values, 0.10)),
         "p50": float(np.quantile(finite_values, 0.50)),
         "p90": float(np.quantile(finite_values, 0.90)),
+        "p98": float(np.quantile(finite_values, 0.98)),
         "is_binary_like": _is_binary_like(finite_values),
         "_mask": mask,
     }
@@ -369,6 +373,376 @@ def assess_entry_condition_feasibility(
     return report
 
 
+def _is_protected_param_key(param_key: str) -> bool:
+    key = str(param_key).strip()
+    return any(key.startswith(prefix) for prefix in _PROTECTED_PARAM_PREFIXES)
+
+
+def _clone_brief(brief: dict[str, Any]) -> dict[str, Any]:
+    return deepcopy(brief)
+
+
+def _find_condition_index(
+    entry_conditions: list[dict[str, Any]],
+    *,
+    row: dict[str, Any],
+) -> int | None:
+    column = str(row.get("column", "")).strip()
+    operator = str(row.get("operator", "")).strip()
+    role = str(row.get("role", "primary")).strip() or "primary"
+    param_key = str(row.get("param_key", "")).strip()
+    param_key_low = str(row.get("param_key_low", "")).strip()
+    param_key_high = str(row.get("param_key_high", "")).strip()
+    for idx, condition in enumerate(entry_conditions):
+        if not isinstance(condition, dict):
+            continue
+        if str(condition.get("feature", "")).strip() != column:
+            continue
+        if str(condition.get("op", "")).strip() != operator:
+            continue
+        if str(condition.get("role", "primary")).strip() != role:
+            continue
+        if operator == "between":
+            if (
+                str(condition.get("param_key_low", "")).strip() == param_key_low
+                and str(condition.get("param_key_high", "")).strip() == param_key_high
+            ):
+                return idx
+            continue
+        if str(condition.get("param_key", "")).strip() == param_key:
+            return idx
+    return None
+
+
+def _count_primary_conditions(entry_conditions: list[dict[str, Any]], *, skip_idx: int | None = None) -> int:
+    count = 0
+    for idx, condition in enumerate(entry_conditions):
+        if idx == skip_idx or not isinstance(condition, dict):
+            continue
+        if str(condition.get("role", "primary")).strip() == "primary":
+            count += 1
+    return count
+
+
+def _candidate_confirmation_to_promote(
+    entry_conditions: list[dict[str, Any]],
+    *,
+    condition_rows: list[dict[str, Any]],
+    skip_idx: int | None = None,
+) -> int | None:
+    for row in condition_rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("role", "")).strip() != "confirmation":
+            continue
+        if str(row.get("severity", "")).strip() == "dead_feature":
+            continue
+        idx = _find_condition_index(entry_conditions, row=row)
+        if idx is None or idx == skip_idx:
+            continue
+        return idx
+    return None
+
+
+def _drop_condition(
+    brief: dict[str, Any],
+    *,
+    row: dict[str, Any],
+    condition_rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str | None]:
+    entry_conditions = brief.get("entry_conditions")
+    if not isinstance(entry_conditions, list):
+        return None, None
+
+    idx = _find_condition_index(entry_conditions, row=row)
+    if idx is None:
+        return None, None
+
+    role = str(row.get("role", "primary")).strip() or "primary"
+    repaired = _clone_brief(brief)
+    repaired_conditions = list(repaired.get("entry_conditions", []))
+    if len(repaired_conditions) <= 1:
+        return None, None
+    if role == "primary" and _count_primary_conditions(repaired_conditions, skip_idx=idx) == 0:
+        promote_idx = _candidate_confirmation_to_promote(
+            repaired_conditions,
+            condition_rows=condition_rows,
+            skip_idx=idx,
+        )
+        if promote_idx is None:
+            return None, None
+        promoted = dict(repaired_conditions[promote_idx])
+        promoted["role"] = "primary"
+        repaired_conditions[promote_idx] = promoted
+
+    removed = repaired_conditions.pop(idx)
+    repaired["entry_conditions"] = repaired_conditions
+    column = str(removed.get("feature", row.get("column", "?")))
+    action = f"dropped {role} condition {column} {row.get('operator', '?')}"
+    return repaired, action
+
+
+def _round_param_value(value: float) -> float:
+    return float(np.round(float(value), 6))
+
+
+def _loosen_upper_bound(current: float, *, p10: float, p50: float, p90: float) -> float | None:
+    for candidate in (p90, p50, p10):
+        if np.isfinite(candidate) and candidate < current - _EPSILON:
+            return _round_param_value(candidate)
+    return None
+
+
+def _tighten_upper_bound(
+    current: float,
+    *,
+    p90: float,
+    p98: float,
+    inclusive: bool,
+) -> float | None:
+    if not (np.isfinite(current) and np.isfinite(p90) and np.isfinite(p98)):
+        return None
+    candidate = p98
+    if candidate <= current + _EPSILON:
+        spread = max(float(p98 - p90) * 0.25, abs(float(p98)) * 0.02, 1e-6)
+        candidate = current + spread
+    if inclusive:
+        candidate = np.nextafter(candidate, np.inf)
+    if candidate <= current + _EPSILON:
+        return None
+    return _round_param_value(candidate)
+
+
+def _loosen_lower_bound(current: float, *, p10: float, p50: float, p90: float) -> float | None:
+    for candidate in (p10, p50, p90):
+        if np.isfinite(candidate) and candidate > current + _EPSILON:
+            return _round_param_value(candidate)
+    return None
+
+
+def _tighten_lower_bound(
+    current: float,
+    *,
+    p02: float,
+    p10: float,
+    inclusive: bool,
+) -> float | None:
+    if not (np.isfinite(current) and np.isfinite(p02) and np.isfinite(p10)):
+        return None
+    candidate = p02
+    if candidate >= current - _EPSILON:
+        spread = max(float(p10 - p02) * 0.25, abs(float(p02)) * 0.02, 1e-6)
+        candidate = current - spread
+    if inclusive:
+        candidate = np.nextafter(candidate, -np.inf)
+    if candidate >= current - _EPSILON:
+        return None
+    return _round_param_value(candidate)
+
+
+def _repair_scalar_param(
+    brief: dict[str, Any],
+    *,
+    row: dict[str, Any],
+    failure_type: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    param_key = str(row.get("param_key", "")).strip()
+    if not param_key or _is_protected_param_key(param_key):
+        return None, None
+
+    params_template = brief.get("params_template")
+    if not isinstance(params_template, dict):
+        return None, None
+
+    current_raw = params_template.get(param_key)
+    if not isinstance(current_raw, (int, float)):
+        return None, None
+    current = float(current_raw)
+
+    operator = str(row.get("operator", "")).strip()
+    p02 = float(row.get("p02", np.nan))
+    p10 = float(row.get("p10", np.nan))
+    p50 = float(row.get("p50", np.nan))
+    p90 = float(row.get("p90", np.nan))
+    p98 = float(row.get("p98", np.nan))
+
+    candidate: float | None = None
+    if failure_type == "zero_signal":
+        if operator in {">", ">="}:
+            candidate = _loosen_upper_bound(current, p10=p10, p50=p50, p90=p90)
+        elif operator in {"<", "<="}:
+            candidate = _loosen_lower_bound(current, p10=p10, p50=p50, p90=p90)
+    elif failure_type == "over_signal":
+        if operator == ">":
+            candidate = _tighten_upper_bound(current, p90=p90, p98=p98, inclusive=False)
+        elif operator == ">=":
+            candidate = _tighten_upper_bound(current, p90=p90, p98=p98, inclusive=True)
+        elif operator == "<":
+            candidate = _tighten_lower_bound(current, p02=p02, p10=p10, inclusive=False)
+        elif operator == "<=":
+            candidate = _tighten_lower_bound(current, p02=p02, p10=p10, inclusive=True)
+
+    if candidate is None or abs(candidate - current) <= _EPSILON:
+        return None, None
+
+    repaired = _clone_brief(brief)
+    repaired_params = dict(repaired.get("params_template", {}))
+    repaired_params[param_key] = candidate
+    repaired["params_template"] = repaired_params
+    action = f"set {param_key}={candidate} for {row.get('column', '?')} {operator}"
+    return repaired, action
+
+
+def _repair_between_param(
+    brief: dict[str, Any],
+    *,
+    row: dict[str, Any],
+    failure_type: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    low_key = str(row.get("param_key_low", "")).strip()
+    high_key = str(row.get("param_key_high", "")).strip()
+    if not low_key or not high_key:
+        return None, None
+    if _is_protected_param_key(low_key) or _is_protected_param_key(high_key):
+        return None, None
+
+    params_template = brief.get("params_template")
+    if not isinstance(params_template, dict):
+        return None, None
+    current_low = params_template.get(low_key)
+    current_high = params_template.get(high_key)
+    if not isinstance(current_low, (int, float)) or not isinstance(current_high, (int, float)):
+        return None, None
+
+    p10 = float(row.get("p10", np.nan))
+    p50 = float(row.get("p50", np.nan))
+    p90 = float(row.get("p90", np.nan))
+    if not (np.isfinite(p10) and np.isfinite(p50) and np.isfinite(p90)):
+        return None, None
+
+    if failure_type == "zero_signal":
+        new_low = min(float(current_low), p10)
+        new_high = max(float(current_high), p90)
+    elif failure_type == "over_signal":
+        new_low = max(float(current_low), (p10 + p50) / 2.0)
+        new_high = min(float(current_high), (p50 + p90) / 2.0)
+        if new_low >= new_high:
+            center = p50
+            half_width = max((p90 - p10) / 8.0, 1e-6)
+            new_low = center - half_width
+            new_high = center + half_width
+    else:
+        return None, None
+
+    new_low = _round_param_value(new_low)
+    new_high = _round_param_value(new_high)
+    if new_low >= new_high:
+        return None, None
+    if (
+        abs(new_low - float(current_low)) <= _EPSILON
+        and abs(new_high - float(current_high)) <= _EPSILON
+    ):
+        return None, None
+
+    repaired = _clone_brief(brief)
+    repaired_params = dict(repaired.get("params_template", {}))
+    repaired_params[low_key] = new_low
+    repaired_params[high_key] = new_high
+    repaired["params_template"] = repaired_params
+    action = f"set [{low_key}, {high_key}]=[{new_low}, {new_high}] for {row.get('column', '?')} between"
+    return repaired, action
+
+
+def _repair_condition_row(
+    brief: dict[str, Any],
+    *,
+    row: dict[str, Any],
+    condition_rows: list[dict[str, Any]],
+    failure_type: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    operator = str(row.get("operator", "")).strip()
+    severity = str(row.get("severity", "")).strip()
+    role = str(row.get("role", "primary")).strip() or "primary"
+
+    if severity == "dead_feature":
+        if role == "confirmation":
+            return _drop_condition(brief, row=row, condition_rows=condition_rows)
+        return _drop_condition(brief, row=row, condition_rows=condition_rows)
+
+    if operator == "between":
+        repaired, action = _repair_between_param(brief, row=row, failure_type=failure_type)
+        if repaired is not None:
+            return repaired, action
+    elif operator in {">", ">=", "<", "<="}:
+        repaired, action = _repair_scalar_param(brief, row=row, failure_type=failure_type)
+        if repaired is not None:
+            return repaired, action
+
+    if failure_type == "zero_signal" and role == "confirmation":
+        return _drop_condition(brief, row=row, condition_rows=condition_rows)
+    return None, None
+
+
+def repair_thinker_brief_for_feasibility(
+    brief: dict[str, Any],
+    report: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    if not isinstance(brief, dict) or not isinstance(report, dict):
+        return None, []
+
+    bar_results = report.get("bar_results")
+    if not isinstance(bar_results, list):
+        return None, []
+
+    relevant = next(
+        (
+            row
+            for row in bar_results
+            if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
+        ),
+        None,
+    )
+    if not isinstance(relevant, dict):
+        return None, []
+
+    failure_type = str(relevant.get("status", "runtime_error")).strip() or "runtime_error"
+    condition_rows = relevant.get("condition_rows") if isinstance(relevant.get("condition_rows"), list) else []
+    if not condition_rows:
+        return None, []
+
+    if failure_type == "over_signal":
+        ranked_rows = sorted(
+            (row for row in condition_rows if isinstance(row, dict)),
+            key=lambda row: (
+                0 if str(row.get("role", "")).strip() == "primary" else 1,
+                -float(row.get("pass_rate_pct", 0.0) or 0.0),
+                str(row.get("param_key", "")),
+            ),
+        )
+    else:
+        ranked_rows = sorted(
+            (row for row in condition_rows if isinstance(row, dict)),
+            key=lambda row: (
+                0 if str(row.get("severity", "")).strip() in {"dead_feature", "blocks_all"} else 1,
+                0 if str(row.get("role", "")).strip() == "confirmation" else 1,
+                float(row.get("pass_rate_pct", 0.0) or 0.0),
+                str(row.get("param_key", "")),
+            ),
+        )
+
+    for row in ranked_rows:
+        repaired, action = _repair_condition_row(
+            brief,
+            row=row,
+            condition_rows=condition_rows,
+            failure_type=failure_type,
+        )
+        if repaired is not None and action:
+            return repaired, [action]
+
+    return None, []
+
+
 def format_feasibility_error(report: dict[str, Any]) -> str:
     bar_results = report.get("bar_results") if isinstance(report, dict) else None
     if not isinstance(bar_results, list) or not bar_results:
@@ -425,4 +799,5 @@ __all__ = [
     "assess_entry_condition_feasibility",
     "format_feasibility_error",
     "normalize_entry_conditions",
+    "repair_thinker_brief_for_feasibility",
 ]

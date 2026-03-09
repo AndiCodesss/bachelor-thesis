@@ -1077,6 +1077,76 @@ def test_normalize_and_assess_thinker_brief_accepts_feasible_conditions():
     assert out["entry_conditions"][0]["feature"] == "volume_ratio"
 
 
+def test_normalize_and_assess_thinker_brief_auto_repairs_zero_signal_threshold():
+    mod = _load_module()
+    out = mod._normalize_and_assess_thinker_brief(
+        {
+            "hypothesis_id": "auto_repair_zero_signal",
+            "theme_tag": "amt_value_area",
+            "strategy_name_hint": "auto_repair_zero_signal",
+            "bar_configs": ["tick_610"],
+            "params_template": {"vol_ratio_min": 2.0, "pt_ticks": 40, "sl_ticks": 20},
+            "entry_conditions": [
+                {
+                    "feature": "volume_ratio",
+                    "op": ">",
+                    "param_key": "vol_ratio_min",
+                    "role": "primary",
+                }
+            ],
+            "thesis": "x",
+            "entry_logic": "y",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610"],
+        sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
+        validation_sample_cache={
+            "tick_610": [
+                (
+                    "sample_day",
+                    pl.DataFrame({"volume_ratio": [1.0] * 98 + [1.2, 1.3]}),
+                )
+            ]
+        },
+    )
+    assert out["params_template"]["vol_ratio_min"] < 2.0
+
+
+def test_normalize_and_assess_thinker_brief_auto_repairs_over_signal_threshold():
+    mod = _load_module()
+    out = mod._normalize_and_assess_thinker_brief(
+        {
+            "hypothesis_id": "auto_repair_over_signal",
+            "theme_tag": "amt_value_area",
+            "strategy_name_hint": "auto_repair_over_signal",
+            "bar_configs": ["tick_610"],
+            "params_template": {"delta_min": 0.0, "pt_ticks": 40, "sl_ticks": 20},
+            "entry_conditions": [
+                {
+                    "feature": "delta_heat",
+                    "op": ">",
+                    "param_key": "delta_min",
+                    "role": "primary",
+                }
+            ],
+            "thesis": "x",
+            "entry_logic": "y",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610"],
+        sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
+        validation_sample_cache={
+            "tick_610": [
+                (
+                    "sample_day",
+                    pl.DataFrame({"delta_heat": [float(i) for i in range(100)]}),
+                )
+            ]
+        },
+    )
+    assert out["params_template"]["delta_min"] > 90.0
+
+
 def test_validate_generated_strategy_errors_on_high_signal_rate(tmp_path):
     mod = _load_module()
 
@@ -1330,6 +1400,68 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
     assert record["bar_config"] == "tick_610"
     assert record["offending_params"] == {"va_pos_min": 1.2}
     assert "_mask" not in record["highlighted_conditions"][0]
+
+
+def test_normalize_with_semantic_retry_uses_repaired_feasibility_brief(monkeypatch: pytest.MonkeyPatch):
+    mod = _load_module()
+    prompts: list[str] = []
+
+    def fake_call_stage_json(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return mod.StageJSONResult(
+            payload={"hypothesis_id": "retry_payload", "theme_tag": "amt_value_area"},
+            model="test-model",
+            response_id="resp-2",
+            usage={},
+            raw_text="{}",
+            attempts=1,
+            repaired=False,
+        )
+
+    attempt = {"count": 0}
+
+    def normalize_fn(payload):
+        if attempt["count"] == 0:
+            attempt["count"] += 1
+            raise mod.ThinkerFeasibilityError(
+                "THINKER_FEASIBILITY on tick_610 (sample_day): bad thresholds",
+                report={"bar_results": []},
+                brief={"hypothesis_id": "repaired_payload", "theme_tag": "amt_value_area"},
+            )
+        return payload
+
+    monkeypatch.setattr(mod, "_call_stage_json", fake_call_stage_json)
+
+    out, stage = mod._normalize_with_semantic_retry(
+        stage_name="quant_thinker",
+        stage_result=mod.StageJSONResult(
+            payload={"hypothesis_id": "original_payload", "theme_tag": "amt_value_area"},
+            model="test-model",
+            response_id="resp-1",
+            usage={},
+            raw_text="{}",
+            attempts=1,
+            repaired=False,
+        ),
+        normalize_fn=normalize_fn,
+        client=SimpleNamespace(),
+        system_prompt="system",
+        base_user_prompt="user",
+        temperature=0.2,
+        max_output_tokens=1000,
+        max_semantic_retries=1,
+        max_attempts=1,
+        json_repair_attempts=0,
+        stage_backoff_seconds=0.0,
+        quota_backoff_seconds=0.0,
+        max_backoff_seconds=0.0,
+        schema_hint="schema",
+    )
+
+    assert out["hypothesis_id"] == "retry_payload"
+    assert stage.payload["hypothesis_id"] == "retry_payload"
+    assert '"hypothesis_id": "repaired_payload"' in prompts[0]
+    assert '"hypothesis_id": "original_payload"' not in prompts[0]
 
 
 def test_should_attempt_coder_repair_skips_hypothesis_level_failures():

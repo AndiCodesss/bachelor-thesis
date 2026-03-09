@@ -15,7 +15,7 @@ claude_cli:
 quant_thinker:
   agent_name: quant-thinker
   model: opus
-  temperature: 0.35  # raised from 0.2 — we explicitly want creative, diverse hypotheses
+  temperature: 0.2  # keep thinker exploratory, but reduce drift into infeasible threshold proposals
   max_output_tokens: 2000
   timeout_seconds: 1200  # 20 min — deep research can take up to 15 min before the chat response
   claude_cli:
@@ -39,7 +39,7 @@ runtime:
   max_runtime_hours: 6
   stage_max_attempts: 3
   json_repair_attempts: 1
-  semantic_retry_attempts: 1
+  semantic_retry_attempts: 2
   stage_backoff_seconds: 3
   quota_backoff_seconds: 20
   max_backoff_seconds: 90

@@ -75,6 +75,7 @@ from research.lib.thinker_feasibility import (
     assess_entry_condition_feasibility,
     format_feasibility_error,
     normalize_entry_conditions,
+    repair_thinker_brief_for_feasibility,
 )
 from research.signals import check_signal_causality, load_signal_module
 from src.framework.api import (
@@ -88,6 +89,9 @@ from src.framework.data.constants import TICK_SIZE
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_MAX_THINKER_FEASIBILITY_REPAIR_ATTEMPTS = 6
 
 
 def _slug(value: str) -> str:
@@ -278,10 +282,13 @@ def _normalize_with_semantic_retry(
         except ValueError as exc:
             if semantic_try >= retries:
                 raise
+            previous_payload: dict[str, Any] = current.payload
+            if isinstance(exc, ThinkerFeasibilityError) and isinstance(exc.brief, dict) and exc.brief:
+                previous_payload = exc.brief
             repair_prompt = (
                 f"{base_user_prompt}\n\n"
                 f"Validation error: {exc}\n"
-                f"Previous JSON:\n{json.dumps(current.payload, indent=2, default=str)}\n\n"
+                f"Previous JSON:\n{json.dumps(previous_payload, indent=2, default=str)}\n\n"
                 "Return corrected JSON only."
             )
             current = _call_stage_json(
@@ -1160,24 +1167,48 @@ def _normalize_and_assess_thinker_brief(
         mission_bar_configs=mission_bar_configs,
         sample_bar_context=sample_bar_context,
     )
-    feasibility_report = assess_entry_condition_feasibility(
-        entry_conditions=list(thinker_brief.get("entry_conditions", [])),
-        params_template=dict(thinker_brief.get("params_template", {})),
-        selected_bar_configs=list(thinker_brief.get("bar_configs", [])),
-        validation_sample_cache=validation_sample_cache,
+    current_brief = thinker_brief
+    max_repairs = min(
+        _MAX_THINKER_FEASIBILITY_REPAIR_ATTEMPTS,
+        max(2, len(list(current_brief.get("entry_conditions", []))) * 2),
     )
-    failing = [
-        row
-        for row in feasibility_report.get("bar_results", [])
-        if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
-    ]
-    if failing:
-        raise ThinkerFeasibilityError(
-            format_feasibility_error(feasibility_report),
-            report=feasibility_report,
-            brief=thinker_brief,
+    feasibility_report: dict[str, Any] = {"bar_results": []}
+
+    for repair_attempt in range(max_repairs + 1):
+        feasibility_report = assess_entry_condition_feasibility(
+            entry_conditions=list(current_brief.get("entry_conditions", [])),
+            params_template=dict(current_brief.get("params_template", {})),
+            selected_bar_configs=list(current_brief.get("bar_configs", [])),
+            validation_sample_cache=validation_sample_cache,
         )
-    return thinker_brief
+        failing = [
+            row
+            for row in feasibility_report.get("bar_results", [])
+            if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
+        ]
+        if not failing:
+            return current_brief
+        if repair_attempt >= max_repairs:
+            break
+
+        repaired_brief, repair_actions = repair_thinker_brief_for_feasibility(
+            current_brief,
+            feasibility_report,
+        )
+        if repaired_brief is None or repaired_brief == current_brief:
+            break
+        if repair_actions:
+            print(
+                f"  thinker feasibility auto-repair {repair_attempt + 1}/{max_repairs}: "
+                f"{'; '.join(repair_actions)}"
+            )
+        current_brief = repaired_brief
+
+    raise ThinkerFeasibilityError(
+        format_feasibility_error(feasibility_report),
+        report=feasibility_report,
+        brief=current_brief,
+    )
 
 
 def _normalize_thinker_brief(
@@ -2000,7 +2031,9 @@ def _build_thinker_user_prompt(
         "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
         "For comparison ops, reference a numeric key from `params_template` via `param_key`.\n"
         "For `between`, use `param_key_low` and `param_key_high`.\n"
-        "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be rejected before coder runs.\n\n",
+        "Primary conditions must be independently plausible on the provided sample stats. Do not set thresholds far outside observed feature bands.\n"
+        "Avoid dead features and avoid numeric cutoffs that would pass 0 bars or nearly every bar on the sample.\n"
+        "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n\n",
     )
     if learning_context.strip():
         prompt_parts.append(f"{learning_context}\n\n")
