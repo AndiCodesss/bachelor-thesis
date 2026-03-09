@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from research.lib.coordination import read_json_file_if_exists, update_json_file
+from research.lib.setup_key import task_setup_identity
 
 SCHEMA_VERSION = "1.0"
 OTHER_THEME_TAG = "other"
@@ -44,8 +45,23 @@ def empty_bar_entry() -> dict[str, Any]:
         "attempts": 0,
         "search_passes": 0,
         "search_rate": laplace_rate(0, 0),
+        "selection_attempts": 0,
         "selection_passes": 0,
         "selection_rate": laplace_rate(0, 0),
+    }
+
+
+def empty_setup_entry() -> dict[str, Any]:
+    return {
+        "label": "",
+        "attempts": 0,
+        "edge_passes": 0,
+        "search_passes": 0,
+        "selection_attempts": 0,
+        "selection_passes": 0,
+        "fail_counts": {},
+        "recent_outcomes": [],
+        "updated_at": None,
     }
 
 
@@ -53,6 +69,7 @@ def empty_scorecard() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "rebuilt_at": None,
+        "setup_stats": {},
         "theme_stats": {},
         "bar_config_affinity": {},
         "near_misses": [],
@@ -144,13 +161,68 @@ def _refresh_theme_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
+def _refresh_setup_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    entry["label"] = str(entry.get("label", "")).strip()
+    entry["attempts"] = _empty_or_int(entry.get("attempts"))
+    entry["edge_passes"] = _empty_or_int(entry.get("edge_passes"))
+    entry["search_passes"] = _empty_or_int(entry.get("search_passes"))
+    entry["selection_attempts"] = _empty_or_int(entry.get("selection_attempts"))
+    entry["selection_passes"] = _empty_or_int(entry.get("selection_passes"))
+    raw_fails = entry.get("fail_counts") if isinstance(entry.get("fail_counts"), dict) else {}
+    entry["fail_counts"] = {str(k): _empty_or_int(v) for k, v in raw_fails.items() if str(k).strip()}
+    recent = entry.get("recent_outcomes") if isinstance(entry.get("recent_outcomes"), list) else []
+    normalized_recent: list[dict[str, Any]] = []
+    for raw in recent[-5:]:
+        if not isinstance(raw, dict):
+            continue
+        normalized_recent.append(
+            {
+                "strategy_name": str(raw.get("strategy_name", "")).strip(),
+                "bar_config": str(raw.get("bar_config", "")).strip(),
+                "edge_status": str(raw.get("edge_status", "")).strip(),
+                "edge_events": _optional_int(raw.get("edge_events")),
+                "positive_horizons": _optional_int(raw.get("positive_horizons")),
+                "horizon_count": _optional_int(raw.get("horizon_count")),
+                "best_horizon_bars": _optional_int(raw.get("best_horizon_bars")),
+                "best_avg_trade_pnl": _optional_float(raw.get("best_avg_trade_pnl")),
+                "best_long_avg_trade_pnl": _optional_float(raw.get("best_long_avg_trade_pnl")),
+                "best_short_avg_trade_pnl": _optional_float(raw.get("best_short_avg_trade_pnl")),
+                "search_verdict": str(raw.get("search_verdict", "")).strip(),
+                "final_verdict": str(raw.get("final_verdict", "")).strip(),
+                "failure_codes": [str(code) for code in (raw.get("failure_codes") or []) if str(code).strip()],
+                "completed_at": str(raw.get("completed_at", "")).strip(),
+            }
+        )
+    entry["recent_outcomes"] = normalized_recent
+    entry["updated_at"] = str(entry.get("updated_at") or "").strip() or None
+    entry["edge_rate"] = laplace_rate(entry["edge_passes"], entry["attempts"])
+    entry["search_rate"] = laplace_rate(entry["search_passes"], entry["attempts"])
+    entry["selection_rate"] = laplace_rate(entry["selection_passes"], entry["selection_attempts"])
+    return entry
+
+
 def _refresh_bar_entry(entry: dict[str, Any]) -> dict[str, Any]:
     entry["attempts"] = _empty_or_int(entry.get("attempts"))
     entry["search_passes"] = _empty_or_int(entry.get("search_passes"))
+    entry["selection_attempts"] = _empty_or_int(entry.get("selection_attempts", entry.get("attempts")))
     entry["selection_passes"] = _empty_or_int(entry.get("selection_passes"))
     entry["search_rate"] = laplace_rate(entry["search_passes"], entry["attempts"])
-    entry["selection_rate"] = laplace_rate(entry["selection_passes"], entry["attempts"])
+    entry["selection_rate"] = laplace_rate(entry["selection_passes"], entry["selection_attempts"])
     return entry
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _compute_low_sample_themes(theme_stats: dict[str, Any]) -> list[str]:
@@ -170,6 +242,16 @@ def _sanitize_scorecard(payload: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(payload, dict):
         if payload.get("rebuilt_at") is not None:
             scorecard["rebuilt_at"] = payload.get("rebuilt_at")
+
+        raw_setup_stats = payload.get("setup_stats") if isinstance(payload.get("setup_stats"), dict) else {}
+        for setup_key, raw_entry in raw_setup_stats.items():
+            key = str(setup_key).strip()
+            if not key:
+                continue
+            entry = empty_setup_entry()
+            if isinstance(raw_entry, dict):
+                entry.update(raw_entry)
+            scorecard["setup_stats"][key] = _refresh_setup_entry(entry)
 
         raw_theme_stats = payload.get("theme_stats") if isinstance(payload.get("theme_stats"), dict) else {}
         for theme, raw_entry in raw_theme_stats.items():
@@ -250,6 +332,17 @@ def _ensure_theme(scorecard: dict[str, Any], theme: str) -> dict[str, Any]:
     return existing
 
 
+def _ensure_setup(scorecard: dict[str, Any], setup_key: str, setup_label: str) -> dict[str, Any]:
+    setup_stats = scorecard.setdefault("setup_stats", {})
+    existing = setup_stats.get(setup_key)
+    if not isinstance(existing, dict):
+        existing = empty_setup_entry()
+        setup_stats[setup_key] = existing
+    if setup_label and not str(existing.get("label", "")).strip():
+        existing["label"] = str(setup_label)
+    return existing
+
+
 def _ensure_bar(scorecard: dict[str, Any], theme: str, bar_config: str) -> dict[str, Any]:
     affinity = scorecard.setdefault("bar_config_affinity", {})
     bars = affinity.get(theme)
@@ -291,11 +384,66 @@ def _extract_failed_advanced_checks(result: dict[str, Any]) -> list[str]:
     return failed
 
 
+def _edge_probe_payload(result: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    edge_probe = result.get("edge_probe")
+    return dict(edge_probe) if isinstance(edge_probe, dict) else {}
+
+
+def _edge_probe_failed(result: dict[str, Any] | None) -> bool:
+    edge_probe = _edge_probe_payload(result)
+    return bool(edge_probe) and not bool(edge_probe.get("passed", True))
+
+
+def _best_edge_probe_horizon(edge_probe: dict[str, Any]) -> dict[str, Any]:
+    horizon_results = edge_probe.get("horizon_results") if isinstance(edge_probe.get("horizon_results"), list) else []
+    best_horizon = _optional_int(edge_probe.get("best_horizon_bars"))
+    for row in horizon_results:
+        if not isinstance(row, dict):
+            continue
+        if best_horizon is not None and _optional_int(row.get("horizon_bars")) == best_horizon:
+            return dict(row)
+    for row in horizon_results:
+        if isinstance(row, dict):
+            return dict(row)
+    return {}
+
+
+def _edge_probe_outcome_summary(result: dict[str, Any] | None) -> dict[str, Any]:
+    edge_probe = _edge_probe_payload(result)
+    if not edge_probe:
+        return {}
+    best_horizon = _best_edge_probe_horizon(edge_probe)
+    horizon_results = edge_probe.get("horizon_results") if isinstance(edge_probe.get("horizon_results"), list) else []
+    return {
+        "edge_events": _optional_int(edge_probe.get("events")),
+        "positive_horizons": _optional_int(edge_probe.get("positive_horizons")),
+        "horizon_count": sum(1 for row in horizon_results if isinstance(row, dict)),
+        "best_horizon_bars": _optional_int(edge_probe.get("best_horizon_bars")),
+        "best_avg_trade_pnl": _optional_float(edge_probe.get("best_avg_trade_pnl")),
+        "best_long_avg_trade_pnl": _optional_float(best_horizon.get("long_avg_trade_pnl")),
+        "best_short_avg_trade_pnl": _optional_float(best_horizon.get("short_avg_trade_pnl")),
+    }
+
+
 def _failure_codes_from_result(result: dict[str, Any] | None) -> list[str]:
     if not isinstance(result, dict):
         return []
+    failure_code = str(result.get("failure_code", "")).strip()
+    if _edge_probe_failed(result):
+        codes: set[str] = set()
+        if failure_code:
+            codes.add(failure_code)
+        edge_probe = _edge_probe_payload(result)
+        status = str(edge_probe.get("status", "")).strip()
+        if status:
+            codes.add(status)
+        return sorted(codes)
     codes = set(_extract_failed_gauntlet_checks(result))
     codes.update(_extract_failed_advanced_checks(result))
+    if failure_code:
+        codes.add(failure_code)
     return sorted(codes)
 
 
@@ -409,27 +557,68 @@ def _apply_task_update(scorecard: dict[str, Any], task: dict[str, Any]) -> None:
     bar_config = str(task.get("bar_config", "")).strip()
     if not bar_config:
         return
+    setup_key, setup_label = task_setup_identity(task)
     theme = _task_theme_tag(task)
+    setup_entry = _ensure_setup(scorecard, setup_key, setup_label)
     theme_entry = _ensure_theme(scorecard, theme)
     bar_entry = _ensure_bar(scorecard, theme, bar_config)
 
+    setup_entry["attempts"] = _empty_or_int(setup_entry.get("attempts")) + 1
     bar_entry["attempts"] = _empty_or_int(bar_entry.get("attempts")) + 1
 
     search_result = _search_result_from_row(task)
     selection_result = _selection_result_from_row(task)
+    edge_probe = (
+        _edge_probe_payload(search_result)
+        if isinstance(search_result, dict)
+        else {}
+    )
+    edge_pass = not edge_probe or bool(edge_probe.get("passed", True))
     search_pass = isinstance(search_result, dict) and str(search_result.get("verdict", "")).upper() == "PASS"
     selection_pass = isinstance(selection_result, dict) and str(selection_result.get("verdict", "")).upper() == "PASS"
 
+    if edge_pass:
+        setup_entry["edge_passes"] = _empty_or_int(setup_entry.get("edge_passes")) + 1
     if search_pass:
+        setup_entry["search_passes"] = _empty_or_int(setup_entry.get("search_passes")) + 1
         bar_entry["search_passes"] = _empty_or_int(bar_entry.get("search_passes")) + 1
+    if selection_result is not None:
+        setup_entry["selection_attempts"] = _empty_or_int(setup_entry.get("selection_attempts")) + 1
+        bar_entry["selection_attempts"] = _empty_or_int(bar_entry.get("selection_attempts")) + 1
     if selection_pass:
+        setup_entry["selection_passes"] = _empty_or_int(setup_entry.get("selection_passes")) + 1
         bar_entry["selection_passes"] = _empty_or_int(bar_entry.get("selection_passes")) + 1
+    _refresh_setup_entry(setup_entry)
     _refresh_bar_entry(bar_entry)
 
     failure_codes = set(_failure_codes_from_result(search_result))
     failure_codes.update(_failure_codes_from_result(selection_result))
     if failure_codes:
+        _increment_fail_counts(setup_entry, sorted(failure_codes))
         _increment_fail_counts(theme_entry, sorted(failure_codes))
+    edge_summary = _edge_probe_outcome_summary(search_result)
+    recent = setup_entry.setdefault("recent_outcomes", [])
+    recent.append(
+        {
+            "strategy_name": str(task.get("strategy_name", "")).strip(),
+            "bar_config": bar_config,
+            "edge_status": str(edge_probe.get("status", "pass" if edge_pass else "unknown")),
+            **edge_summary,
+            "search_verdict": str(search_result.get("verdict", "")) if isinstance(search_result, dict) else "",
+            "final_verdict": str(
+                (
+                    task.get("details")
+                    if isinstance(task.get("details"), dict)
+                    else {}
+                ).get("final_verdict", task.get("verdict", ""))
+            ),
+            "failure_codes": sorted(failure_codes),
+            "completed_at": str(task.get("completed_at", "")).strip(),
+        }
+    )
+    setup_entry["recent_outcomes"] = recent[-5:]
+    setup_entry["updated_at"] = str(task.get("completed_at") or _utc_now())
+    _refresh_setup_entry(setup_entry)
     _refresh_theme_entry(theme_entry)
 
     search_sharpe = _metrics_sharpe(search_result)
@@ -508,6 +697,10 @@ def _apply_handoff_update(scorecard: dict[str, Any], handoff: dict[str, Any]) ->
 
 
 def _finalize_scorecard(scorecard: dict[str, Any]) -> dict[str, Any]:
+    setup_stats = scorecard.get("setup_stats") if isinstance(scorecard.get("setup_stats"), dict) else {}
+    for setup_key, entry in list(setup_stats.items()):
+        if isinstance(entry, dict):
+            setup_stats[setup_key] = _refresh_setup_entry(entry)
     theme_stats = scorecard.get("theme_stats") if isinstance(scorecard.get("theme_stats"), dict) else {}
     for theme, entry in list(theme_stats.items()):
         if isinstance(entry, dict):
@@ -616,10 +809,41 @@ def rebuild_learning_scorecard(
     )
 
 
+def _format_latest_edge_summary(latest: dict[str, Any]) -> str:
+    if not isinstance(latest, dict):
+        return ""
+    parts: list[str] = []
+    edge_status = str(latest.get("edge_status", "")).strip()
+    if edge_status:
+        parts.append(f"last edge={edge_status}")
+    edge_events = _optional_int(latest.get("edge_events"))
+    if edge_events is not None:
+        parts.append(f"events={edge_events}")
+    positive_horizons = _optional_int(latest.get("positive_horizons"))
+    horizon_count = _optional_int(latest.get("horizon_count"))
+    if positive_horizons is not None and horizon_count is not None and horizon_count > 0:
+        parts.append(f"pos_horizons={positive_horizons}/{horizon_count}")
+    best_horizon_bars = _optional_int(latest.get("best_horizon_bars"))
+    best_avg_trade_pnl = _optional_float(latest.get("best_avg_trade_pnl"))
+    if best_horizon_bars is not None and best_avg_trade_pnl is not None:
+        parts.append(f"best={best_horizon_bars}b avg={best_avg_trade_pnl:.2f}")
+    long_avg = _optional_float(latest.get("best_long_avg_trade_pnl"))
+    short_avg = _optional_float(latest.get("best_short_avg_trade_pnl"))
+    if long_avg is not None or short_avg is not None:
+        direction_parts: list[str] = []
+        if long_avg is not None:
+            direction_parts.append(f"long={long_avg:.2f}")
+        if short_avg is not None:
+            direction_parts.append(f"short={short_avg:.2f}")
+        parts.append(" ".join(direction_parts))
+    return " | ".join(parts)
+
+
 def format_learning_context(scorecard: dict[str, Any]) -> str:
     if not isinstance(scorecard, dict):
         return ""
 
+    setup_stats = scorecard.get("setup_stats") if isinstance(scorecard.get("setup_stats"), dict) else {}
     theme_stats = scorecard.get("theme_stats") if isinstance(scorecard.get("theme_stats"), dict) else {}
     bar_affinity = scorecard.get("bar_config_affinity") if isinstance(scorecard.get("bar_config_affinity"), dict) else {}
     near_misses = scorecard.get("near_misses") if isinstance(scorecard.get("near_misses"), list) else []
@@ -627,6 +851,62 @@ def format_learning_context(scorecard: dict[str, Any]) -> str:
 
     lines: list[str] = ["LEARNING_SCORECARD:"]
     wrote_section = False
+
+    setup_rows: list[tuple[str, dict[str, Any]]] = []
+    for setup_key, entry in setup_stats.items():
+        if not isinstance(entry, dict):
+            continue
+        if _empty_or_int(entry.get("attempts")) <= 0:
+            continue
+        setup_rows.append((str(setup_key), entry))
+    setup_rows.sort(
+        key=lambda item: (
+            str(item[1].get("updated_at") or ""),
+            _empty_or_int(item[1].get("search_passes")),
+            _empty_or_int(item[1].get("edge_passes")),
+            _empty_or_int(item[1].get("attempts")),
+        ),
+        reverse=True,
+    )
+    if setup_rows:
+        wrote_section = True
+        lines.append("Recent concrete setup outcomes:")
+        for _setup_key, entry in setup_rows[:3]:
+            label = str(entry.get("label", "")).strip() or "unknown setup"
+            recent = entry.get("recent_outcomes") if isinstance(entry.get("recent_outcomes"), list) else []
+            latest = recent[-1] if recent else {}
+            latest_summary = _format_latest_edge_summary(latest if isinstance(latest, dict) else {})
+            selection_attempts = _empty_or_int(entry.get("selection_attempts"))
+            selection_blob = (
+                f" | selection {_empty_or_int(entry.get('selection_passes'))}/{selection_attempts}"
+                if selection_attempts > 0
+                else ""
+            )
+            lines.append(
+                "  "
+                f"{label}: tries={_empty_or_int(entry.get('attempts'))} | "
+                f"edge {_empty_or_int(entry.get('edge_passes'))}/{_empty_or_int(entry.get('attempts'))} | "
+                f"search {_empty_or_int(entry.get('search_passes'))}/{_empty_or_int(entry.get('attempts'))}"
+                f"{selection_blob}"
+                + (f" | {latest_summary}" if latest_summary else "")
+            )
+
+    failure_rows: list[tuple[str, str]] = []
+    for _setup_key, entry in setup_rows:
+        fail_counts = entry.get("fail_counts") if isinstance(entry.get("fail_counts"), dict) else {}
+        ranked = sorted(
+            ((str(name), _empty_or_int(count)) for name, count in fail_counts.items() if _empty_or_int(count) > 0),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        if ranked:
+            label = str(entry.get("label", "")).strip() or "unknown setup"
+            failure_rows.append((label, ", ".join(f"{name} ({count})" for name, count in ranked[:2])))
+    if failure_rows:
+        wrote_section = True
+        lines.append("Repeated setup failure modes:")
+        for label, summary in failure_rows[:3]:
+            lines.append(f"  {label}: {summary}")
 
     theme_rows: list[tuple[str, dict[str, Any]]] = []
     for theme, entry in theme_stats.items():
@@ -637,21 +917,21 @@ def format_learning_context(scorecard: dict[str, Any]) -> str:
         theme_rows.append((str(theme), entry))
     theme_rows.sort(
         key=lambda item: (
-            float(item[1].get("selection_rate", 0.0)),
-            float(item[1].get("search_rate", 0.0)),
+            _empty_or_int(item[1].get("selection_passes")),
+            _empty_or_int(item[1].get("search_passes")),
             _empty_or_int(item[1].get("attempts")),
         ),
         reverse=True,
     )
     if theme_rows:
         wrote_section = True
-        lines.append("Theme performance (family-level, smoothed rates):")
-        for theme, entry in theme_rows[:3]:
+        lines.append("Theme performance (secondary audit view):")
+        for theme, entry in theme_rows[:2]:
             lines.append(
                 "  "
-                f"{theme}: {_empty_or_int(entry.get('attempts'))} attempts | "
-                f"search {float(entry.get('search_rate', 0.0)):.0%} | "
-                f"selection {float(entry.get('selection_rate', 0.0)):.0%}"
+                f"{theme}: "
+                f"search {_empty_or_int(entry.get('search_passes'))}/{_empty_or_int(entry.get('attempts'))} | "
+                f"selection {_empty_or_int(entry.get('selection_passes'))}/{_empty_or_int(entry.get('selection_attempts'))}"
             )
 
     affinity_rows: list[tuple[str, str, dict[str, Any]]] = []
@@ -666,38 +946,22 @@ def format_learning_context(scorecard: dict[str, Any]) -> str:
             affinity_rows.append((str(theme), str(bar_config), entry))
     affinity_rows.sort(
         key=lambda item: (
-            float(item[2].get("selection_rate", 0.0)),
-            float(item[2].get("search_rate", 0.0)),
+            _empty_or_int(item[2].get("selection_passes")),
+            _empty_or_int(item[2].get("search_passes")),
             _empty_or_int(item[2].get("attempts")),
         ),
         reverse=True,
     )
     if affinity_rows:
         wrote_section = True
-        lines.append("Bar config affinity (top patterns):")
-        for theme, bar_config, entry in affinity_rows[:3]:
+        lines.append("Bar config affinity (secondary):")
+        for theme, bar_config, entry in affinity_rows[:2]:
             lines.append(
                 "  "
-                f"{theme} + {bar_config}: search {float(entry.get('search_rate', 0.0)):.0%}, "
-                f"selection {float(entry.get('selection_rate', 0.0)):.0%}"
+                f"{theme} + {bar_config}: "
+                f"search {_empty_or_int(entry.get('search_passes'))}/{_empty_or_int(entry.get('attempts'))} | "
+                f"selection {_empty_or_int(entry.get('selection_passes'))}/{_empty_or_int(entry.get('selection_attempts', entry.get('attempts')))}"
             )
-
-    failure_rows: list[tuple[str, list[tuple[str, int]]]] = []
-    for theme, entry in theme_rows:
-        fail_counts = entry.get("fail_counts") if isinstance(entry.get("fail_counts"), dict) else {}
-        ranked = sorted(
-            ((str(name), _empty_or_int(count)) for name, count in fail_counts.items() if _empty_or_int(count) > 0),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        if ranked:
-            failure_rows.append((theme, ranked))
-    if failure_rows:
-        wrote_section = True
-        lines.append("Dominant failure modes:")
-        for theme, ranked in failure_rows[:3]:
-            summary = ", ".join(f"{name} ({count})" for name, count in ranked[:2])
-            lines.append(f"  {theme}: {summary}")
 
     if near_misses:
         wrote_section = True
@@ -718,10 +982,7 @@ def format_learning_context(scorecard: dict[str, Any]) -> str:
     if not wrote_section:
         return ""
 
-    lines.append(
-        "Use this scorecard to decide whether this lane should EXPLOIT a promising "
-        "direction or EXPLORE a weakly sampled or newly justified one. Justify your choice."
-    )
+    lines.append("Prioritize setups with real raw edge across horizons and avoid repeating setups that keep failing edge probe.")
     return "\n".join(lines)
 
 
@@ -732,6 +993,7 @@ __all__ = [
     "LOW_SAMPLE_ATTEMPTS",
     "empty_bar_entry",
     "empty_scorecard",
+    "empty_setup_entry",
     "empty_theme_entry",
     "format_learning_context",
     "laplace_rate",

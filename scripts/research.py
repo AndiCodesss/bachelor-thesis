@@ -27,6 +27,7 @@ if __package__ is None or __package__ == "":
 from research.lib.atomic_io import atomic_json_write
 from research.lib.budget import MissionBudget
 from research.lib.candidates import write_candidate
+from research.lib.edge_probe import normalize_edge_probe_config, run_edge_probe
 from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.learning_scorecard import (
     empty_scorecard,
@@ -50,6 +51,7 @@ from research.lib.runtime_state import (
     reset_shared_state,
     shared_state_defaults,
 )
+from research.lib.setup_key import task_setup_identity
 from research.lib.trial_counter import estimate_effective_trials
 from research.signals import (
     CAUSALITY_MIN_PREFIX_BARS,
@@ -368,6 +370,7 @@ def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
     source = task.get("source") if isinstance(task.get("source"), dict) else {}
     metrics = details.get("metrics") if isinstance(details, dict) else None
     selection_result = details.get("selection_result") if isinstance(details, dict) else None
+    edge_probe = details.get("edge_probe") if isinstance(details, dict) else None
     feedback_verdict = (
         str(details.get("feedback_verdict", task.get("verdict", "")))
         if isinstance(details, dict)
@@ -382,6 +385,8 @@ def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
         "task_id": str(task.get("task_id", "")),
         "strategy_name": str(task.get("strategy_name", "")),
         "theme_tag": str(task.get("theme_tag") or source.get("theme_tag") or ""),
+        "setup_key": str(task.get("setup_key") or source.get("setup_key") or ""),
+        "setup_label": str(task.get("setup_label") or source.get("setup_label") or ""),
         "bar_config": str(task.get("bar_config", "")),
         "state": str(task.get("state", "")),
         "verdict": feedback_verdict,
@@ -401,6 +406,9 @@ def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
             if isinstance(selection_result, dict)
             else ""
         )
+    if isinstance(edge_probe, dict):
+        out["edge_probe_status"] = str(edge_probe.get("status", ""))
+        out["edge_probe_passed"] = bool(edge_probe.get("passed", False))
     error = details.get("error") if isinstance(details, dict) else None
     if error:
         out["error"] = str(error)
@@ -987,6 +995,7 @@ def _evaluate_strategy_split(
     mission: dict[str, Any],
     experiments_path: Path,
     task_dir: Path,
+    edge_probe_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     files = get_split_files(split)
     if max_files is not None:
@@ -998,8 +1007,8 @@ def _evaluate_strategy_split(
     split_dir.mkdir(parents=True, exist_ok=True)
 
     all_signals: list[pl.DataFrame] = []
-    all_trades: list[pl.DataFrame] = []
     all_bars: list[pl.DataFrame] = []
+    execution_frames: list[pl.DataFrame] = []
     bars_processed = 0
     signal_count = 0
     causality_checked = False
@@ -1065,15 +1074,12 @@ def _evaluate_strategy_split(
         all_signals.append(bars_with_signal.select(signal_cols))
 
         eval_bar_cols = [
-            col for col in ("ts_event", "open", "high", "low", "close", "volume", "bid_price", "ask_price")
+            col for col in ("ts_event", "open", "high", "low", "close", "volume", "bid_price", "ask_price", "signal")
             if col in bars_with_signal.columns
         ]
-        all_bars.append(bars_with_signal.select(eval_bar_cols))
-
-        trades = run_backtest(bars_with_signal, signal_col="signal", **bt_kwargs)
-        if len(trades) > 0:
-            trades = compute_adaptive_costs(trades, bars_with_signal)
-            all_trades.append(trades)
+        execution_frame = bars_with_signal.select(eval_bar_cols)
+        execution_frames.append(execution_frame)
+        all_bars.append(execution_frame.drop("signal"))
 
     if causality_row_count > 0 and not causality_checked:
         raise ValueError(
@@ -1083,14 +1089,39 @@ def _evaluate_strategy_split(
 
     signals_df = pl.concat(all_signals).sort("ts_event") if all_signals else _empty_signal_frame()
     bars_df = pl.concat(all_bars).sort("ts_event") if all_bars else pl.DataFrame()
-    trades_df = pl.concat(all_trades) if all_trades else pl.DataFrame(schema=TRADE_SCHEMA)
+    edge_probe_summary = (
+        run_edge_probe(
+            execution_frames=execution_frames,
+            entry_on_next_open=bool(bt_kwargs.get("entry_on_next_open", False)),
+            config=edge_probe_config,
+        )
+        if split_label == "search"
+        else {"enabled": False, "passed": True, "status": "selection_skip", "events": 0, "horizon_results": []}
+    )
+
+    trades_df = pl.DataFrame(schema=TRADE_SCHEMA)
+    if bool(edge_probe_summary.get("passed", True)):
+        all_trades: list[pl.DataFrame] = []
+        for frame in execution_frames:
+            trades = run_backtest(frame, signal_col="signal", **bt_kwargs)
+            if len(trades) > 0:
+                trades = compute_adaptive_costs(trades, frame)
+                all_trades.append(trades)
+        if all_trades:
+            trades_df = pl.concat(all_trades)
+
     metrics = compute_metrics(
         trades_df,
         cost_override_col="adaptive_cost_rt" if "adaptive_cost_rt" in trades_df.columns else None,
     )
 
     gauntlet: dict[str, Any] | None = None
-    if run_gauntlet and len(signals_df) > 0 and signal_count > 0:
+    if (
+        bool(edge_probe_summary.get("passed", True))
+        and run_gauntlet
+        and len(signals_df) > 0
+        and signal_count > 0
+    ):
         gauntlet = run_validation_gauntlet(
             signals_df,
             signal_col="signal",
@@ -1099,7 +1130,7 @@ def _evaluate_strategy_split(
         )
 
     advanced_validation: dict[str, Any] = {}
-    if len(trades_df) > 0:
+    if bool(edge_probe_summary.get("passed", True)) and len(trades_df) > 0:
         trial_stats = deflated_sharpe_ratio(
             _daily_net_pnl_series(trades_df),
             n_trials=max(1, int(estimate_effective_trials(experiments_path).get("effective_trials", 1))),
@@ -1117,7 +1148,10 @@ def _evaluate_strategy_split(
     meets_advanced_gates = bool(advanced_validation_gates.get("passed", True))
 
     verdict = "FAIL"
-    if run_gauntlet:
+    failure_code: str | None = None
+    if not bool(edge_probe_summary.get("passed", True)):
+        failure_code = str(edge_probe_summary.get("status", "no_raw_edge"))
+    elif run_gauntlet:
         if gauntlet and gauntlet.get("overall_verdict") == "PASS" and meets_metric_thresholds and meets_advanced_gates:
             verdict = "PASS"
     elif meets_metric_thresholds and meets_advanced_gates:
@@ -1131,12 +1165,15 @@ def _evaluate_strategy_split(
         "target_sharpe": float(target_sharpe),
         "min_trade_count": int(min_trade_count),
         "run_gauntlet": bool(run_gauntlet),
+        "edge_probe": edge_probe_summary,
         "metrics": metrics,
         "gauntlet": gauntlet,
         "advanced_validation": advanced_validation,
         "advanced_validation_gates": advanced_validation_gates,
         "verdict": verdict,
     }
+    if failure_code:
+        summary["failure_code"] = failure_code
     summary_path = split_dir / "summary.json"
     signals_path = split_dir / "signals.parquet"
     trades_path = split_dir / "trades.parquet"
@@ -1149,6 +1186,10 @@ def _evaluate_strategy_split(
         "signals": str(signals_path),
         "trades": str(trades_path),
     }
+    if edge_probe_summary.get("enabled", False):
+        edge_probe_path = split_dir / "edge_probe.json"
+        atomic_json_write(edge_probe_path, edge_probe_summary)
+        artifacts["edge_probe"] = str(edge_probe_path)
     if gauntlet is not None:
         gauntlet_path = split_dir / "gauntlet.json"
         atomic_json_write(gauntlet_path, gauntlet)
@@ -1201,6 +1242,7 @@ def _execute_claimed_task(
         strategy_module=strategy_module,
     )
     theme_tag = str(task.get("theme_tag", "")).strip() or "other"
+    setup_key, setup_label = task_setup_identity(task)
 
     strategy_id = compute_strategy_id(
         strategy_name, params, strategy_fn,
@@ -1211,6 +1253,7 @@ def _execute_claimed_task(
     write_candidate_flag = bool(task.get("write_candidate", mission.get("write_candidates", True)))
     max_files = task.get("max_files", mission.get("max_files_per_task"))
     max_files = int(max_files) if max_files is not None else None
+    edge_probe_config = normalize_edge_probe_config(mission.get("edge_probe"))
 
     # A/B experiment: restrict features visible to the strategy
     feature_group = str(mission.get("feature_group", "all")).lower()
@@ -1237,6 +1280,7 @@ def _execute_claimed_task(
         mission=mission,
         experiments_path=experiments_path,
         task_dir=task_dir,
+        edge_probe_config=edge_probe_config,
     )
 
     selection_result: dict[str, Any] | None = None
@@ -1292,6 +1336,8 @@ def _execute_claimed_task(
         "feedback_split": search_split,
         "feature_group": feature_group,
         "theme_tag": theme_tag,
+        "setup_key": setup_key,
+        "setup_label": setup_label,
         "bar_config": bar_config,
         "bar_params": parsed_bar,
         "params": params,
@@ -1317,10 +1363,13 @@ def _execute_claimed_task(
             "feature_group": feature_group,
             "backtest": bt_kwargs,
             "parameters": params,
+            "setup_key": setup_key,
+            "setup_label": setup_label,
             "search_split": search_split,
             "selection_split": selection_split,
             "validation_metrics": candidate_result["metrics"],
             "gauntlet_results": candidate_result.get("gauntlet") or {},
+            "edge_probe": search_result.get("edge_probe") or {},
             "advanced_validation": candidate_result.get("advanced_validation") or {},
             "advanced_validation_gates": candidate_result.get("advanced_validation_gates") or {},
             "search_result": search_result,
@@ -1370,8 +1419,11 @@ def _execute_claimed_task(
             "selection_split": selection_split,
             "feature_group": feature_group,
             "theme_tag": theme_tag,
+            "setup_key": setup_key,
+            "setup_label": setup_label,
             "bar_config": bar_config,
             "metrics": search_result["metrics"],
+            "edge_probe": search_result.get("edge_probe"),
             "gauntlet": search_result.get("gauntlet"),
             "advanced_validation": search_result.get("advanced_validation"),
             "advanced_validation_gates": search_result.get("advanced_validation_gates"),
@@ -1396,10 +1448,13 @@ def _execute_claimed_task(
         "advanced_validation_gates": search_result.get("advanced_validation_gates"),
         "feature_group": feature_group,
         "theme_tag": theme_tag,
+        "setup_key": setup_key,
+        "setup_label": setup_label,
         "feedback_split": search_split,
         "feedback_verdict": search_result["verdict"],
         "search_split": search_split,
         "selection_split": selection_split,
+        "edge_probe": search_result.get("edge_probe"),
         "search_result": search_result,
         "selection_result": selection_result,
         "final_verdict": final_verdict,
@@ -1741,6 +1796,8 @@ def main() -> None:
                             "strategy_name": str(payload.get("strategy_name", "")),
                             "hypothesis_id": str(payload.get("hypothesis_id", "")),
                             "theme_tag": str(payload.get("theme_tag", "")),
+                            "setup_key": str(payload.get("setup_key", "")),
+                            "setup_label": str(payload.get("setup_label", "")),
                             "task_count": result.get("task_count"),
                             "overall_verdict": result.get("overall_verdict"),
                             "pass_count": result.get("pass_count"),

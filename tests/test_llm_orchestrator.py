@@ -492,6 +492,10 @@ def test_prompts_include_feature_knowledge_markers():
         "computation_notes": ["ema_ratio_N = close / EMA - 1"],
         "errors": {},
     }
+    thinker_feature_knowledge = mod._compact_feature_knowledge_for_thinker(
+        feature_knowledge,
+        selected_bar_configs=["tick_610"],
+    )
     feature_surface_context = (
         "FEATURE_SURFACE_INTELLIGENCE:\n"
         "- tick_610: 1200 sampled rows across 3 file(s)\n"
@@ -534,7 +538,7 @@ def test_prompts_include_feature_knowledge_markers():
                 "time_1m": {"sample_rows": 700, "range_ticks": {"median": 33.0}},
             },
         },
-        feature_knowledge=feature_knowledge,
+        feature_knowledge=thinker_feature_knowledge,
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in thinker_prompt
     assert "RUNTIME_MISSION_CONTEXT_JSON_BEGIN" in thinker_prompt
@@ -549,7 +553,8 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Use high-quality trusted sources." in thinker_prompt
     assert "BAR_CONFIG_RISK_FLOORS:" in thinker_prompt
     assert "volume_2000: sl_ticks >= 40" in thinker_prompt
-    assert '"common_columns"' in thinker_prompt
+    assert '"common_column_count"' in thinker_prompt
+    assert '"common_columns_sample"' in thinker_prompt
     assert "Current focus anchors" in thinker_prompt
     assert "- amt_value_area" in thinker_prompt
     assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
@@ -590,7 +595,7 @@ def test_coder_system_prompt_requires_safe_column_helpers():
 
 def test_thinker_system_prompt_requires_internal_brainstorm():
     mod = _load_module()
-    prompt = mod._build_thinker_system_prompt()
+    prompt = mod._build_thinker_system_prompt(notebooklm_enabled=True)
     assert "quant-thinker" in prompt
     assert "Notebook Alpha Research Skill" in prompt
     assert "runtime mission context" in prompt
@@ -598,9 +603,10 @@ def test_thinker_system_prompt_requires_internal_brainstorm():
 
 def test_thinker_system_prompt_uses_runtime_context_not_stale_session_claims():
     mod = _load_module()
-    prompt = mod._build_thinker_system_prompt()
+    prompt = mod._build_thinker_system_prompt(notebooklm_enabled=False)
     assert "prior session volume. VAH = va_high" not in prompt
     assert "source of truth" in prompt
+    assert "Notebook Alpha Research Skill" not in prompt
 
 
 def test_thinker_user_prompt_omits_notebook_command_when_no_url():
@@ -665,6 +671,28 @@ def test_build_learning_context_reads_scorecard(tmp_path: Path):
             {
                 "schema_version": "1.0",
                 "rebuilt_at": "2026-03-07T14:00:00+00:00",
+                "setup_stats": {
+                    "setup_123": {
+                        "label": "tick_610 | volume_ratio > (primary) | exit=sl_ticks,pt_ticks",
+                        "attempts": 2,
+                        "edge_passes": 1,
+                        "search_passes": 1,
+                        "selection_attempts": 0,
+                        "selection_passes": 0,
+                        "fail_counts": {"no_raw_edge": 1},
+                        "recent_outcomes": [
+                            {
+                                "strategy_name": "alpha_setup_a",
+                                "bar_config": "tick_610",
+                                "edge_status": "pass",
+                                "search_verdict": "PASS",
+                                "final_verdict": "FAIL",
+                                "failure_codes": ["walk_forward"],
+                                "completed_at": "2026-03-07T14:01:00+00:00",
+                            }
+                        ],
+                    }
+                },
                 "theme_stats": {
                     "amt_value_area": {
                         "attempts": 4,
@@ -698,7 +726,12 @@ def test_build_learning_context_reads_scorecard(tmp_path: Path):
         scorecard_lock=scorecard_lock,
     )
     assert "LEARNING_SCORECARD:" in context
-    assert "amt_value_area: 4 attempts" in context
+    assert "Recent concrete setup outcomes:" in context
+    assert "tick_610 | volume_ratio > (primary)" in context
+    assert "Repeated setup failure modes:" in context
+    assert "no_raw_edge (1)" in context
+    assert "edge 1/2 | search 1/2" in context
+    assert "amt_value_area: search 2/4 | selection 0/1" in context
     assert "Low-sample themes: orderflow_divergence" in context
 
 
@@ -839,8 +872,8 @@ def test_merged_feedback_includes_all_sources(tmp_path: Path):
         "completed": [{
             "handoff_type": "validation_request",
             "payload": {"strategy_name": "s_handoff", "hypothesis_id": "h1"},
-            "result": {"overall_verdict": "FAIL", "task_count": 1,
-                       "pass_count": 0, "fail_count": 1, "error_count": 0,
+            "result": {"overall_verdict": "FAIL", "task_count": 2,
+                       "pass_count": 0, "fail_count": 2, "error_count": 0,
                        "avg_sharpe_ratio": -0.5, "avg_trade_count": 10},
         }],
     }), encoding="utf-8")

@@ -70,6 +70,7 @@ from research.lib.thinker_memory import (
     format_thinker_memory_context,
     read_thinker_memory,
 )
+from research.lib.setup_key import build_setup_key
 from research.lib.thinker_feasibility import (
     ThinkerFeasibilityError,
     assess_entry_condition_feasibility,
@@ -480,6 +481,8 @@ def _collect_feedback_items_from_handoffs(
         result = row.get("result")
         payload_row = row.get("payload")
         if not isinstance(result, dict) or not isinstance(payload_row, dict):
+            continue
+        if int(result.get("task_count", 0) or 0) <= 1:
             continue
 
         items.append(
@@ -1772,6 +1775,45 @@ def _build_feature_knowledge(
     }
 
 
+def _compact_feature_knowledge_for_thinker(
+    feature_knowledge: dict[str, Any],
+    *,
+    selected_bar_configs: list[str],
+) -> dict[str, Any]:
+    if not isinstance(feature_knowledge, dict):
+        return {}
+    compact_bars = {
+        str(bar_config): dict(payload)
+        for bar_config, payload in (feature_knowledge.get("bar_configs") or {}).items()
+        if str(bar_config) in set(str(v) for v in selected_bar_configs)
+        and isinstance(payload, dict)
+    }
+    common_columns = [
+        str(value)
+        for value in (feature_knowledge.get("common_columns") or [])
+        if str(value).strip()
+    ]
+    feature_catalog = [
+        str(value)
+        for value in (feature_knowledge.get("feature_catalog") or [])
+        if str(value).strip()
+    ]
+    computation_notes = [
+        str(value)
+        for value in (feature_knowledge.get("computation_notes") or [])
+        if str(value).strip()
+    ]
+    return {
+        "schema_version": str(feature_knowledge.get("schema_version", "1.0")),
+        "bar_configs": compact_bars,
+        "common_column_count": len(common_columns),
+        "common_columns_sample": common_columns[:96],
+        "feature_catalog": feature_catalog[:36],
+        "computation_notes": computation_notes[:6],
+        "errors": dict(feature_knowledge.get("errors") or {}),
+    }
+
+
 def _build_feature_surface(
     *,
     mission_bar_configs: list[str],
@@ -2104,8 +2146,8 @@ def _validate_generated_strategy(
     return errors, report
 
 
-def _build_thinker_system_prompt() -> str:
-    skill = _load_skill("notebook-alpha-research")
+def _build_thinker_system_prompt(*, notebooklm_enabled: bool) -> str:
+    skill = _load_skill("notebook-alpha-research") if notebooklm_enabled else ""
     parts = [
         "You are the quant-thinker agent for the NQ alpha discovery loop.",
         "Treat the runtime mission context in the user prompt as the source of truth for split, session filter,",
@@ -2151,7 +2193,7 @@ def _build_thinker_user_prompt(
     notebook_research_guidance = str(mission.get("notebook_research_guidance", "")).strip()
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
     focus_anchors = resolve_focus_anchors(mission)
-    avoid = ", ".join(existing_strategies[-50:]) if existing_strategies else "(none)"
+    avoid = ", ".join(existing_strategies[-12:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
     results_table = _format_results_table(feedback_items)
     prompt_parts = [
@@ -2178,13 +2220,17 @@ def _build_thinker_user_prompt(
         "Do not spread one hypothesis across multiple bar types in the same iteration.\n\n",
     )
     prompt_parts.append(
+        "Your job is to propose one concrete entry setup with a plausible raw forward-return edge, "
+        "not to micro-optimize a finished trading system. Exits should stay simple and secondary.\n\n",
+    )
+    prompt_parts.append(
         "You must also return `entry_conditions`: a machine-checkable list of the core gates that must be true before a signal can fire.\n"
-        "Use 2-6 conditions total. Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.\n"
+        "Use 2-4 conditions total. Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.\n"
         "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
         "For comparison ops, reference a numeric key from `params_template` via `param_key`.\n"
         "For `between`, use `param_key_low` and `param_key_high`.\n"
         "Primary conditions must be independently plausible on the provided sample stats. Do not set thresholds far outside observed feature bands.\n"
-        "Avoid dead features and avoid numeric cutoffs that would pass 0 bars or nearly every bar on the sample.\n"
+        "Avoid dead features, avoid impossible cutoffs, and avoid broad cost-destruction patterns that would fire on nearly every bar.\n"
         "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n\n",
     )
     if learning_context.strip():
@@ -2196,7 +2242,7 @@ def _build_thinker_user_prompt(
     if param_feasibility_context.strip():
         prompt_parts.append(f"{param_feasibility_context}\n\n")
     prompt_parts.append(f"{_format_bar_risk_floor_context(runtime_context)}\n\n")
-    prompt_parts.append("Design exactly one hypothesis that is implementable by a separate coding model.")
+    prompt_parts.append("Design exactly one entry setup hypothesis that is implementable by a separate coding model.")
     prompt = "".join(prompt_parts)
     if runtime_context:
         prompt += (
@@ -2247,10 +2293,9 @@ def _build_thinker_user_prompt(
             "\n\nAVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN\n"
             f"{json.dumps(feature_knowledge, indent=2, sort_keys=True, default=str)}\n"
             "AVAILABLE_PRECOMPUTED_FEATURES_JSON_END\n"
-            "The JSON above contains: common_columns (all available column names), "
-            "feature_catalog (column | formula | interpretation for ~60 key features), "
-            "and computation_notes. Study feature_catalog carefully before designing entry conditions — "
-            "it tells you exactly what each column measures and its typical range."
+            "The JSON above is a compact feature reference for the active bar config. "
+            "Prefer the listed feature_catalog items first. If you use a feature outside the catalog, "
+            "it must come from common_columns_sample or another explicitly referenced runtime stat."
         )
     return prompt
 
@@ -2463,6 +2508,8 @@ def _build_task(
     iteration: int,
     hypothesis_id: str,
     theme_tag: str,
+    setup_key: str,
+    setup_label: str,
 ) -> dict[str, Any]:
     max_retries = int(mission.get("max_retries", 2))
     timeout_minutes = int(mission.get("task_timeout_minutes", 30))
@@ -2488,6 +2535,8 @@ def _build_task(
         "selection_split": selection_split,
         "bar_config": bar_config,
         "theme_tag": str(theme_tag),
+        "setup_key": str(setup_key),
+        "setup_label": str(setup_label),
         "params": dict(params),
         "exit_bars": exit_bars,
         "profit_target": profit_target,
@@ -2503,6 +2552,8 @@ def _build_task(
             "iteration": int(iteration),
             "hypothesis_id": str(hypothesis_id),
             "theme_tag": str(theme_tag),
+            "setup_key": str(setup_key),
+            "setup_label": str(setup_label),
             "code_hash": code_hash,
         },
     }
@@ -2894,6 +2945,10 @@ def main() -> int:
     feature_knowledge_hash = _sha256_text(
         json.dumps(feature_knowledge, sort_keys=True, separators=(",", ":"), default=str),
     )[:16]
+    thinker_feature_knowledge = _compact_feature_knowledge_for_thinker(
+        feature_knowledge,
+        selected_bar_configs=mission_bar_configs,
+    )
     if feature_knowledge.get("errors"):
         print(f"Feature knowledge build warnings: {feature_knowledge['errors']}")
     else:
@@ -2931,6 +2986,7 @@ def main() -> int:
 
     stop_reason = "max_iterations_reached"
     notebooklm_configured = bool(str(active_mission.get("notebooklm_notebook_url", "")).strip())
+    thinker_system_prompt = _build_thinker_system_prompt(notebooklm_enabled=notebooklm_configured)
     while iterations_done < max_iterations:
         if max_runtime_hours is not None:
             elapsed = (time.monotonic() - start_monotonic) / 3600.0
@@ -2954,6 +3010,7 @@ def main() -> int:
             handoffs_lock_path=state_paths["handoffs_lock"],
             research_log_path=research_log_path,
             orchestrator_log_path=orchestrator_log_path,
+            max_items=9,
         )
         learning_context = _build_learning_context(
             scorecard_path=state_paths["scorecard"],
@@ -2988,7 +3045,7 @@ def main() -> int:
                 feature_surface_context=feature_surface_context,
                 param_feasibility_context=param_feasibility_context,
                 runtime_context=runtime_context,
-                feature_knowledge=feature_knowledge,
+                feature_knowledge=thinker_feature_knowledge,
             )
             with notebook_audit_context(
                 run_id=run_id,
@@ -3006,7 +3063,7 @@ def main() -> int:
                         "entry_conditions, entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
                     ),
                     client=thinker_client,
-                    system_prompt=_build_thinker_system_prompt(),
+                    system_prompt=thinker_system_prompt,
                     user_prompt=thinker_user_prompt,
                     temperature=float(thinker_role["temperature"]),
                     max_output_tokens=int(thinker_role["max_output_tokens"]),
@@ -3026,7 +3083,7 @@ def main() -> int:
                         validation_sample_cache=validation_sample_cache,
                     ),
                     client=thinker_client,
-                    system_prompt=_build_thinker_system_prompt(),
+                    system_prompt=thinker_system_prompt,
                     base_user_prompt=thinker_user_prompt,
                     temperature=float(thinker_role["temperature"]),
                     max_output_tokens=int(thinker_role["max_output_tokens"]),
@@ -3120,6 +3177,13 @@ def main() -> int:
             code_hash = _sha256_text(code)[:16]
             hypothesis_id = str(thinker_brief.get("hypothesis_id", "hyp_unknown"))
             theme_tag = str(thinker_brief.get("theme_tag", "other"))
+            setup_key, setup_label = build_setup_key(
+                bar_config=chosen_bars[0] if chosen_bars else "",
+                theme_tag=theme_tag,
+                entry_conditions=list(thinker_brief.get("entry_conditions", [])),
+                params=dict(thinker_brief.get("params_template", {})),
+                entry_logic=thinker_brief.get("entry_logic", ""),
+            )
 
             module_path, is_new_path = _choose_module_path(
                 signals_dir,
@@ -3287,6 +3351,8 @@ def main() -> int:
                         "errors": validation_errors,
                         "hypothesis_id": hypothesis_id,
                         "theme_tag": str(thinker_brief.get("theme_tag", "other")),
+                        "setup_key": setup_key,
+                        "setup_label": setup_label,
                         "thinker": {
                             "model": thinker_generation.model,
                             "response_id": thinker_generation.response_id,
@@ -3325,6 +3391,8 @@ def main() -> int:
                         iteration=iteration_no,
                         hypothesis_id=hypothesis_id,
                         theme_tag=theme_tag,
+                        setup_key=setup_key,
+                        setup_label=setup_label,
                     )
                     inserted = False
                     if not args.dry_run:
@@ -3362,6 +3430,8 @@ def main() -> int:
                                 "bar_configs": chosen_bars,
                                 "hypothesis_id": hypothesis_id,
                                 "theme_tag": theme_tag,
+                                "setup_key": setup_key,
+                                "setup_label": setup_label,
                             },
                         },
                     )
@@ -3391,6 +3461,8 @@ def main() -> int:
                         "strategy_name": module_name,
                         "hypothesis_id": hypothesis_id,
                         "theme_tag": theme_tag,
+                        "setup_key": setup_key,
+                        "setup_label": setup_label,
                         "thinker_brief": thinker_brief,
                         "bar_configs": chosen_bars,
                         "params": params,

@@ -1241,6 +1241,96 @@ def test_execute_claimed_task_supports_stateful_signal_signature(
     assert captures["last_state_calls"] == 2
 
 
+def test_execute_claimed_task_short_circuits_when_edge_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    def _losing_signal(df, _params):
+        signal = np.zeros(len(df), dtype=np.int8)
+        signal[::10] = 1
+        return signal
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=_losing_signal,
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_edge_probe")
+    monkeypatch.setattr(mod, "check_signal_causality", lambda **kwargs: [])
+    monkeypatch.setattr(
+        mod,
+        "run_backtest",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("run_backtest should not run after edge-probe fail")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_validation_gauntlet",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("gauntlet should not run after edge-probe fail")),
+    )
+
+    fake_file = tmp_path / "nq_2024-01-02.parquet"
+    fake_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "get_split_files", lambda _split: [fake_file])
+
+    start = np.datetime64("2024-01-02T14:30:00")
+    bars = pl.DataFrame(
+        {
+            "ts_event": pl.datetime_range(start, start + np.timedelta64(119, "m"), interval="1m", eager=True),
+            "open": np.linspace(120.0, 100.0, 120),
+            "high": np.linspace(120.5, 100.5, 120),
+            "low": np.linspace(119.5, 99.5, 120),
+            "close": np.linspace(120.0, 100.0, 120),
+        }
+    ).with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    monkeypatch.setattr(mod, "load_cached_matrix", lambda *args, **kwargs: bars)
+
+    verdict, details = mod._execute_claimed_task(
+        task={
+            "task_id": "t_edge_probe_fail",
+            "strategy_name": "dummy",
+            "split": "train",
+            "bar_config": "time_1m",
+            "params": {},
+            "run_gauntlet": True,
+            "write_candidate": False,
+        },
+        mission={
+            "search_split": "train",
+            "run_gauntlet": True,
+            "target_sharpe": -1.0,
+            "min_trade_count": 0,
+            "session_filter": "rth",
+            "write_candidates": False,
+            "edge_probe": {
+                "enabled": True,
+                "horizons": [1, 3, 5, 10, 20, 40, 60, 90],
+                "min_events": 3,
+                "min_positive_horizons": 1,
+                "min_avg_trade_pnl": 0.0,
+                "min_positive_day_fraction": 0.50,
+                "max_day_concentration": 1.0,
+            },
+        },
+        run_id="run_x",
+        run_dir=tmp_path,
+        framework_lock_hash="abc123",
+        git_commit=None,
+        experiments_path=tmp_path / "experiments.jsonl",
+        experiments_lock=tmp_path / "experiments.lock",
+    )
+
+    assert verdict == "FAIL"
+    assert details["search_result"]["verdict"] == "FAIL"
+    assert details["search_result"]["failure_code"] == "no_raw_edge"
+    assert details["search_result"]["edge_probe"]["enabled"] is True
+    assert details["search_result"]["edge_probe"]["passed"] is False
+    assert details["search_result"]["edge_probe"]["status"] == "no_raw_edge"
+    assert details["candidate_status"] == "rejected_search"
+
+
 def test_task_feedback_summary_preserves_theme_and_selection_fields():
     mod = _load_runner_module()
     summary = mod._task_feedback_summary(
@@ -1248,6 +1338,8 @@ def test_task_feedback_summary_preserves_theme_and_selection_fields():
             "task_id": "t1",
             "strategy_name": "alpha_amt",
             "theme_tag": "amt_value_area",
+            "setup_key": "setup_123",
+            "setup_label": "tick_610 | volume_ratio > (primary) | exit=sl_ticks,pt_ticks",
             "bar_config": "tick_610",
             "state": "completed",
             "verdict": "PASS",
@@ -1260,12 +1352,17 @@ def test_task_feedback_summary_preserves_theme_and_selection_fields():
                 "final_verdict": "FAIL",
                 "candidate_status": "rejected_selection",
                 "selection_result": {"verdict": "FAIL"},
+                "edge_probe": {"status": "pass", "passed": True},
             },
         }
     )
 
     assert summary["theme_tag"] == "amt_value_area"
+    assert summary["setup_key"] == "setup_123"
+    assert summary["setup_label"].startswith("tick_610 | volume_ratio >")
     assert summary["selection_attempted"] is True
     assert summary["selection_verdict"] == "FAIL"
     assert summary["final_verdict"] == "FAIL"
     assert summary["candidate_status"] == "rejected_selection"
+    assert summary["edge_probe_status"] == "pass"
+    assert summary["edge_probe_passed"] is True

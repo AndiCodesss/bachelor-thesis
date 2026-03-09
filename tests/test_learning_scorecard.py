@@ -6,6 +6,7 @@ from pathlib import Path
 from research.lib.learning_scorecard import (
     empty_bar_entry,
     empty_scorecard,
+    empty_setup_entry,
     empty_theme_entry,
     format_learning_context,
     laplace_rate,
@@ -32,6 +33,7 @@ def test_laplace_rate_perfect_not_one():
 def test_empty_scorecard_has_expected_shape():
     scorecard = empty_scorecard()
     assert scorecard["schema_version"] == "1.0"
+    assert scorecard["setup_stats"] == {}
     assert scorecard["theme_stats"] == {}
     assert scorecard["bar_config_affinity"] == {}
     assert scorecard["near_misses"] == []
@@ -54,8 +56,22 @@ def test_empty_bar_entry_has_smoothed_defaults():
     assert entry["attempts"] == 0
     assert entry["search_passes"] == 0
     assert entry["search_rate"] == laplace_rate(0, 0)
+    assert entry["selection_attempts"] == 0
     assert entry["selection_passes"] == 0
     assert entry["selection_rate"] == laplace_rate(0, 0)
+
+
+def test_empty_setup_entry_has_expected_defaults():
+    entry = empty_setup_entry()
+    assert entry["label"] == ""
+    assert entry["attempts"] == 0
+    assert entry["edge_passes"] == 0
+    assert entry["search_passes"] == 0
+    assert entry["selection_attempts"] == 0
+    assert entry["selection_passes"] == 0
+    assert entry["fail_counts"] == {}
+    assert entry["recent_outcomes"] == []
+    assert entry["updated_at"] is None
 
 
 def test_resolve_focus_anchors_uses_current_focus():
@@ -84,6 +100,8 @@ def test_update_learning_scorecard_from_task_updates_bar_affinity_and_fail_count
         "strategy_name": "alpha_amt",
         "theme_tag": "amt_value_area",
         "bar_config": "tick_610",
+        "verdict": "FAIL",
+        "final_verdict": "FAIL",
         "search_result": {
             "verdict": "FAIL",
             "metrics": {"sharpe_ratio": 1.32, "trade_count": 24},
@@ -112,6 +130,15 @@ def test_update_learning_scorecard_from_task_updates_bar_affinity_and_fail_count
 
     theme = scorecard["theme_stats"]["amt_value_area"]
     assert theme["fail_counts"] == {"walk_forward": 1}
+
+    assert len(scorecard["setup_stats"]) == 1
+    setup = next(iter(scorecard["setup_stats"].values()))
+    assert setup["attempts"] == 1
+    assert setup["edge_passes"] == 1
+    assert setup["search_passes"] == 0
+    assert setup["fail_counts"] == {"walk_forward": 1}
+    assert setup["recent_outcomes"][0]["edge_status"] == "pass"
+    assert setup["recent_outcomes"][0]["final_verdict"] == "FAIL"
 
     near_miss = scorecard["near_misses"][0]
     assert near_miss["strategy"] == "alpha_amt"
@@ -158,6 +185,75 @@ def test_update_learning_scorecard_records_selection_near_miss(tmp_path: Path):
     assert near_miss["bar_config"] == "tick_610"
     assert near_miss["split"] == "selection"
     assert near_miss["failed_checks"] == ["walk_forward"]
+
+
+def test_update_learning_scorecard_tracks_edge_probe_failures_by_setup(tmp_path: Path):
+    scorecard_path = tmp_path / "scorecard.json"
+    scorecard_lock = tmp_path / "scorecard.lock"
+
+    task = {
+        "strategy_name": "alpha_edge_fail",
+        "theme_tag": "orderflow_divergence",
+        "bar_config": "tick_610",
+        "search_result": {
+            "verdict": "FAIL",
+            "failure_code": "no_raw_edge",
+            "edge_probe": {
+                "enabled": True,
+                "passed": False,
+                "status": "no_raw_edge",
+                "events": 1961,
+                "positive_horizons": 0,
+                "best_horizon_bars": 10,
+                "best_avg_trade_pnl": -21.74,
+                "horizon_results": [
+                    {
+                        "horizon_bars": 10,
+                        "long_avg_trade_pnl": -18.00,
+                        "short_avg_trade_pnl": -25.00,
+                    }
+                ],
+            },
+            "metrics": {"sharpe_ratio": 0.0, "trade_count": 0},
+            "gauntlet": {
+                "overall_verdict": "FAIL",
+                "walk_forward": {"verdict": "FAIL"},
+            },
+            "advanced_validation_gates": {
+                "enabled": True,
+                "checks": {
+                    "alpha_decay_verdict": {"passed": False},
+                    "min_dsr_probability": {"passed": False},
+                },
+            },
+        },
+        "selection_result": None,
+        "details": {},
+    }
+
+    update_learning_scorecard(
+        scorecard_path,
+        scorecard_lock,
+        task=task,
+    )
+    scorecard = read_learning_scorecard(scorecard_path, scorecard_lock)
+
+    setup = next(iter(scorecard["setup_stats"].values()))
+    assert setup["attempts"] == 1
+    assert setup["edge_passes"] == 0
+    assert setup["search_passes"] == 0
+    assert setup["fail_counts"] == {"no_raw_edge": 1}
+    assert setup["recent_outcomes"][0]["edge_status"] == "no_raw_edge"
+    assert setup["recent_outcomes"][0]["edge_events"] == 1961
+    assert setup["recent_outcomes"][0]["positive_horizons"] == 0
+    assert setup["recent_outcomes"][0]["horizon_count"] == 1
+    assert setup["recent_outcomes"][0]["best_horizon_bars"] == 10
+    assert setup["recent_outcomes"][0]["best_avg_trade_pnl"] == -21.74
+    assert setup["recent_outcomes"][0]["best_long_avg_trade_pnl"] == -18.0
+    assert setup["recent_outcomes"][0]["best_short_avg_trade_pnl"] == -25.0
+
+    theme = scorecard["theme_stats"]["orderflow_divergence"]
+    assert theme["fail_counts"] == {"no_raw_edge": 1}
 
 
 def test_update_learning_scorecard_from_handoff_updates_family_stats(tmp_path: Path):
@@ -401,6 +497,39 @@ def test_format_learning_context_is_compact_and_ranked():
     scorecard = {
         "schema_version": "1.0",
         "rebuilt_at": "2026-03-07T14:00:00+00:00",
+        "setup_stats": {
+            "setup_a": {
+                "label": "tick_610 | delta_heat >= (primary), close_position <= (confirmation) | exit=sl_ticks,pt_ticks",
+                "attempts": 4,
+                "edge_passes": 2,
+                "edge_rate": 0.50,
+                "search_passes": 1,
+                "search_rate": 0.33,
+                "selection_attempts": 1,
+                "selection_passes": 0,
+                "selection_rate": 0.33,
+                "fail_counts": {"no_raw_edge": 2, "walk_forward": 1},
+                "recent_outcomes": [
+                    {
+                        "strategy_name": "delta_heat_exhaustion_fade",
+                        "bar_config": "tick_610",
+                        "edge_status": "no_raw_edge",
+                        "edge_events": 1961,
+                        "positive_horizons": 0,
+                        "horizon_count": 8,
+                        "best_horizon_bars": 10,
+                        "best_avg_trade_pnl": -21.74,
+                        "best_long_avg_trade_pnl": -18.00,
+                        "best_short_avg_trade_pnl": -25.00,
+                        "search_verdict": "FAIL",
+                        "final_verdict": "FAIL",
+                        "failure_codes": ["no_raw_edge"],
+                        "completed_at": "2026-03-07T14:10:00+00:00",
+                    }
+                ],
+                "updated_at": "2026-03-07T14:10:00+00:00",
+            }
+        },
         "theme_stats": {
             "amt_value_area": {
                 "attempts": 12,
@@ -423,7 +552,14 @@ def test_format_learning_context_is_compact_and_ranked():
         },
         "bar_config_affinity": {
             "amt_value_area": {
-                "tick_610": {"attempts": 8, "search_passes": 4, "search_rate": 0.50, "selection_passes": 2, "selection_rate": 0.30}
+                "tick_610": {
+                    "attempts": 8,
+                    "search_passes": 4,
+                    "search_rate": 0.50,
+                    "selection_attempts": 5,
+                    "selection_passes": 2,
+                    "selection_rate": 0.30,
+                }
             }
         },
         "near_misses": [
@@ -440,9 +576,16 @@ def test_format_learning_context_is_compact_and_ranked():
     }
     context = format_learning_context(scorecard)
     assert "LEARNING_SCORECARD:" in context
-    assert "amt_value_area: 12 attempts" in context
+    assert "Recent concrete setup outcomes:" in context
+    assert "delta_heat >= (primary)" in context
+    assert "edge 2/4 | search 1/4 | selection 0/1" in context
+    assert "events=1961 | pos_horizons=0/8 | best=10b avg=-21.74 | long=-18.00 short=-25.00" in context
+    assert "Repeated setup failure modes:" in context
+    assert "no_raw_edge (2), walk_forward (1)" in context
+    assert "Theme performance (secondary audit view):" in context
+    assert "amt_value_area: search 5/12 | selection 2/5" in context
     assert "amt_value_area + tick_610" in context
-    assert "alpha_decay (3)" in context
+    assert "search 4/8 | selection 2/5" in context
     assert "ib_fade_vol_filter_03" in context
     assert "Low-sample themes: volatility_compression" in context
-    assert "EXPLORE a weakly sampled or newly justified one" in context
+    assert "Prioritize setups with real raw edge across horizons" in context
