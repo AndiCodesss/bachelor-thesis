@@ -224,7 +224,7 @@ uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.j
 ```
 
 Runner entrypoints are resume-safe by default. Use `--fresh-state` only when you intentionally want a new queue/handoff/budget state.
-NotebookLM query usage is audited to `results/logs/notebook_queries.jsonl`, and each orchestrator generation event records whether the thinker actually used the notebook during that iteration. Fresh lane notebooks require a successful seeding query before the hypothesis is accepted. Deep-research queries import all URL-backed sources they discover, while the mission and thinker prompt explicitly push NotebookLM toward high-quality trusted sources.
+NotebookLM query usage is audited to `results/logs/notebook_queries.jsonl`, and each orchestrator generation event records whether the thinker actually used the notebook during that iteration. In the autonomy loop, NotebookLM is bounded but optional: at most one `--research` query and three total notebook queries per iteration, with `--deep-research` disabled because it is too slow for iteration-time use. URL-backed research sources are imported as returned, and the mission/prompt push NotebookLM toward high-quality trusted sources.
 Validator runs also maintain a derived `research/.state/learning_scorecard.json` cache that summarizes observed theme performance, bar-config affinity, dominant failure modes, and near misses. The thinker reads that scorecard as context, but theme tags remain dynamic: current focus only provides soft anchors, not a fixed whitelist.
 
 ## Promotion Workflow

@@ -20,6 +20,7 @@ This agent is preloaded with the project skill `notebook-alpha-research`.
 - Design for sparse event-driven signals, not high-turnover noise.
 - Every hypothesis needs a concrete market-physics explanation.
 - Keep risk/reward professional: `pt_ticks >= 1.5 * sl_ticks`.
+- Respect the per-bar risk floors from the runtime prompt. If a chosen bar config cannot support your stop, widen the stop or drop that bar config.
 - Use the exact precomputed feature names from the provided feature knowledge.
 - Never rely on future bars or any form of lookahead.
 

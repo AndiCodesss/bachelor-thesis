@@ -40,13 +40,6 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
             cfg.get("notebook_url") or mission.get("notebooklm_notebook_url", ""),
         ).strip()
         bootstrap_queries = _clean_text_list(cfg.get("bootstrap_queries") or [])
-        fresh_query_mode = _normalize_fresh_query_mode(
-            cfg.get("fresh_query_mode", "research"),
-        )
-        min_fresh_imports = max(
-            0,
-            int(cfg.get("min_fresh_imports", 1 if mode == "lane_fresh" else 0)),
-        )
         query_budget = _normalize_iteration_query_budget(
             cfg.get("iteration_query_budget"),
         )
@@ -60,10 +53,7 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
             or "NotebookLM",
             "bootstrap_queries": bootstrap_queries,
             "bootstrap_mode": _normalize_seed_mode(cfg.get("bootstrap_mode", "deep")),
-            "require_research_on_fresh": bool(cfg.get("require_research_on_fresh", mode == "lane_fresh")),
             "min_bootstrap_successes": max(0, int(cfg.get("min_bootstrap_successes", 0))),
-            "fresh_query_mode": fresh_query_mode,
-            "min_fresh_imports": min_fresh_imports,
             "research_guidance": str(cfg.get("research_guidance", "")).strip(),
             "iteration_query_budget": query_budget,
         }
@@ -77,10 +67,7 @@ def resolve_notebooklm_config(mission: dict[str, Any]) -> dict[str, Any]:
         "title_prefix": str(mission.get("mission_name", "NotebookLM")).strip() or "NotebookLM",
         "bootstrap_queries": [],
         "bootstrap_mode": "deep",
-        "require_research_on_fresh": False,
         "min_bootstrap_successes": 0,
-        "fresh_query_mode": "research",
-        "min_fresh_imports": 0,
         "research_guidance": "",
         "iteration_query_budget": _normalize_iteration_query_budget(None),
     }
@@ -121,9 +108,7 @@ def ensure_lane_notebook(
         result["notebook"] = notebook_meta
         result["mission_overrides"] = {
             "notebooklm_notebook_url": notebook_url,
-            "lane_notebook_requires_research": False,
             "notebook_research_guidance": str(cfg.get("research_guidance", "")),
-            "lane_notebook_seed_requirements": _build_seed_requirements(cfg, required=False),
             "lane_notebook_query_budget": dict(cfg.get("iteration_query_budget", {})),
         }
         return result
@@ -138,14 +123,7 @@ def ensure_lane_notebook(
             result["notebook"] = notebook_meta
             result["mission_overrides"] = {
                 "notebooklm_notebook_url": existing_url,
-                "lane_notebook_requires_research": bool(
-                    cfg.get("require_research_on_fresh", True) and not bool(existing.get("seeded", False)),
-                ),
                 "notebook_research_guidance": str(cfg.get("research_guidance", "")),
-                "lane_notebook_seed_requirements": _build_seed_requirements(
-                    cfg,
-                    required=bool(cfg.get("require_research_on_fresh", True) and not bool(existing.get("seeded", False))),
-                ),
                 "lane_notebook_query_budget": dict(cfg.get("iteration_query_budget", {})),
             }
             return result
@@ -162,12 +140,7 @@ def ensure_lane_notebook(
     result["notebook"] = notebook_meta
     result["mission_overrides"] = {
         "notebooklm_notebook_url": str(notebook_meta["notebook_url"]),
-        "lane_notebook_requires_research": bool(cfg.get("require_research_on_fresh", True) and not notebook_meta.get("seeded", False)),
         "notebook_research_guidance": str(cfg.get("research_guidance", "")),
-        "lane_notebook_seed_requirements": _build_seed_requirements(
-            cfg,
-            required=bool(cfg.get("require_research_on_fresh", True) and not notebook_meta.get("seeded", False)),
-        ),
         "lane_notebook_query_budget": dict(cfg.get("iteration_query_budget", {})),
     }
     return result
@@ -317,13 +290,6 @@ def _normalize_seed_mode(value: Any) -> str:
     return mode
 
 
-def _normalize_fresh_query_mode(value: Any) -> str:
-    mode = str(value or "research").strip().lower()
-    if mode not in {"research", "deep_research"}:
-        raise ValueError(f"Unsupported NotebookLM fresh_query_mode '{value}'")
-    return mode
-
-
 def _normalize_iteration_query_budget(value: Any) -> dict[str, int]:
     payload = dict(value) if isinstance(value, dict) else {}
     return {
@@ -331,20 +297,6 @@ def _normalize_iteration_query_budget(value: Any) -> dict[str, int]:
         "max_research_queries": max(0, int(payload.get("max_research_queries", 1) or 0)),
         "max_deep_research_queries": max(0, int(payload.get("max_deep_research_queries", 0) or 0)),
     }
-
-
-def _build_seed_requirements(cfg: dict[str, Any], *, required: bool) -> dict[str, Any]:
-    preferred_mode = str(cfg.get("fresh_query_mode", "research")).strip().lower() or "research"
-    accepted_modes = ["research"] if preferred_mode == "research" else ["deep_research", "research"]
-    return {
-        "required": bool(required),
-        "preferred_mode": preferred_mode,
-        "accepted_modes": accepted_modes,
-        "min_successful_queries": 1 if required else 0,
-        "min_imported_sources": int(cfg.get("min_fresh_imports", 0) or 0),
-        "allow_fallback_to_plain": False,
-    }
-
 
 def _clean_text_list(values: Any) -> list[str]:
     if not isinstance(values, list):

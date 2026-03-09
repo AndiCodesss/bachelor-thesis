@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any
 
 from research.lib.atomic_io import atomic_json_write
 from research.lib.learning_scorecard import empty_scorecard
+import portalocker
 
 
 def _utc_now() -> str:
@@ -74,6 +76,14 @@ def orchestrator_state_path(root: Path, lane_id: str | None = None) -> Path:
     return state_dir(root) / filename
 
 
+def orchestrator_state_lock_path(root: Path, lane_id: str | None = None) -> Path:
+    return orchestrator_state_path(root, lane_id=lane_id).with_suffix(".lock")
+
+
+def orchestrator_state_lock_path_for(state_path: Path) -> Path:
+    return Path(state_path).with_suffix(".lock")
+
+
 def orchestrator_state_default(mission_name: str) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
@@ -89,14 +99,14 @@ def ensure_orchestrator_state(root: Path, *, mission_name: str, lane_id: str | N
     path = orchestrator_state_path(root, lane_id=lane_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        atomic_json_write(path, orchestrator_state_default(mission_name))
+        write_orchestrator_state(path, orchestrator_state_default(mission_name))
     return path
 
 
 def reset_orchestrator_state(root: Path, *, mission_name: str, lane_id: str | None = None) -> Path:
     path = orchestrator_state_path(root, lane_id=lane_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(path, orchestrator_state_default(mission_name))
+    write_orchestrator_state(path, orchestrator_state_default(mission_name))
     return path
 
 
@@ -113,3 +123,24 @@ def clear_orchestrator_state(root: Path) -> list[Path]:
         path.unlink(missing_ok=True)
         removed.append(path)
     return removed
+
+
+def read_orchestrator_state(path: Path) -> dict[str, Any]:
+    state_path = Path(path)
+    if not state_path.exists():
+        return {}
+    lock_path = orchestrator_state_lock_path_for(state_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with portalocker.Lock(lock_path, mode="a", timeout=5):
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+
+def write_orchestrator_state(path: Path, payload: dict[str, Any]) -> None:
+    state_path = Path(path)
+    lock_path = orchestrator_state_lock_path_for(state_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with portalocker.Lock(lock_path, mode="a", timeout=5):
+        atomic_json_write(state_path, payload)

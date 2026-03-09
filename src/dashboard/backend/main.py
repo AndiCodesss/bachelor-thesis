@@ -5,9 +5,11 @@ from typing import Optional
 import asyncio
 import uuid
 import os
+import signal
 import sys
 import json
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -120,10 +122,47 @@ def _recent_json_events(path: Path, event_names: set[str], limit: int, scan_line
 
 
 def _terminate_process(proc) -> None:
+    pid = getattr(proc, "pid", None)
+    if pid is None:
+        return
+    if getattr(proc, "returncode", None) is not None:
+        return
+
+    if os.name != "nt":
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+            time.sleep(0.2)
+            if _process_alive(pid):
+                os.killpg(pgid, signal.SIGKILL)
+            return
+        except Exception:
+            pass
+
     try:
         proc.terminate()
     except Exception:
         pass
+    time.sleep(0.2)
+    if _process_alive(pid):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        return False
+    return True
+
+
+def _subprocess_exec_kwargs() -> dict:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 # --- Thinker Session Helpers ---
 
@@ -458,7 +497,8 @@ async def execute_in_background(run_id: str, cmd: list[str]):
             cwd=str(project_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, # Merge stderr into stdout
-            env=os.environ.copy()
+            env=os.environ.copy(),
+            **_subprocess_exec_kwargs(),
         )
         runs[run_id]["process"] = process
 
@@ -491,7 +531,8 @@ async def direct_run_autonomy(run_id: str, commands: list[dict]):
                 cwd=str(project_root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=os.environ.copy()
+                env=os.environ.copy(),
+                **_subprocess_exec_kwargs(),
             )
             active_procs.append((name, proc))
             runs[run_id]["processes"].append(proc)
@@ -636,7 +677,7 @@ def stop_run(run_id: str):
     process = r_info.get("process")
     if process:
         try:
-            process.terminate()
+            _terminate_process(process)
             r_info["status"] = "failed"
             r_info["logs"].append("\n--- Process forcefully terminated by user ---")
 

@@ -63,6 +63,25 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
     assert out["code"].endswith("\n")
 
 
+def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
+    mod = _load_module()
+    with pytest.raises(ValueError, match="remove volume_2000 from bar_configs"):
+        mod._normalize_thinker_brief(
+            {
+                "hypothesis_id": "risk_floor_case",
+                "theme_tag": "amt_value_area",
+                "strategy_name_hint": "risk_floor_case",
+                "bar_configs": ["volume_2000"],
+                "params_template": {"pt_ticks": 60, "sl_ticks": 22},
+                "thesis": "x",
+                "entry_logic": "y",
+                "exit_logic": "z",
+            },
+            mission_bar_configs=["volume_2000"],
+            sample_bar_context={"volume_2000": {"range_ticks": {"median": 59.0}}},
+        )
+
+
 def test_format_results_table_sorts_by_sharpe_and_marks_near_misses():
     mod = _load_module()
     items = [
@@ -427,14 +446,7 @@ def test_prompts_include_feature_knowledge_markers():
             "session_filter": "eth",
             "feature_group": "all",
             "notebooklm_notebook_url": "https://notebooklm.google.com/notebook/test-id",
-            "lane_notebook_requires_research": True,
             "notebook_research_guidance": "Use high-quality trusted sources.",
-            "lane_notebook_seed_requirements": {
-                "preferred_mode": "research",
-                "accepted_modes": ["research"],
-                "min_successful_queries": 1,
-                "min_imported_sources": 1,
-            },
             "lane_notebook_query_budget": {
                 "max_total_queries": 3,
                 "max_research_queries": 1,
@@ -445,7 +457,15 @@ def test_prompts_include_feature_knowledge_markers():
         feedback_items=[],
         learning_context="LEARNING_SCORECARD:\nLow-sample themes: amt_value_area",
         feature_surface_context=feature_surface_context,
-        runtime_context={"split": "validate", "min_trade_count": 30, "sample_bar_context": {"tick_610": {"sample_rows": 1200}}},
+        runtime_context={
+            "split": "validate",
+            "min_trade_count": 30,
+            "sample_bar_context": {
+                "tick_610": {"sample_rows": 1200, "range_ticks": {"median": 40.0}},
+                "volume_2000": {"sample_rows": 300, "range_ticks": {"median": 59.0}},
+                "time_1m": {"sample_rows": 700, "range_ticks": {"median": 33.0}},
+            },
+        },
         feature_knowledge=feature_knowledge,
     )
     assert "AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN" in thinker_prompt
@@ -455,13 +475,12 @@ def test_prompts_include_feature_knowledge_markers():
     assert "query_notebook.py" in thinker_prompt
     assert "--research" in thinker_prompt
     assert '--deep-research "question"' not in thinker_prompt
-    assert "FRESH NOTEBOOK REQUIREMENT" in thinker_prompt
     assert "choose the research direction yourself" in thinker_prompt
     assert "Hard runtime budget this iteration: at most 1 --research query and 3 total notebook queries." in thinker_prompt
     assert "--deep-research is disabled for the autonomy thinker loop" in thinker_prompt
-    assert "complete one successful --research query" in thinker_prompt
-    assert "at least 1 source(s)" in thinker_prompt
     assert "Use high-quality trusted sources." in thinker_prompt
+    assert "BAR_CONFIG_RISK_FLOORS:" in thinker_prompt
+    assert "volume_2000: sl_ticks >= 40" in thinker_prompt
     assert '"common_columns"' in thinker_prompt
     assert "Current focus anchors" in thinker_prompt
     assert "- amt_value_area" in thinker_prompt
@@ -578,34 +597,7 @@ def test_build_learning_context_reads_scorecard(tmp_path: Path):
     assert "Low-sample themes: orderflow_divergence" in context
 
 
-def test_notebook_seed_satisfied_requires_non_fallback_quality_research():
-    mod = _load_module()
-    requirements = {
-        "required": True,
-        "preferred_mode": "deep_research",
-        "accepted_modes": ["research", "deep_research"],
-        "min_successful_queries": 1,
-        "min_imported_sources": 1,
-        "allow_fallback_to_plain": False,
-    }
-    summary = {
-        "non_fallback_mode_counts": {"plain": 0, "research": 1, "deep_research": 0},
-        "fallback_count": 0,
-        "imported_sources": 5,
-    }
-    assert mod._notebook_seed_satisfied(summary, requirements) is True
-
-    bad_summary = {
-        "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
-        "fallback_count": 1,
-        "imported_sources": 0,
-    }
-    assert mod._notebook_seed_satisfied(bad_summary, requirements) is False
-    reason = mod._notebook_seed_failure_reason(bad_summary, requirements)
-    assert "fell back to plain" in reason
-
-
-def test_persist_notebook_progress_marks_lane_seeded_and_persists_state(tmp_path: Path):
+def test_persist_notebook_progress_marks_lane_seeded_after_imports(tmp_path: Path):
     mod = _load_module()
     notebook_meta = {
         "configured": True,
@@ -617,22 +609,13 @@ def test_persist_notebook_progress_marks_lane_seeded_and_persists_state(tmp_path
         "query_count": 1,
         "modes_used": ["research"],
         "imported_sources": 9,
-        "non_fallback_mode_counts": {"plain": 0, "research": 1, "deep_research": 0},
     }
-    requirements = {
-        "accepted_modes": ["research", "deep_research"],
-        "min_successful_queries": 1,
-        "min_imported_sources": 1,
-    }
-    active_mission = {"lane_notebook_requires_research": True}
     orchestrator_state = {"schema_version": "1.0"}
     orchestrator_path = tmp_path / "orchestrator.json"
 
     mod._persist_notebook_progress(
         notebook_meta=notebook_meta,
         notebook_summary=summary,
-        notebook_seed_requirements=requirements,
-        active_mission=active_mission,
         orchestrator_state=orchestrator_state,
         state_paths={"orchestrator": orchestrator_path},
     )
@@ -642,14 +625,13 @@ def test_persist_notebook_progress_marks_lane_seeded_and_persists_state(tmp_path
     assert notebook_meta["imported_sources"] == 9
     assert notebook_meta["seed_query_count"] == 1
     assert notebook_meta["seed_modes_used"] == ["research"]
-    assert active_mission["lane_notebook_requires_research"] is False
 
     persisted = json.loads(orchestrator_path.read_text(encoding="utf-8"))
     assert persisted["notebooklm"]["seeded"] is True
     assert persisted["notebooklm"]["imported_sources"] == 9
 
 
-def test_persist_notebook_progress_preserves_partial_imports_without_seeding(tmp_path: Path):
+def test_persist_notebook_progress_preserves_partial_imports(tmp_path: Path):
     mod = _load_module()
     notebook_meta = {
         "configured": True,
@@ -661,33 +643,25 @@ def test_persist_notebook_progress_preserves_partial_imports_without_seeding(tmp
         "query_count": 1,
         "modes_used": ["plain"],
         "imported_sources": 4,
-        "non_fallback_mode_counts": {"plain": 0, "research": 0, "deep_research": 0},
     }
-    requirements = {
-        "accepted_modes": ["research", "deep_research"],
-        "min_successful_queries": 1,
-        "min_imported_sources": 1,
-    }
-    active_mission = {"lane_notebook_requires_research": True}
     orchestrator_state = {"schema_version": "1.0"}
     orchestrator_path = tmp_path / "orchestrator.json"
 
     mod._persist_notebook_progress(
         notebook_meta=notebook_meta,
         notebook_summary=summary,
-        notebook_seed_requirements=requirements,
-        active_mission=active_mission,
         orchestrator_state=orchestrator_state,
         state_paths={"orchestrator": orchestrator_path},
     )
 
-    assert notebook_meta["seeded"] is False
-    assert notebook_meta["fresh"] is True
+    assert notebook_meta["seeded"] is True
+    assert notebook_meta["fresh"] is False
     assert notebook_meta["imported_sources"] == 4
-    assert active_mission["lane_notebook_requires_research"] is True
+    assert notebook_meta["seed_query_count"] == 1
+    assert notebook_meta["seed_modes_used"] == ["plain"]
 
     persisted = json.loads(orchestrator_path.read_text(encoding="utf-8"))
-    assert persisted["notebooklm"]["seeded"] is False
+    assert persisted["notebooklm"]["seeded"] is True
     assert persisted["notebooklm"]["imported_sources"] == 4
 
 

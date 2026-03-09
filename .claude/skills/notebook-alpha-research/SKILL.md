@@ -1,6 +1,6 @@
 ---
 name: notebook-alpha-research
-description: Use when the NQ autonomy thinker must choose a research direction, query NotebookLM, run deep research, judge evidence quality, or convert NotebookLM findings into one falsifiable intraday alpha hypothesis.
+description: Use when the NQ autonomy thinker must choose a research direction, query NotebookLM, judge evidence quality, or convert NotebookLM findings into one falsifiable intraday alpha hypothesis.
 ---
 
 # Notebook Alpha Research

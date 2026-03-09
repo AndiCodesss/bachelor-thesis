@@ -32,12 +32,13 @@ import time
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from research.lib.notebook_audit import log_notebook_query
 from research.lib.notebook_audit import audit_context_from_env, summarize_notebook_queries
+from research.lib.notebook_audit import log_notebook_query
 from research.lib.notebook_guidance import (
     load_notebook_query_budget,
     load_notebook_research_guidance,
 )
+from research.lib.runtime_state import read_orchestrator_state, write_orchestrator_state
 
 _RESEARCH_POLL_INTERVAL = 5    # seconds between status polls
 _FAST_RESEARCH_TIMEOUT = 300   # seconds max for fast mode (5 min)
@@ -86,6 +87,43 @@ def _query_budget_error(mode: str) -> str | None:
                 )
             )
     return None
+
+
+def _persist_import_progress_if_applicable(
+    *,
+    notebook_id: str,
+    mode: str,
+    imported_sources: int,
+    fallback_to_plain: bool,
+) -> None:
+    if fallback_to_plain:
+        return
+    if imported_sources <= 0:
+        return
+
+    context = audit_context_from_env()
+    state_path = str(context.get("orchestrator_state_path") or "").strip()
+    if not state_path:
+        return
+
+    payload = read_orchestrator_state(Path(state_path))
+    notebook_meta = payload.get("notebooklm")
+    if not isinstance(notebook_meta, dict):
+        return
+    if str(notebook_meta.get("notebook_id", "")).strip() != str(notebook_id).strip():
+        return
+
+    notebook_meta["imported_sources"] = int(notebook_meta.get("imported_sources", 0) or 0) + int(imported_sources)
+    seed_modes_used = list(notebook_meta.get("seed_modes_used", []) or [])
+    notebook_meta["seed_query_count"] = int(notebook_meta.get("seed_query_count", 0) or 0) + 1
+    if mode not in seed_modes_used:
+        seed_modes_used.append(mode)
+    notebook_meta["seed_modes_used"] = seed_modes_used
+    notebook_meta["seeded"] = True
+    notebook_meta["fresh"] = False
+
+    payload["notebooklm"] = notebook_meta
+    write_orchestrator_state(Path(state_path), payload)
 
 
 def _notebook_id_from_url(url: str) -> str:
@@ -236,6 +274,15 @@ def main() -> None:
                 answer_chars=len(answer),
                 discovered_sources=int(meta.get("discovered_sources", 0)),
                 imported_sources=int(meta.get("imported_sources", 0)),
+                fallback_to_plain=bool(meta.get("fallback_to_plain", False)),
+            )
+        except Exception:
+            pass
+        try:
+            _persist_import_progress_if_applicable(
+                notebook_id=notebook_id,
+                mode=mode,
+                imported_sources=int(meta.get("imported_sources", 0) or 0),
                 fallback_to_plain=bool(meta.get("fallback_to_plain", False)),
             )
         except Exception:

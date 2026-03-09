@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -116,3 +117,91 @@ def test_query_budget_error_disables_deep_research(monkeypatch):
 
     error = mod._query_budget_error("deep_research")
     assert error == "deep research is disabled for this autonomy iteration"
+
+
+def test_persist_import_progress_marks_lane_seeded_immediately(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state_path = tmp_path / "llm_orchestrator_C.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "run_id": "run_1",
+                "notebooklm": {
+                    "notebook_id": "nb_1",
+                    "fresh": True,
+                    "seeded": False,
+                    "imported_sources": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "audit_context_from_env",
+        lambda: {
+            "run_id": "run_1",
+            "iteration": 1,
+            "stage": "quant_thinker",
+            "lane_id": "C",
+            "orchestrator_state_path": str(state_path),
+        },
+    )
+    mod._persist_import_progress_if_applicable(
+        notebook_id="nb_1",
+        mode="research",
+        imported_sources=10,
+        fallback_to_plain=False,
+    )
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["notebooklm"]["seeded"] is True
+    assert payload["notebooklm"]["fresh"] is False
+    assert payload["notebooklm"]["imported_sources"] == 10
+    assert payload["notebooklm"]["seed_query_count"] == 1
+    assert payload["notebooklm"]["seed_modes_used"] == ["research"]
+
+
+def test_persist_import_progress_marks_plain_imports_as_seeded(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state_path = tmp_path / "llm_orchestrator_C.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "run_id": "run_1",
+                "notebooklm": {
+                    "notebook_id": "nb_1",
+                    "fresh": True,
+                    "seeded": False,
+                    "imported_sources": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "audit_context_from_env",
+        lambda: {
+            "run_id": "run_1",
+            "iteration": 1,
+            "stage": "quant_thinker",
+            "lane_id": "C",
+            "orchestrator_state_path": str(state_path),
+        },
+    )
+    mod._persist_import_progress_if_applicable(
+        notebook_id="nb_1",
+        mode="plain",
+        imported_sources=3,
+        fallback_to_plain=False,
+    )
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["notebooklm"]["seeded"] is True
+    assert payload["notebooklm"]["fresh"] is False
+    assert payload["notebooklm"]["imported_sources"] == 3
+    assert payload["notebooklm"]["seed_query_count"] == 1
+    assert payload["notebooklm"]["seed_modes_used"] == ["plain"]

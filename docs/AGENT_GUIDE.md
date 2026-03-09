@@ -109,8 +109,9 @@ The autonomy roles now also use repo-tracked Claude project skills:
 These are preloaded into the project agents through the agent frontmatter `skills:` field rather than relied on as ad hoc human-facing slash commands.
 
 For `lane_fresh` NotebookLM runs, each lane gets its own persistent notebook.
-Fresh lane notebooks are not considered seeded until the thinker completes the
-required research mode from the mission config and imports enough sources.
+NotebookLM is bounded but optional during autonomy iterations: the thinker may
+use at most one `--research` query and three total notebook queries per
+iteration, and `--deep-research` is disabled in the runtime loop.
 Research guidance should push NotebookLM toward high-quality trusted sources,
 but the notebook import path itself stays simple: URL-backed research sources
 are imported as returned.

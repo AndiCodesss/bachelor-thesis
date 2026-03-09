@@ -22,6 +22,7 @@ ENV_ITERATION = "NOTEBOOK_AUDIT_ITERATION"
 ENV_STAGE = "NOTEBOOK_AUDIT_STAGE"
 ENV_LANE_ID = "NOTEBOOK_AUDIT_LANE_ID"
 ENV_AGENT = "NOTEBOOK_AUDIT_AGENT"
+ENV_ORCHESTRATOR_STATE_PATH = "NOTEBOOK_AUDIT_ORCHESTRATOR_STATE_PATH"
 
 
 def _question_hash(question: str) -> str:
@@ -42,6 +43,7 @@ def audit_context_from_env() -> dict[str, Any]:
         "stage": os.getenv(ENV_STAGE) or None,
         "lane_id": os.getenv(ENV_LANE_ID) or None,
         "agent": os.getenv(ENV_AGENT) or None,
+        "orchestrator_state_path": os.getenv(ENV_ORCHESTRATOR_STATE_PATH) or None,
     }
 
 
@@ -53,6 +55,7 @@ def notebook_audit_context(
     stage: str,
     lane_id: str | None = None,
     agent: str = "llm_orchestrator",
+    orchestrator_state_path: str | None = None,
 ) -> Iterator[None]:
     """Temporarily expose audit metadata to child NotebookLM query processes."""
     updates = {
@@ -61,6 +64,7 @@ def notebook_audit_context(
         ENV_STAGE: str(stage),
         ENV_LANE_ID: str(lane_id) if lane_id is not None else None,
         ENV_AGENT: str(agent),
+        ENV_ORCHESTRATOR_STATE_PATH: str(orchestrator_state_path) if orchestrator_state_path else None,
     }
     previous = {key: os.environ.get(key) for key in updates}
     try:

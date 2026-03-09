@@ -30,6 +30,7 @@ from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.feature_surface import (
     build_feature_surface,
     describe_referenced_columns,
+    diagnose_condition_passthrough,
     format_feature_surface_context,
     format_referenced_surface_warnings,
 )
@@ -56,7 +57,9 @@ from research.lib.notebook_audit import notebook_audit_context, summarize_notebo
 from research.lib.runtime_state import (
     ensure_orchestrator_state,
     ensure_shared_state,
+    read_orchestrator_state,
     reset_orchestrator_state,
+    write_orchestrator_state,
 )
 from research.signals import check_signal_causality, load_signal_module
 from src.framework.api import (
@@ -627,90 +630,44 @@ def _default_notebook_summary(*, configured: bool) -> dict[str, Any]:
     }
 
 
-def _default_notebook_seed_requirements() -> dict[str, Any]:
-    return {
-        "required": False,
-        "preferred_mode": "research",
-        "accepted_modes": ["research"],
-        "min_successful_queries": 0,
-        "min_imported_sources": 0,
-        "allow_fallback_to_plain": False,
-    }
-
-
-def _resolve_notebook_seed_requirements(mission: dict[str, Any]) -> dict[str, Any]:
-    payload = mission.get("lane_notebook_seed_requirements")
-    if not isinstance(payload, dict):
-        return _default_notebook_seed_requirements()
-    out = _default_notebook_seed_requirements()
-    out.update(dict(payload))
-    accepted_modes = out.get("accepted_modes")
-    if not isinstance(accepted_modes, list) or not accepted_modes:
-        accepted_modes = [str(out.get("preferred_mode", "research"))]
-    cleaned_modes = []
-    for mode in accepted_modes:
-        value = str(mode or "").strip().lower()
-        if value in {"research", "deep_research"} and value not in cleaned_modes:
-            cleaned_modes.append(value)
-    out["accepted_modes"] = cleaned_modes or ["research"]
-    out["preferred_mode"] = str(out.get("preferred_mode", "research")).strip().lower() or "research"
-    out["min_successful_queries"] = max(0, int(out.get("min_successful_queries", 0) or 0))
-    out["min_imported_sources"] = max(0, int(out.get("min_imported_sources", 0) or 0))
-    out["allow_fallback_to_plain"] = bool(out.get("allow_fallback_to_plain", False))
-    out["required"] = bool(out.get("required", False))
-    return out
-
-
 def _resolve_notebook_query_budget(mission: dict[str, Any]) -> dict[str, int]:
     return normalize_notebook_query_budget(mission.get("lane_notebook_query_budget"))
-
-
-def _notebook_seed_satisfied(summary: dict[str, Any], requirements: dict[str, Any]) -> bool:
-    accepted_modes = requirements.get("accepted_modes") if isinstance(requirements.get("accepted_modes"), list) else []
-    mode_counts = (
-        summary.get("non_fallback_mode_counts")
-        if isinstance(summary.get("non_fallback_mode_counts"), dict)
-        else {}
-    )
-    successful_queries = sum(int(mode_counts.get(mode, 0) or 0) for mode in accepted_modes)
-    return (
-        successful_queries >= int(requirements.get("min_successful_queries", 0) or 0)
-        and int(summary.get("imported_sources", 0) or 0) >= int(requirements.get("min_imported_sources", 0) or 0)
-    )
-
-
-def _notebook_seed_failure_reason(summary: dict[str, Any], requirements: dict[str, Any]) -> str:
-    accepted_modes = requirements.get("accepted_modes") if isinstance(requirements.get("accepted_modes"), list) else []
-    mode_counts = (
-        summary.get("non_fallback_mode_counts")
-        if isinstance(summary.get("non_fallback_mode_counts"), dict)
-        else {}
-    )
-    successful_queries = sum(int(mode_counts.get(mode, 0) or 0) for mode in accepted_modes)
-    fallback_count = int(summary.get("fallback_count", 0) or 0)
-    imported_sources = int(summary.get("imported_sources", 0) or 0)
-    min_queries = int(requirements.get("min_successful_queries", 0) or 0)
-    min_imports = int(requirements.get("min_imported_sources", 0) or 0)
-    if successful_queries < min_queries:
-        if fallback_count > 0:
-            return "research fell back to plain answers without a completed qualifying notebook enrichment"
-        return "no qualifying notebook research query completed"
-    if imported_sources < min_imports:
-        return f"imported notebook sources too low ({imported_sources} < {min_imports})"
-    return "notebook seed requirements not satisfied"
 
 
 def _persist_notebook_progress(
     *,
     notebook_meta: dict[str, Any] | None,
     notebook_summary: dict[str, Any],
-    notebook_seed_requirements: dict[str, Any],
-    active_mission: dict[str, Any],
     orchestrator_state: dict[str, Any],
     state_paths: dict[str, Path],
 ) -> None:
     if notebook_meta is None:
         return
+
+    persisted_state = read_orchestrator_state(state_paths["orchestrator"])
+    persisted_meta = (
+        dict(persisted_state.get("notebooklm"))
+        if isinstance(persisted_state.get("notebooklm"), dict)
+        else {}
+    )
+    if (
+        persisted_meta
+        and str(persisted_meta.get("notebook_id", "")).strip()
+        == str(notebook_meta.get("notebook_id", "")).strip()
+    ):
+        notebook_meta["seeded"] = bool(persisted_meta.get("seeded", notebook_meta.get("seeded", False)))
+        notebook_meta["fresh"] = bool(persisted_meta.get("fresh", notebook_meta.get("fresh", True)))
+        notebook_meta["imported_sources"] = max(
+            int(notebook_meta.get("imported_sources", 0) or 0),
+            int(persisted_meta.get("imported_sources", 0) or 0),
+        )
+        notebook_meta["seed_query_count"] = max(
+            int(notebook_meta.get("seed_query_count", 0) or 0),
+            int(persisted_meta.get("seed_query_count", 0) or 0),
+        )
+        persisted_modes = list(persisted_meta.get("seed_modes_used", []) or [])
+        if persisted_modes:
+            notebook_meta["seed_modes_used"] = list(dict.fromkeys(persisted_modes + list(notebook_meta.get("seed_modes_used", []) or [])))
 
     changed = False
     imported_sources = max(
@@ -721,28 +678,59 @@ def _persist_notebook_progress(
         notebook_meta["imported_sources"] = imported_sources
         changed = True
 
-    if _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements):
+    seed_query_count = int(notebook_summary.get("query_count", 0) or 0)
+    if seed_query_count > int(notebook_meta.get("seed_query_count", 0) or 0):
+        notebook_meta["seed_query_count"] = seed_query_count
+        changed = True
+    seed_modes_used = list(notebook_summary.get("modes_used", []) or [])
+    if seed_modes_used:
+        merged_modes = list(dict.fromkeys(list(notebook_meta.get("seed_modes_used", []) or []) + seed_modes_used))
+        if merged_modes != list(notebook_meta.get("seed_modes_used", []) or []):
+            notebook_meta["seed_modes_used"] = merged_modes
+            changed = True
+    if imported_sources > 0:
         if not bool(notebook_meta.get("seeded", False)):
             notebook_meta["seeded"] = True
             changed = True
         if bool(notebook_meta.get("fresh", True)):
             notebook_meta["fresh"] = False
             changed = True
-        seed_query_count = int(notebook_summary.get("query_count", 0) or 0)
-        if int(notebook_meta.get("seed_query_count", 0) or 0) != seed_query_count:
-            notebook_meta["seed_query_count"] = seed_query_count
-            changed = True
-        seed_modes_used = list(notebook_summary.get("modes_used", []) or [])
-        if list(notebook_meta.get("seed_modes_used", []) or []) != seed_modes_used:
-            notebook_meta["seed_modes_used"] = seed_modes_used
-            changed = True
-        if bool(active_mission.get("lane_notebook_requires_research", False)):
-            active_mission["lane_notebook_requires_research"] = False
-            changed = True
 
     if changed:
         orchestrator_state["notebooklm"] = dict(notebook_meta)
-        atomic_json_write(state_paths["orchestrator"], orchestrator_state)
+        write_orchestrator_state(state_paths["orchestrator"], orchestrator_state)
+
+
+_BAR_MIN_SL_TICKS = {"tick_610": 20, "volume_2000": 40, "time_1m": 4}
+
+
+def _bar_range_hint(sample_bar_context: dict[str, Any] | None, bar_config: str) -> str:
+    context = sample_bar_context if isinstance(sample_bar_context, dict) else {}
+    bar_stats = context.get(str(bar_config).strip()) if isinstance(context.get(str(bar_config).strip()), dict) else {}
+    range_ticks = bar_stats.get("range_ticks") if isinstance(bar_stats.get("range_ticks"), dict) else {}
+    median = range_ticks.get("median")
+    if median is None:
+        return "unknown median bar range"
+    try:
+        return f"median bar range ~{int(round(float(median)))}t"
+    except Exception:
+        return "unknown median bar range"
+
+
+def _format_bar_risk_floor_context(runtime_context: dict[str, Any] | None) -> str:
+    sample_bar_context = (
+        dict((runtime_context or {}).get("sample_bar_context", {}))
+        if isinstance((runtime_context or {}).get("sample_bar_context", {}), dict)
+        else {}
+    )
+    lines = [
+        "BAR_CONFIG_RISK_FLOORS:",
+        "If you include a bar config, your params_template must satisfy its minimum stop floor. "
+        "If the stop would be too tight, widen it or drop that bar config from the hypothesis.",
+    ]
+    for bar_config, min_sl in _BAR_MIN_SL_TICKS.items():
+        lines.append(f"- {bar_config}: sl_ticks >= {min_sl} ({_bar_range_hint(sample_bar_context, bar_config)})")
+    return "\n".join(lines)
 
 
 def _format_results_table(feedback_items: list[dict[str, Any]]) -> str:
@@ -832,6 +820,7 @@ def _normalize_thinker_brief(
     payload: dict[str, Any],
     *,
     mission_bar_configs: list[str],
+    sample_bar_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("thinker payload must be a JSON object")
@@ -853,9 +842,6 @@ def _normalize_thinker_brief(
     if not isinstance(params_template, dict):
         params_template = {}
 
-    # Minimum SL by bar type — anything smaller gets noise-stopped on the entry bar itself
-    _BAR_MIN_SL = {"tick_610": 20, "volume_2000": 40, "time_1m": 4}
-
     # Enforce minimum 1.5:1 RR and bar-type-aware minimum SL
     _pt = params_template.get("pt_ticks")
     _sl = params_template.get("sl_ticks")
@@ -874,13 +860,13 @@ def _normalize_thinker_brief(
             raw_cfgs_check = payload.get("bar_configs", [])
             if isinstance(raw_cfgs_check, list):
                 for bc in raw_cfgs_check:
-                    min_sl = _BAR_MIN_SL.get(str(bc).strip(), 0)
-                    _bar_range_hint = {"tick_610": "~56t", "volume_2000": "~94t", "time_1m": "~12t"}
+                    min_sl = _BAR_MIN_SL_TICKS.get(str(bc).strip(), 0)
                     if min_sl and sl_val < min_sl:
                         raise ValueError(
                             f"sl_ticks={int(sl_val)} too tight for {bc} "
-                            f"(median bar range {_bar_range_hint.get(str(bc), '?')}) — "
-                            f"minimum sl_ticks={min_sl} required to survive entry bar noise"
+                            f"({_bar_range_hint(sample_bar_context, str(bc))}) — "
+                            f"minimum sl_ticks={min_sl} required to survive entry bar noise; "
+                            f"either widen sl_ticks or remove {bc} from bar_configs"
                         )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid pt_ticks/sl_ticks in params_template: {exc}") from exc
@@ -1077,7 +1063,7 @@ def _load_validation_strategy_samples(
     session_filter: str,
     feature_group: str,
     max_rows: int = 1200,
-    target_count: int = 3,
+    target_count: int = 10,
 ) -> list[tuple[str, pl.DataFrame]]:
     try:
         parsed = _parse_bar_config(bar_config)
@@ -1426,20 +1412,25 @@ def _validate_generated_strategy(
             nonzero = int(np.count_nonzero(raw))
             total = len(raw)
             rate_pct = 100.0 * nonzero / total if total > 0 else 0.0
+            condition_diag = diagnose_condition_passthrough(
+                df=strategy_df, code=code, params=params,
+            )
             if nonzero == 0:
                 diag = _diagnose_zero_signal(strategy_df, code)
                 errors.append(
                     f"{strategy_name}: signal_rate=0.0% for {bar_config} ({sample_label}) "
                     f"(0/{total} bars non-zero — target 0.05–0.3%). "
                     f"Column statistics for referenced features:\n{diag}\n"
-                    f"ACTION REQUIRED: Relax the most restrictive threshold(s) above "
+                    + (f"{condition_diag}\n" if condition_diag else "")
+                    + f"ACTION REQUIRED: Relax the condition(s) marked BLOCKS ALL / RESTRICTIVE above "
                     f"to produce at least 1 signal in this {total}-bar sample."
                 )
             elif rate_pct > 2.0:
                 errors.append(
                     f"{strategy_name}: signal_rate={rate_pct:.2f}% for {bar_config} ({sample_label}) "
                     f"({nonzero}/{total} bars non-zero — target 0.05–0.3%). "
-                    f"Tighten entry filters to avoid cost destruction."
+                    + (f"{condition_diag}\n" if condition_diag else "")
+                    + f"Tighten the loosest entry filter(s) to avoid cost destruction."
                 )
 
     return errors
@@ -1469,8 +1460,6 @@ def _build_thinker_user_prompt(
     if not isinstance(current_focus, list):
         current_focus = []
     notebooklm_url = str(mission.get("notebooklm_notebook_url", "")).strip()
-    lane_notebook_requires_research = bool(mission.get("lane_notebook_requires_research", False))
-    seed_requirements = _resolve_notebook_seed_requirements(mission)
     notebook_query_budget = _resolve_notebook_query_budget(mission)
     notebook_research_guidance = str(mission.get("notebook_research_guidance", "")).strip()
     objective = str(mission.get("objective", "Discover robust intraday alpha signals."))
@@ -1501,6 +1490,7 @@ def _build_thinker_user_prompt(
         prompt_parts.append(f"{learning_context}\n\n")
     if feature_surface_context.strip():
         prompt_parts.append(f"{feature_surface_context}\n\n")
+    prompt_parts.append(f"{_format_bar_risk_floor_context(runtime_context)}\n\n")
     prompt_parts.append("Design exactly one hypothesis that is implementable by a separate coding model.")
     prompt = "".join(prompt_parts)
     if runtime_context:
@@ -1541,16 +1531,6 @@ def _build_thinker_user_prompt(
             prompt += (
                 "\nNotebookLM research guidance:\n"
                 f"- {notebook_research_guidance}"
-            )
-        if lane_notebook_requires_research:
-            preferred_mode = str(seed_requirements.get("preferred_mode", "research")).replace("_", "-")
-            min_imports = int(seed_requirements.get("min_imported_sources", 0) or 0)
-            prompt += (
-                "\nFRESH NOTEBOOK REQUIREMENT:\n"
-                "Your lane notebook is fresh. Before finalising the hypothesis, decide which direction of the mission is most promising "
-                f"and complete one successful --{preferred_mode} query to seed the notebook in that direction. "
-                f"The qualifying research query must import at least {min_imports} source(s). "
-                "Do not spend the whole iteration browsing. Ask one precise research question, import the sources, then move to the hypothesis."
             )
     if feature_knowledge:
         prompt += (
@@ -2111,7 +2091,6 @@ def main() -> int:
     active_mission = dict(mission)
     active_mission.update(dict(notebook_bootstrap.get("mission_overrides", {})))
     notebook_research_guidance = str(active_mission.get("notebook_research_guidance", "")).strip()
-    notebook_seed_requirements = _resolve_notebook_seed_requirements(active_mission)
     notebook_query_budget = _resolve_notebook_query_budget(active_mission)
     notebook_meta = (
         dict(notebook_bootstrap["notebook"])
@@ -2123,7 +2102,7 @@ def main() -> int:
         orchestrator_state["notebooklm"] = notebook_meta
     elif "notebooklm" in orchestrator_state:
         orchestrator_state.pop("notebooklm", None)
-    atomic_json_write(state_paths["orchestrator"], orchestrator_state)
+    write_orchestrator_state(state_paths["orchestrator"], orchestrator_state)
     if notebook_meta is not None:
         log_experiment(
             {
@@ -2253,6 +2232,7 @@ def main() -> int:
                 iteration=iteration_no,
                 stage="quant_thinker",
                 lane_id=lane_id,
+                orchestrator_state_path=str(state_paths["orchestrator"]),
             ), notebook_research_guidance_context(notebook_research_guidance), notebook_query_budget_context(
                 notebook_query_budget,
             ):
@@ -2279,6 +2259,7 @@ def main() -> int:
                     normalize_fn=lambda payload: _normalize_thinker_brief(
                         payload,
                         mission_bar_configs=mission_bar_configs,
+                        sample_bar_context=runtime_context.get("sample_bar_context"),
                     ),
                     client=thinker_client,
                     system_prompt=_build_thinker_system_prompt(),
@@ -2309,19 +2290,8 @@ def main() -> int:
                 _persist_notebook_progress(
                     notebook_meta=notebook_meta,
                     notebook_summary=notebook_summary,
-                    notebook_seed_requirements=notebook_seed_requirements,
-                    active_mission=active_mission,
                     orchestrator_state=orchestrator_state,
                     state_paths=state_paths,
-                )
-            if (
-                notebooklm_configured
-                and bool(active_mission.get("lane_notebook_requires_research", False))
-                and not _notebook_seed_satisfied(notebook_summary, notebook_seed_requirements)
-            ):
-                raise RuntimeError(
-                    "fresh lane notebook was not seeded properly before hypothesis generation: "
-                    + _notebook_seed_failure_reason(notebook_summary, notebook_seed_requirements),
                 )
             thinker_hash = _sha256_text(
                 json.dumps(thinker_brief, sort_keys=True, separators=(",", ":")),
@@ -2663,8 +2633,6 @@ def main() -> int:
                 _persist_notebook_progress(
                     notebook_meta=notebook_meta,
                     notebook_summary=notebook_summary,
-                    notebook_seed_requirements=notebook_seed_requirements,
-                    active_mission=active_mission,
                     orchestrator_state=orchestrator_state,
                     state_paths=state_paths,
                 )
@@ -2695,7 +2663,20 @@ def main() -> int:
             "notebooklm": notebook_meta,
             "last_updated": _utc_now(),
         }
-        atomic_json_write(state_paths["orchestrator"], state)
+        persisted_state = read_orchestrator_state(state_paths["orchestrator"])
+        persisted_meta = (
+            dict(persisted_state.get("notebooklm"))
+            if isinstance(persisted_state.get("notebooklm"), dict)
+            else {}
+        )
+        if (
+            notebook_meta is not None
+            and persisted_meta
+            and str(persisted_meta.get("notebook_id", "")).strip()
+            == str(notebook_meta.get("notebook_id", "")).strip()
+        ):
+            state["notebooklm"] = persisted_meta
+        write_orchestrator_state(state_paths["orchestrator"], state)
         if iterations_done < max_iterations:
             time.sleep(max(1, poll_seconds))
 

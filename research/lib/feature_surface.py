@@ -335,9 +335,141 @@ def describe_referenced_columns(
     return "\n".join(lines) if lines else "  (could not compute stats for referenced columns)"
 
 
+# ---------------------------------------------------------------------------
+# Per-condition pass-through diagnostic
+# ---------------------------------------------------------------------------
+
+_REVERSE_OPS = {">": "<", "<": ">", ">=": "<=", "<=": ">=", "==": "==", "!=": "!="}
+_NP_OPS = {
+    ">": np.greater,
+    "<": np.less,
+    ">=": np.greater_equal,
+    "<=": np.less_equal,
+    "==": np.equal,
+    "!=": np.not_equal,
+}
+
+# Regex: var = safe_f64_col(df, "col")  or  safe_bool_col / safe_int_col
+_RE_COL_ASSIGN = re.compile(
+    r"(\w+)\s*=\s*safe_(?:f64|bool|int)_col\s*\(\s*df\s*,\s*[\"'](\w+)[\"']"
+)
+# var OP params["key"]  or  params.get("key", ...)
+_RE_VAR_CMP_PARAM = re.compile(
+    r"(\w+)\s*(>=|<=|>|<|==|!=)\s*params(?:\[[\"'](\w+)['\"]\]|\.get\([\"'](\w+)[\"'])"
+)
+# params["key"] OP var  (reversed)
+_RE_PARAM_CMP_VAR = re.compile(
+    r"params(?:\[[\"'](\w+)['\"]\]|\.get\([\"'](\w+)[\"'])\s*(>=|<=|>|<|==|!=)\s*(\w+)"
+)
+
+
+def diagnose_condition_passthrough(
+    *,
+    df: pl.DataFrame,
+    code: str,
+    params: dict[str, Any],
+    max_conditions: int = 20,
+) -> str:
+    """Evaluate each threshold condition independently and report pass-through rates.
+
+    Parses safe_*_col assignments and ``var OP params["key"]`` comparisons from
+    the generated code, evaluates each on *df*, and returns a human-readable
+    breakdown showing which condition(s) are the bottleneck.
+    """
+    n = len(df)
+    if n == 0:
+        return ""
+
+    # Step 1: map local variable names → canonical column names
+    var_to_col: dict[str, str] = {}
+    for m in _RE_COL_ASSIGN.finditer(code):
+        var_to_col[m.group(1)] = m.group(2)
+
+    if not var_to_col:
+        return ""
+
+    # Step 2: collect (column, operator, param_key, threshold) tuples
+    conditions: list[tuple[str, str, str, float]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _add(col: str, op: str, param_key: str) -> None:
+        threshold = params.get(param_key)
+        if threshold is None or not isinstance(threshold, (int, float)):
+            return
+        key = (col, op, param_key)
+        if key in seen:
+            return
+        seen.add(key)
+        conditions.append((col, op, param_key, float(threshold)))
+
+    for m in _RE_VAR_CMP_PARAM.finditer(code):
+        var, op, key1, key2 = m.groups()
+        col = var_to_col.get(var)
+        if col:
+            _add(col, op, key1 or key2)
+
+    for m in _RE_PARAM_CMP_VAR.finditer(code):
+        key1, key2, op, var = m.groups()
+        col = var_to_col.get(var)
+        if col:
+            _add(col, _REVERSE_OPS[op], key1 or key2)
+
+    if not conditions:
+        return ""
+
+    # Step 3: evaluate each condition independently
+    lines = ["  Per-condition pass-through (each evaluated independently):"]
+    combined_mask = np.ones(n, dtype=bool)
+
+    for col, op, param_key, threshold in conditions[:max_conditions]:
+        if col not in df.columns:
+            lines.append(f"    {col} {op} {threshold} ({param_key}): column not in frame")
+            continue
+
+        try:
+            series = df[col]
+            values = (
+                series.cast(pl.Float64).to_numpy()
+                if series.dtype != pl.Float64
+                else series.to_numpy()
+            )
+        except Exception:
+            lines.append(f"    {col} {op} {threshold} ({param_key}): could not cast to float")
+            continue
+
+        valid = ~np.isnan(values) if np.issubdtype(values.dtype, np.floating) else np.ones(n, dtype=bool)
+        op_fn = _NP_OPS.get(op)
+        if op_fn is None:
+            continue
+
+        mask = op_fn(values, threshold) & valid
+        pass_count = int(np.sum(mask))
+        pass_pct = 100.0 * pass_count / n
+        combined_mask &= mask
+
+        if pass_pct == 0.0:
+            tag = "  <-- BLOCKS ALL"
+        elif pass_pct < 1.0:
+            tag = "  <-- RESTRICTIVE"
+        else:
+            tag = ""
+
+        lines.append(
+            f"    {col} {op} {threshold} ({param_key}): "
+            f"{pass_pct:.2f}% pass ({pass_count}/{n}){tag}"
+        )
+
+    combined_count = int(np.sum(combined_mask))
+    combined_pct = 100.0 * combined_count / n
+    lines.append(f"    -> Combined (all AND'd): {combined_pct:.2f}% ({combined_count}/{n})")
+
+    return "\n".join(lines)
+
+
 __all__ = [
     "build_feature_surface",
     "describe_referenced_columns",
+    "diagnose_condition_passthrough",
     "extract_referenced_columns",
     "format_feature_surface_context",
     "format_referenced_surface_warnings",

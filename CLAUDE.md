@@ -37,8 +37,8 @@ Use the helper imports from `research.signals` instead of ad hoc dataframe-to-nu
 ## NotebookLM
 
 - each orchestrator lane gets its own persistent notebook
-- fresh lane notebooks must be seeded before the hypothesis is accepted
-- prefer `--deep-research` for fresh notebooks or new directions
+- NotebookLM is optional, not a blocker: at most one `--research` query and three total notebook queries per iteration
+- `--deep-research` is disabled in the autonomy loop because it is too slow
 - ask for high-quality trusted sources: exchange/operator docs, academic papers, serious market-structure research, broker/execution research, and technical references
 - avoid low-signal forum chatter, script marketplaces, and recycled summaries
 - the thinker agent preloads the project skill `notebook-alpha-research` to decide how to query NotebookLM and turn research into one hypothesis

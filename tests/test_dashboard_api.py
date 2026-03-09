@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -192,3 +193,69 @@ def test_autonomy_run_rejects_invalid_worker_selection(client: TestClient):
     )
     assert resp.status_code == 400
     assert "validator-only" in resp.json()["detail"]
+
+
+def test_stop_run_uses_tree_termination_for_single_process(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    stopped: list[object] = []
+
+    def fake_terminate(proc) -> None:
+        stopped.append(proc)
+
+    process = object()
+    dashboard_main.runs["run-1"] = {
+        "type": "cache",
+        "status": "running",
+        "cmd": ["uv", "run", "python"],
+        "logs": [],
+        "process": process,
+    }
+    monkeypatch.setattr(dashboard_main, "_terminate_process", fake_terminate)
+
+    resp = client.post("/api/runs/run-1/stop")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "stopped"}
+    assert stopped == [process]
+    assert dashboard_main.runs["run-1"]["status"] == "failed"
+    assert "forcefully terminated by user" in "".join(dashboard_main.runs["run-1"]["logs"])
+
+
+def test_execute_in_background_launches_in_own_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    class _FakeStdout:
+        async def readline(self):
+            return b""
+
+    class _FakeProcess:
+        def __init__(self):
+            self.stdout = _FakeStdout()
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(dashboard_main.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    dashboard_main.runs.clear()
+    dashboard_main.runs["run-2"] = {
+        "type": "cache",
+        "status": "running",
+        "cmd": ["uv", "run", "python"],
+        "logs": [],
+    }
+
+    asyncio.run(dashboard_main.execute_in_background("run-2", ["uv", "run", "python"]))
+
+    assert captured["cmd"] == ("uv", "run", "python")
+    kwargs = captured["kwargs"]
+    for key, value in dashboard_main._subprocess_exec_kwargs().items():
+        assert kwargs[key] == value
