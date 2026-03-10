@@ -679,12 +679,12 @@ def test_build_learning_context_reads_scorecard(tmp_path: Path):
                         "search_passes": 1,
                         "selection_attempts": 0,
                         "selection_passes": 0,
-                        "fail_counts": {"no_raw_edge": 1},
+                        "fail_counts": {"no_edge": 1},
                         "recent_outcomes": [
                             {
                                 "strategy_name": "alpha_setup_a",
                                 "bar_config": "tick_610",
-                                "edge_status": "pass",
+                                "edge_status": "global_edge",
                                 "search_verdict": "PASS",
                                 "final_verdict": "FAIL",
                                 "failure_codes": ["walk_forward"],
@@ -729,7 +729,7 @@ def test_build_learning_context_reads_scorecard(tmp_path: Path):
     assert "Recent concrete setup outcomes:" in context
     assert "tick_610 | volume_ratio > (primary)" in context
     assert "Repeated setup failure modes:" in context
-    assert "no_raw_edge (1)" in context
+    assert "no_edge (1)" in context
     assert "edge 1/2 | search 1/2" in context
     assert "amt_value_area: search 2/4 | selection 0/1" in context
     assert "Low-sample themes: orderflow_divergence" in context

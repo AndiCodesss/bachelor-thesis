@@ -187,6 +187,10 @@ def _refresh_setup_entry(entry: dict[str, Any]) -> dict[str, Any]:
                 "best_avg_trade_pnl": _optional_float(raw.get("best_avg_trade_pnl")),
                 "best_long_avg_trade_pnl": _optional_float(raw.get("best_long_avg_trade_pnl")),
                 "best_short_avg_trade_pnl": _optional_float(raw.get("best_short_avg_trade_pnl")),
+                "best_pocket_label": str(raw.get("best_pocket_label", "")).strip(),
+                "best_pocket_horizon_bars": _optional_int(raw.get("best_pocket_horizon_bars")),
+                "best_pocket_avg_trade_pnl": _optional_float(raw.get("best_pocket_avg_trade_pnl")),
+                "best_pocket_event_count": _optional_int(raw.get("best_pocket_event_count")),
                 "search_verdict": str(raw.get("search_verdict", "")).strip(),
                 "final_verdict": str(raw.get("final_verdict", "")).strip(),
                 "failure_codes": [str(code) for code in (raw.get("failure_codes") or []) if str(code).strip()],
@@ -384,21 +388,26 @@ def _extract_failed_advanced_checks(result: dict[str, Any]) -> list[str]:
     return failed
 
 
-def _edge_probe_payload(result: dict[str, Any] | None) -> dict[str, Any]:
+def _edge_surface_payload(result: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
-    edge_probe = result.get("edge_probe")
-    return dict(edge_probe) if isinstance(edge_probe, dict) else {}
+    edge_surface = result.get("edge_surface")
+    return dict(edge_surface) if isinstance(edge_surface, dict) else {}
 
 
-def _edge_probe_failed(result: dict[str, Any] | None) -> bool:
-    edge_probe = _edge_probe_payload(result)
-    return bool(edge_probe) and not bool(edge_probe.get("passed", True))
+def _edge_surface_failed(result: dict[str, Any] | None) -> bool:
+    edge_surface = _edge_surface_payload(result)
+    return bool(edge_surface) and not bool(edge_surface.get("passed", True))
 
 
-def _best_edge_probe_horizon(edge_probe: dict[str, Any]) -> dict[str, Any]:
-    horizon_results = edge_probe.get("horizon_results") if isinstance(edge_probe.get("horizon_results"), list) else []
-    best_horizon = _optional_int(edge_probe.get("best_horizon_bars"))
+def _best_edge_surface_horizon(edge_surface: dict[str, Any]) -> dict[str, Any]:
+    global_probe = edge_surface.get("global_probe") if isinstance(edge_surface.get("global_probe"), dict) else {}
+    horizon_results = (
+        global_probe.get("horizon_results")
+        if isinstance(global_probe.get("horizon_results"), list)
+        else []
+    )
+    best_horizon = _optional_int(global_probe.get("best_horizon_bars"))
     for row in horizon_results:
         if not isinstance(row, dict):
             continue
@@ -410,33 +419,57 @@ def _best_edge_probe_horizon(edge_probe: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _edge_probe_outcome_summary(result: dict[str, Any] | None) -> dict[str, Any]:
-    edge_probe = _edge_probe_payload(result)
-    if not edge_probe:
+def _qualifying_best_pocket(edge_surface: dict[str, Any]) -> dict[str, Any]:
+    pockets = edge_surface.get("best_pockets") if isinstance(edge_surface.get("best_pockets"), list) else []
+    min_pocket_events = _optional_int(edge_surface.get("min_pocket_events")) or 0
+    for row in pockets:
+        if not isinstance(row, dict):
+            continue
+        if _empty_or_int(row.get("best_event_count")) < min_pocket_events:
+            continue
+        return dict(row)
+    return {}
+
+
+def _edge_surface_outcome_summary(result: dict[str, Any] | None) -> dict[str, Any]:
+    edge_surface = _edge_surface_payload(result)
+    if not edge_surface:
         return {}
-    best_horizon = _best_edge_probe_horizon(edge_probe)
-    horizon_results = edge_probe.get("horizon_results") if isinstance(edge_probe.get("horizon_results"), list) else []
-    return {
-        "edge_events": _optional_int(edge_probe.get("events")),
-        "positive_horizons": _optional_int(edge_probe.get("positive_horizons")),
+    global_probe = edge_surface.get("global_probe") if isinstance(edge_surface.get("global_probe"), dict) else {}
+    best_horizon = _best_edge_surface_horizon(edge_surface)
+    horizon_results = (
+        global_probe.get("horizon_results")
+        if isinstance(global_probe.get("horizon_results"), list)
+        else []
+    )
+    summary = {
+        "edge_events": _optional_int(global_probe.get("base_event_count")),
+        "positive_horizons": _optional_int(global_probe.get("positive_horizons")),
         "horizon_count": sum(1 for row in horizon_results if isinstance(row, dict)),
-        "best_horizon_bars": _optional_int(edge_probe.get("best_horizon_bars")),
-        "best_avg_trade_pnl": _optional_float(edge_probe.get("best_avg_trade_pnl")),
+        "best_horizon_bars": _optional_int(global_probe.get("best_horizon_bars")),
+        "best_avg_trade_pnl": _optional_float(global_probe.get("best_avg_trade_pnl")),
         "best_long_avg_trade_pnl": _optional_float(best_horizon.get("long_avg_trade_pnl")),
         "best_short_avg_trade_pnl": _optional_float(best_horizon.get("short_avg_trade_pnl")),
     }
+    best_pocket = _qualifying_best_pocket(edge_surface)
+    if best_pocket:
+        summary["best_pocket_label"] = f"{best_pocket.get('family', '')}={best_pocket.get('label', '')}".strip("=")
+        summary["best_pocket_horizon_bars"] = _optional_int(best_pocket.get("best_horizon_bars"))
+        summary["best_pocket_avg_trade_pnl"] = _optional_float(best_pocket.get("best_avg_trade_pnl"))
+        summary["best_pocket_event_count"] = _optional_int(best_pocket.get("best_event_count"))
+    return summary
 
 
 def _failure_codes_from_result(result: dict[str, Any] | None) -> list[str]:
     if not isinstance(result, dict):
         return []
     failure_code = str(result.get("failure_code", "")).strip()
-    if _edge_probe_failed(result):
+    if _edge_surface_failed(result):
         codes: set[str] = set()
         if failure_code:
             codes.add(failure_code)
-        edge_probe = _edge_probe_payload(result)
-        status = str(edge_probe.get("status", "")).strip()
+        edge_surface = _edge_surface_payload(result)
+        status = str(edge_surface.get("status", "")).strip()
         if status:
             codes.add(status)
         return sorted(codes)
@@ -568,12 +601,12 @@ def _apply_task_update(scorecard: dict[str, Any], task: dict[str, Any]) -> None:
 
     search_result = _search_result_from_row(task)
     selection_result = _selection_result_from_row(task)
-    edge_probe = (
-        _edge_probe_payload(search_result)
+    edge_surface = (
+        _edge_surface_payload(search_result)
         if isinstance(search_result, dict)
         else {}
     )
-    edge_pass = not edge_probe or bool(edge_probe.get("passed", True))
+    edge_pass = not edge_surface or bool(edge_surface.get("passed", True))
     search_pass = isinstance(search_result, dict) and str(search_result.get("verdict", "")).upper() == "PASS"
     selection_pass = isinstance(selection_result, dict) and str(selection_result.get("verdict", "")).upper() == "PASS"
 
@@ -596,13 +629,13 @@ def _apply_task_update(scorecard: dict[str, Any], task: dict[str, Any]) -> None:
     if failure_codes:
         _increment_fail_counts(setup_entry, sorted(failure_codes))
         _increment_fail_counts(theme_entry, sorted(failure_codes))
-    edge_summary = _edge_probe_outcome_summary(search_result)
+    edge_summary = _edge_surface_outcome_summary(search_result)
     recent = setup_entry.setdefault("recent_outcomes", [])
     recent.append(
         {
             "strategy_name": str(task.get("strategy_name", "")).strip(),
             "bar_config": bar_config,
-            "edge_status": str(edge_probe.get("status", "pass" if edge_pass else "unknown")),
+            "edge_status": str(edge_surface.get("status", "global_edge" if edge_pass else "unknown")),
             **edge_summary,
             "search_verdict": str(search_result.get("verdict", "")) if isinstance(search_result, dict) else "",
             "final_verdict": str(
@@ -836,6 +869,12 @@ def _format_latest_edge_summary(latest: dict[str, Any]) -> str:
         if short_avg is not None:
             direction_parts.append(f"short={short_avg:.2f}")
         parts.append(" ".join(direction_parts))
+    pocket_label = str(latest.get("best_pocket_label", "")).strip()
+    pocket_horizon = _optional_int(latest.get("best_pocket_horizon_bars"))
+    pocket_avg = _optional_float(latest.get("best_pocket_avg_trade_pnl"))
+    pocket_events = _optional_int(latest.get("best_pocket_event_count"))
+    if pocket_label and pocket_horizon is not None and pocket_avg is not None and pocket_events is not None:
+        parts.append(f"pocket={pocket_label} @{pocket_horizon}b avg={pocket_avg:.2f} n={pocket_events}")
     return " | ".join(parts)
 
 
@@ -982,7 +1021,9 @@ def format_learning_context(scorecard: dict[str, Any]) -> str:
     if not wrote_section:
         return ""
 
-    lines.append("Prioritize setups with real raw edge across horizons and avoid repeating setups that keep failing edge probe.")
+    lines.append(
+        "Prioritize setups with real global edge first. If a failed setup only had localized edge, narrow toward the reported pocket only when the sample size was large enough to qualify."
+    )
     return "\n".join(lines)
 
 

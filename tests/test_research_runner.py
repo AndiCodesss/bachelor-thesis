@@ -1241,7 +1241,7 @@ def test_execute_claimed_task_supports_stateful_signal_signature(
     assert captures["last_state_calls"] == 2
 
 
-def test_execute_claimed_task_short_circuits_when_edge_probe_fails(
+def test_execute_claimed_task_short_circuits_when_edge_surface_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1258,17 +1258,32 @@ def test_execute_claimed_task_short_circuits_when_edge_probe_fails(
         STRATEGY_METADATA={"version": "1.0"},
     )
     monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
-    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_edge_probe")
+    monkeypatch.setattr(mod, "compute_strategy_id", lambda *args, **kwargs: "sid_edge_surface")
     monkeypatch.setattr(mod, "check_signal_causality", lambda **kwargs: [])
     monkeypatch.setattr(
         mod,
+        "run_edge_surface",
+        lambda **kwargs: {
+            "enabled": True,
+            "passed": False,
+            "status": "no_edge",
+            "has_localized_edge": False,
+            "global_probe": {"base_event_count": 12, "horizon_results": []},
+            "by_side": {},
+            "conditional_slices": {},
+            "best_pockets": [],
+            "omitted_families": [],
+        },
+    )
+    monkeypatch.setattr(
+        mod,
         "run_backtest",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("run_backtest should not run after edge-probe fail")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("run_backtest should not run after edge-surface fail")),
     )
     monkeypatch.setattr(
         mod,
         "run_validation_gauntlet",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("gauntlet should not run after edge-probe fail")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("gauntlet should not run after edge-surface fail")),
     )
 
     fake_file = tmp_path / "nq_2024-01-02.parquet"
@@ -1289,7 +1304,7 @@ def test_execute_claimed_task_short_circuits_when_edge_probe_fails(
 
     verdict, details = mod._execute_claimed_task(
         task={
-            "task_id": "t_edge_probe_fail",
+            "task_id": "t_edge_surface_fail",
             "strategy_name": "dummy",
             "split": "train",
             "bar_config": "time_1m",
@@ -1304,10 +1319,11 @@ def test_execute_claimed_task_short_circuits_when_edge_probe_fails(
             "min_trade_count": 0,
             "session_filter": "rth",
             "write_candidates": False,
-            "edge_probe": {
+            "edge_surface": {
                 "enabled": True,
                 "horizons": [1, 3, 5, 10, 20, 40, 60, 90],
                 "min_events": 3,
+                "min_pocket_events": 2,
                 "min_positive_horizons": 1,
                 "min_avg_trade_pnl": 0.0,
                 "min_positive_day_fraction": 0.50,
@@ -1324,10 +1340,10 @@ def test_execute_claimed_task_short_circuits_when_edge_probe_fails(
 
     assert verdict == "FAIL"
     assert details["search_result"]["verdict"] == "FAIL"
-    assert details["search_result"]["failure_code"] == "no_raw_edge"
-    assert details["search_result"]["edge_probe"]["enabled"] is True
-    assert details["search_result"]["edge_probe"]["passed"] is False
-    assert details["search_result"]["edge_probe"]["status"] == "no_raw_edge"
+    assert details["search_result"]["failure_code"] == "no_edge"
+    assert details["search_result"]["edge_surface"]["enabled"] is True
+    assert details["search_result"]["edge_surface"]["passed"] is False
+    assert details["search_result"]["edge_surface"]["status"] == "no_edge"
     assert details["candidate_status"] == "rejected_search"
 
 
@@ -1352,7 +1368,7 @@ def test_task_feedback_summary_preserves_theme_and_selection_fields():
                 "final_verdict": "FAIL",
                 "candidate_status": "rejected_selection",
                 "selection_result": {"verdict": "FAIL"},
-                "edge_probe": {"status": "pass", "passed": True},
+                "edge_surface": {"status": "global_edge", "passed": True},
             },
         }
     )
@@ -1364,5 +1380,5 @@ def test_task_feedback_summary_preserves_theme_and_selection_fields():
     assert summary["selection_verdict"] == "FAIL"
     assert summary["final_verdict"] == "FAIL"
     assert summary["candidate_status"] == "rejected_selection"
-    assert summary["edge_probe_status"] == "pass"
-    assert summary["edge_probe_passed"] is True
+    assert summary["edge_surface_status"] == "global_edge"
+    assert summary["edge_surface_passed"] is True

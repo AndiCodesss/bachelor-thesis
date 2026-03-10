@@ -22,6 +22,21 @@ interface AutonomyStatus {
     worst: { strategy: string; net_pnl: number; sharpe: number; trades: number } | null;
   }
   active_hypotheses: Array<{ id: string; tasks: number }>
+  recent_results: Array<{
+    strategy: string
+    bar: string
+    timestamp: string
+    verdict: string
+    failure_code: string
+    signal_count: number | null
+    edge_events: number | null
+    edge_status: string
+    best_horizon_bars: number | null
+    best_avg_trade_pnl: number | null
+    backtest_trades: number | null
+    net_pnl: number | null
+    sharpe: number | null
+  }>
 }
 
 interface SignalItem {
@@ -98,6 +113,30 @@ function formatMetricValue(key: string, value: unknown): string {
   }
 
   return String(value)
+}
+
+function formatAutonomyTimestamp(value: string): string {
+  if (!value) {
+    return 'unknown time'
+  }
+  const dt = new Date(value)
+  if (Number.isNaN(dt.getTime())) {
+    return value
+  }
+  return dt.toLocaleString([], {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatUsd(value: number | null | undefined): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return 'n/a'
+  }
+  const sign = value > 0 ? '+' : ''
+  return `${sign}$${value.toFixed(2)}`
 }
 
 export default function App() {
@@ -407,15 +446,75 @@ export default function App() {
                         {aStatusData.financial.best && (
                           <div className="hyp-item">
                             <span className="metric-sub">Best: {aStatusData.financial.best.strategy}</span>
-                            <span className="metric-highlight">${aStatusData.financial.best.net_pnl.toFixed(2)} (SR: {aStatusData.financial.best.sharpe.toFixed(2)})</span>
+                            <span className="metric-highlight">${aStatusData.financial.best.net_pnl.toFixed(2)} (SR: {aStatusData.financial.best.sharpe.toFixed(2)}, Trades: {aStatusData.financial.best.trades})</span>
                           </div>
                         )}
                         {aStatusData.financial.worst && (
                           <div className="hyp-item">
                             <span className="metric-sub">Worst: {aStatusData.financial.worst.strategy}</span>
-                            <span className="metric-error">${aStatusData.financial.worst.net_pnl.toFixed(2)} (SR: {aStatusData.financial.worst.sharpe.toFixed(2)})</span>
+                            <span className="metric-error">${aStatusData.financial.worst.net_pnl.toFixed(2)} (SR: {aStatusData.financial.worst.sharpe.toFixed(2)}, Trades: {aStatusData.financial.worst.trades})</span>
                           </div>
                         )}
+                      </div>
+                    </div>
+                  )}
+                  {aStatusData.recent_results.length > 0 && (
+                    <div className="metric-card" style={{gridColumn: '1 / -1'}}>
+                      <span className="metric-label">Recent Results</span>
+                      <div className="hyp-list" style={{marginTop: '0.75rem'}}>
+                        {aStatusData.recent_results.map(result => {
+                          const edgeRejected = Boolean(result.edge_status) && !['global_edge', 'disabled', 'selection_skip'].includes(result.edge_status)
+                          const verdictClass = result.verdict === 'PASS' ? 'completed' : (result.verdict === 'FAIL' ? 'failed' : '')
+                          const edgeNote = edgeRejected
+                            ? `Edge discovery stopped the full backtest (${result.edge_status}).`
+                            : 'Full backtest executed.'
+                          const bestEdgeNote = result.best_horizon_bars !== null && typeof result.best_avg_trade_pnl === 'number'
+                            ? ` Best edge horizon: ${result.best_horizon_bars} bars at ${formatUsd(result.best_avg_trade_pnl)} per trade.`
+                            : ''
+                          return (
+                            <div
+                              key={`${result.strategy}-${result.timestamp}`}
+                              className="hyp-item"
+                              style={{flexDirection: 'column', alignItems: 'flex-start', gap: '0.5rem'}}
+                            >
+                              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', width: '100%'}}>
+                                <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem 0.75rem', minWidth: 0}}>
+                                  <span className="metric-sub" style={{color: 'var(--text-primary)'}}>{result.strategy}</span>
+                                  <span className="metric-sub">{result.bar}</span>
+                                  <span className="metric-sub">{formatAutonomyTimestamp(result.timestamp)}</span>
+                                </div>
+                                <span className={`status-indicator ${verdictClass}`} style={{fontSize: '0.65rem', padding: '0.1rem 0.4rem'}}>
+                                  {result.verdict}
+                                </span>
+                              </div>
+                              <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.5rem 1rem', width: '100%'}}>
+                                <div>
+                                  <div className="metric-sub">Signals</div>
+                                  <div style={{fontFamily: 'var(--font-mono)'}}>{result.signal_count ?? 'n/a'}</div>
+                                </div>
+                                <div>
+                                  <div className="metric-sub">Edge Events</div>
+                                  <div style={{fontFamily: 'var(--font-mono)'}}>{result.edge_events ?? 'n/a'}</div>
+                                </div>
+                                <div>
+                                  <div className="metric-sub">Backtest Trades</div>
+                                  <div style={{fontFamily: 'var(--font-mono)'}}>{result.backtest_trades ?? 'n/a'}</div>
+                                </div>
+                                <div>
+                                  <div className="metric-sub">Net PNL</div>
+                                  <div className={typeof result.net_pnl === 'number' && result.net_pnl >= 0 ? 'metric-highlight' : 'metric-error'}>
+                                    {formatUsd(result.net_pnl)}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="metric-sub">
+                                {edgeNote}
+                                {bestEdgeNote}
+                                {result.failure_code && result.failure_code !== result.edge_status ? ` Failure: ${result.failure_code}.` : ''}
+                              </span>
+                            </div>
+                          )
+                        })}
                       </div>
                     </div>
                   )}

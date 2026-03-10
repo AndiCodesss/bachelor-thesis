@@ -122,6 +122,59 @@ def _recent_json_events(path: Path, event_names: set[str], limit: int, scan_line
     return list(reversed(out))
 
 
+def _optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    try:
+        return int(str(value))
+    except Exception:
+        return None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except Exception:
+        return None
+
+
+def _recent_task_snapshot(row: dict) -> dict[str, object]:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    search_result = row.get("search_result") if isinstance(row.get("search_result"), dict) else {}
+    edge_surface = row.get("edge_surface") if isinstance(row.get("edge_surface"), dict) else {}
+    if not edge_surface and isinstance(search_result.get("edge_surface"), dict):
+        edge_surface = search_result.get("edge_surface")
+    global_probe = (
+        edge_surface.get("global_probe")
+        if isinstance(edge_surface.get("global_probe"), dict)
+        else {}
+    )
+
+    return {
+        "strategy": str(row.get("strategy_name", "")),
+        "bar": str(row.get("bar_config", "")),
+        "timestamp": str(row.get("timestamp", "")),
+        "verdict": str(row.get("verdict", "UNKNOWN")),
+        "failure_code": str(row.get("failure_code", "")),
+        "signal_count": _optional_int(search_result.get("signal_count")),
+        "edge_events": _optional_int(global_probe.get("base_event_count")) if global_probe else None,
+        "edge_status": str(edge_surface.get("status", "")) if edge_surface else "",
+        "best_horizon_bars": _optional_int(global_probe.get("best_horizon_bars")) if global_probe else None,
+        "best_avg_trade_pnl": _optional_float(global_probe.get("best_avg_trade_pnl")) if global_probe else None,
+        "backtest_trades": _optional_int(metrics.get("trade_count")),
+        "net_pnl": _optional_float(metrics.get("net_pnl")),
+        "sharpe": _optional_float(metrics.get("sharpe_ratio")),
+    }
+
+
 def _terminate_process(proc) -> None:
     pid = getattr(proc, "pid", None)
     if pid is None:
@@ -381,7 +434,8 @@ def get_autonomy_status():
             "tested": 0, "avg_net_pnl": 0.0, "avg_sharpe": 0.0, "pass_rate_pct": 0.0,
             "best": None, "worst": None
         },
-        "active_hypotheses": []
+        "active_hypotheses": [],
+        "recent_results": [],
     }
 
     # Queue
@@ -420,8 +474,10 @@ def get_autonomy_status():
         recent_tasks = _recent_json_events(exp_log, {"task_result"}, limit=10, scan_lines=5000)
         points = []
         pass_count = 0
+        recent_results = []
         for row in recent_tasks:
             m = row.get("metrics")
+            recent_results.append(_recent_task_snapshot(row))
             if not isinstance(m, dict):
                 continue
             npnl, sharpe = m.get("net_pnl"), m.get("sharpe_ratio")
@@ -445,6 +501,7 @@ def get_autonomy_status():
                 "best": max(points, key=lambda x: x["net_pnl"]),
                 "worst": min(points, key=lambda x: x["net_pnl"])
             }
+        metrics["recent_results"] = list(reversed(recent_results[-5:]))
     except Exception:
         pass
 

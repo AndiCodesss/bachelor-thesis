@@ -18,10 +18,11 @@ selection_gate:
   target_sharpe: 1.25
   min_trade_count: 20
 
-edge_probe:
+edge_surface:
   enabled: true
   horizons: [1, 3, 5, 10, 20, 40, 60, 90]
   min_events: 60
+  min_pocket_events: 30
   min_positive_horizons: 1
   min_avg_trade_pnl: 0.0
   min_positive_day_fraction: 0.52

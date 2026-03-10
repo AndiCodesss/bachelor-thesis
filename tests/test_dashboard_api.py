@@ -96,6 +96,17 @@ def test_autonomy_status_reads_runtime_state_and_budget(client: TestClient):
                 "strategy_name": "alpha_retest",
                 "bar_config": "tick_610",
                 "verdict": "PASS",
+                "search_result": {
+                    "signal_count": 18,
+                    "edge_surface": {
+                        "status": "global_edge",
+                        "global_probe": {
+                            "base_event_count": 18,
+                            "best_horizon_bars": 5,
+                            "best_avg_trade_pnl": 32.5,
+                        },
+                    },
+                },
                 "metrics": {"net_pnl": 1200.0, "sharpe_ratio": 1.8, "trade_count": 14},
             },
             {
@@ -104,7 +115,19 @@ def test_autonomy_status_reads_runtime_state_and_budget(client: TestClient):
                 "strategy_name": "failed_breakout",
                 "bar_config": "1m",
                 "verdict": "FAIL",
-                "metrics": {"net_pnl": -300.0, "sharpe_ratio": -0.4, "trade_count": 9},
+                "failure_code": "no_edge",
+                "search_result": {
+                    "signal_count": 142,
+                    "edge_surface": {
+                        "status": "no_edge",
+                        "global_probe": {
+                            "base_event_count": 140,
+                            "best_horizon_bars": 1,
+                            "best_avg_trade_pnl": -8.25,
+                        },
+                    },
+                },
+                "metrics": {"net_pnl": -300.0, "sharpe_ratio": -0.4, "trade_count": 0},
             },
         ],
     )
@@ -126,6 +149,13 @@ def test_autonomy_status_reads_runtime_state_and_budget(client: TestClient):
     assert data["financial"]["pass_rate_pct"] == 50.0
     assert data["financial"]["best"]["strategy"] == "alpha_retest"
     assert data["financial"]["worst"]["strategy"] == "failed_breakout"
+    assert data["recent_results"][0]["strategy"] == "failed_breakout"
+    assert data["recent_results"][0]["signal_count"] == 142
+    assert data["recent_results"][0]["edge_events"] == 140
+    assert data["recent_results"][0]["edge_status"] == "no_edge"
+    assert data["recent_results"][0]["backtest_trades"] == 0
+    assert data["recent_results"][1]["strategy"] == "alpha_retest"
+    assert data["recent_results"][1]["best_horizon_bars"] == 5
 
 
 def test_signals_endpoints_return_recent_results_and_source_code(client: TestClient):
