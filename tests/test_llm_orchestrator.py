@@ -27,6 +27,8 @@ def _research_brief(**overrides):
         "expected_side": "long",
         "expected_horizon_bars": 5,
         "expected_regime": "ETH conditions with rising activity and relative volatility already moving above baseline.",
+        "macro_location": "Price is interacting with prior value from below and is close enough to the structural level that acceptance or rejection matters now.",
+        "micro_trigger": "order_flow_imbalance turns positive while absorption or CVD divergence confirms buyers are taking control at the level.",
         "post_cost_rationale": "The event is sparse and directional enough that a short burst can clear one-turn costs.",
         "falsification": "If volume_ratio expands but trade_intensity does not stay elevated on entry bars, the imbalance thesis is wrong.",
         "novelty_vs_recent_failures": "This is not a generic OFI threshold stack; it requires quiet-session compression first and then expansion.",
@@ -532,14 +534,71 @@ def test_build_feature_knowledge_from_cached_samples():
     assert out["errors"] == {}
 
 
+def test_compact_feature_knowledge_prioritizes_regime_macro_micro_features():
+    mod = _load_module()
+    compact = mod._compact_feature_knowledge_for_thinker(
+        {
+            "schema_version": "1.0",
+            "session_filter": "eth",
+            "bar_configs": {"tick_610": {"total_columns": 8, "extra_columns": 0}},
+            "common_columns": [
+                "close",
+                "vol_zscore",
+                "trade_intensity",
+                "prev_day_va_position",
+                "dist_prev_vah",
+                "failed_auction_score",
+                "cvd_price_divergence_3",
+                "absorption_signal",
+                "order_flow_imbalance",
+            ],
+            "feature_catalog": [
+                "vol_zscore | x | regime",
+                "prev_day_va_position | x | macro",
+                "dist_prev_vah | x | macro",
+                "failed_auction_score | x | macro",
+                "cvd_price_divergence_3 | x | micro",
+                "absorption_signal | x | micro",
+            ],
+            "computation_notes": [],
+            "errors": {},
+        },
+        selected_bar_configs=["tick_610"],
+    )
+    assert compact["priority_feature_families"]["regime"] == ["vol_zscore", "trade_intensity"]
+    assert "prev_day_va_position" in compact["priority_feature_families"]["macro_structure"]
+    assert "cvd_price_divergence_3" in compact["priority_feature_families"]["micro_execution"]
+    assert compact["common_columns_sample"][:3] == ["vol_zscore", "trade_intensity", "prev_day_va_position"]
+    assert "prev_day_va_position | x | macro" in compact["feature_catalog_highlights"]
+    assert "Active mission is ETH." in compact["session_structure_guidance"]
+
+
 def test_prompts_include_feature_knowledge_markers():
     mod = _load_module()
     feature_knowledge = {
         "schema_version": "1.0",
-        "common_columns": ["close", "ema_ratio_8"],
-        "bar_configs": {"tick_610": {"total_columns": 2, "extra_columns": 0}},
+        "session_filter": "eth",
+        "common_columns": [
+            "close",
+            "ema_ratio_8",
+            "vol_zscore",
+            "prev_day_va_position",
+            "dist_prev_vah",
+            "cvd_price_divergence_3",
+            "absorption_signal",
+            "order_flow_imbalance",
+        ],
+        "bar_configs": {"tick_610": {"total_columns": 8, "extra_columns": 0}},
         "per_bar_extra_columns": {"tick_610": []},
         "computation_notes": ["ema_ratio_N = close / EMA - 1"],
+        "feature_catalog": [
+            "vol_zscore | x | regime",
+            "prev_day_va_position | x | macro",
+            "dist_prev_vah | x | macro",
+            "cvd_price_divergence_3 | x | micro",
+            "absorption_signal | x | micro",
+            "order_flow_imbalance | x | micro",
+        ],
         "errors": {},
     }
     thinker_feature_knowledge = mod._compact_feature_knowledge_for_thinker(
@@ -609,9 +668,17 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Current focus anchors" in thinker_prompt
     assert "- amt_value_area" in thinker_prompt
     assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
+    assert "A proper NQ hypothesis must follow this funnel: Regime -> Macro location -> Micro trigger." in thinker_prompt
     assert "You must return a required `research_brief` object before `entry_conditions`" in thinker_prompt
+    assert "- `macro_location`: the structural location where the setup matters" in thinker_prompt
+    assert "- `micro_trigger`: the L1/orderflow confirmation that says fire now instead of wait" in thinker_prompt
     assert "- `expected_horizon_bars`: one of [1, 3, 5, 10]" in thinker_prompt
-    assert "The `entry_conditions` must be directly traceable to the `research_brief.event`" in thinker_prompt
+    assert "THREE_LAYER_HYPOTHESIS_ARCHITECTURE:" in thinker_prompt
+    assert "Active mission is ETH." in thinker_prompt
+    assert "Regime fields: vol_zscore" in thinker_prompt
+    assert "Macro structure fields: prev_day_va_position" in thinker_prompt
+    assert "Micro execution fields: cvd_price_divergence_3" in thinker_prompt
+    assert "The `entry_conditions` must be directly traceable to the `research_brief.expected_regime`" in thinker_prompt
     assert "Return exactly one selected `bar_config` inside `bar_configs`" in thinker_prompt
     assert "LEARNING_SCORECARD:" in thinker_prompt
     assert "FEATURE_SURFACE_INTELLIGENCE:" in thinker_prompt

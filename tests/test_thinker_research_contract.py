@@ -22,6 +22,8 @@ def _valid_brief() -> dict[str, object]:
         "expected_side": "long",
         "expected_horizon_bars": 5,
         "expected_regime": "ETH only, elevated trade_intensity, and relative volatility already lifting from the prior hour.",
+        "macro_location": "Price is below prior value and re-tests prev_day_val from underneath while still close to that structural boundary.",
+        "micro_trigger": "trade_intensity re-accelerates and volume_ratio expands while the orderflow turns back in favor of buyers.",
         "post_cost_rationale": "The event is sparse, directional, and tied to fast participation so a short 5-bar move can outrun one-turn costs.",
         "falsification": "If volume_ratio expands but trade_intensity does not stay elevated on entry bars, the imbalance thesis is wrong.",
         "novelty_vs_recent_failures": "This is not a generic delta threshold idea; it requires quiet-session compression first and then a specific expansion trigger.",

@@ -1054,6 +1054,8 @@ def _attempt_research_fields(research_brief: dict[str, Any] | None) -> dict[str,
     mechanism = str(research_brief.get("mechanism", "")).strip()
     mechanism_key = str(research_brief.get("mechanism_key", "")).strip()
     expected_regime = str(research_brief.get("expected_regime", "")).strip()
+    macro_location = str(research_brief.get("macro_location", "")).strip()
+    micro_trigger = str(research_brief.get("micro_trigger", "")).strip()
     expected_horizon_bars = research_brief.get("expected_horizon_bars")
     out: dict[str, Any] = {}
     if mechanism:
@@ -1062,6 +1064,10 @@ def _attempt_research_fields(research_brief: dict[str, Any] | None) -> dict[str,
         out["mechanism_key"] = mechanism_key
     if expected_regime:
         out["expected_regime"] = expected_regime
+    if macro_location:
+        out["macro_location"] = macro_location
+    if micro_trigger:
+        out["micro_trigger"] = micro_trigger
     if isinstance(expected_horizon_bars, int) and expected_horizon_bars > 0:
         out["expected_horizon_bars"] = int(expected_horizon_bars)
     return out
@@ -1769,6 +1775,68 @@ FEATURE_COMPUTATION_NOTES = [
     "Previous-session profile levels are separate columns (`prev_day_poc`, `prev_day_vah`, `prev_day_val`, `dist_prev_*`, `prev_day_va_position`).",
     "Profile distance features such as `poc_distance` and `rolling_poc_distance` are ATR-normalized; `*_raw` variants stay in points.",
 ]
+_THINKER_PRIORITY_FEATURE_FAMILIES = {
+    "regime": [
+        "yz_volatility",
+        "vol_zscore",
+        "trade_intensity",
+        "spread_bps",
+        "minutes_since_open",
+        "session_progress",
+        "is_power_hour",
+        "is_london_session",
+        "return_5bar",
+        "vwap_deviation",
+    ],
+    "macro_structure": [
+        "prev_day_va_position",
+        "position_in_va",
+        "rolling_va_position",
+        "prev_day_poc",
+        "prev_day_vah",
+        "prev_day_val",
+        "dist_prev_poc",
+        "dist_prev_vah",
+        "dist_prev_val",
+        "poc_distance",
+        "poc_distance_raw",
+        "va_width",
+        "value_acceptance_rate_8",
+        "va_rejection_score",
+        "price_discovery_score",
+        "failed_auction_bull",
+        "failed_auction_bear",
+        "failed_auction_score",
+        "at_hvn",
+        "at_lvn",
+        "dist_nearest_hvn",
+        "dist_nearest_lvn",
+        "breakout_direction",
+        "bars_since_breakout",
+        "or_broken_up",
+        "or_broken_down",
+    ],
+    "micro_execution": [
+        "cvd_price_divergence_3",
+        "cvd_price_divergence_6",
+        "absorption_signal",
+        "order_flow_imbalance",
+        "volume_imbalance",
+        "weighted_book_imbalance",
+        "orderflow_ratio",
+        "tape_speed_z",
+        "price_velocity_z",
+        "delta_heat",
+        "extreme_aggression_high",
+        "extreme_aggression_low",
+        "stacked_imb_strength",
+        "stacked_imb_streak",
+        "cancel_trade_ratio",
+        "large_trade_ratio",
+    ],
+}
+_THINKER_COMMON_COLUMNS_LIMIT = 96
+_THINKER_FEATURE_HIGHLIGHTS_LIMIT = 24
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FEATURE_CATALOG_PATH = _REPO_ROOT / "research" / "feature_catalog.md"
@@ -1804,6 +1872,99 @@ def _load_feature_catalog() -> list[str]:
 FEATURE_CATALOG_LINES: list[str] = _load_feature_catalog()
 
 
+def _session_structure_guidance(session_filter: str) -> str:
+    session = str(session_filter).strip().lower()
+    if session == "eth":
+        return (
+            "Active mission is ETH. Prefer prior-session value, overnight inventory, London/ETH transition, "
+            "failed auction, and value re-entry hypotheses. Do not default to RTH opening-range logic unless "
+            "the mission filter explicitly changes."
+        )
+    if session == "rth":
+        return (
+            "Active mission is RTH. Opening range, cash-session value migration, and midday vs close regime "
+            "structure are first-class macro locations."
+        )
+    return "Use the mission session filter to choose macro locations before proposing micro triggers."
+
+
+def _priority_feature_families(common_columns: list[str]) -> dict[str, list[str]]:
+    available = {str(value) for value in common_columns if str(value).strip()}
+    return {
+        family: [name for name in names if name in available]
+        for family, names in _THINKER_PRIORITY_FEATURE_FAMILIES.items()
+    }
+
+
+def _prioritized_common_columns_sample(common_columns: list[str], *, limit: int = _THINKER_COMMON_COLUMNS_LIMIT) -> list[str]:
+    families = _priority_feature_families(common_columns)
+    chosen: list[str] = []
+    seen: set[str] = set()
+    for family in ("regime", "macro_structure", "micro_execution"):
+        for name in families.get(family, []):
+            if name in seen:
+                continue
+            chosen.append(name)
+            seen.add(name)
+    for name in common_columns:
+        text = str(name).strip()
+        if not text or text in seen:
+            continue
+        chosen.append(text)
+        seen.add(text)
+        if len(chosen) >= limit:
+            break
+    return chosen[:limit]
+
+
+def _feature_catalog_highlights(
+    feature_catalog: list[str],
+    *,
+    selected_columns: list[str],
+    max_lines: int = _THINKER_FEATURE_HIGHLIGHTS_LIMIT,
+) -> list[str]:
+    wanted = {str(name).strip() for name in selected_columns if str(name).strip()}
+    if not wanted:
+        return []
+    highlights: list[str] = []
+    for line in feature_catalog:
+        column = str(line).split("|", 1)[0].strip()
+        if column in wanted:
+            highlights.append(str(line))
+        if len(highlights) >= max_lines:
+            break
+    return highlights
+
+
+def _format_three_layer_hypothesis_context(feature_knowledge: dict[str, Any] | None) -> str:
+    if not isinstance(feature_knowledge, dict):
+        return ""
+    families = feature_knowledge.get("priority_feature_families")
+    if not isinstance(families, dict):
+        return ""
+    lines = [
+        "THREE_LAYER_HYPOTHESIS_ARCHITECTURE:",
+        "Frame every idea as Regime -> Macro location -> Micro trigger.",
+    ]
+    session_guidance = str(feature_knowledge.get("session_structure_guidance", "")).strip()
+    if session_guidance:
+        lines.append(session_guidance)
+    labels = {
+        "regime": "Regime fields",
+        "macro_structure": "Macro structure fields",
+        "micro_execution": "Micro execution fields",
+    }
+    for family in ("regime", "macro_structure", "micro_execution"):
+        values = [str(value) for value in (families.get(family) or []) if str(value).strip()]
+        if values:
+            lines.append(f"- {labels[family]}: {', '.join(values[:12])}")
+    lines.append(
+        "Prefer macro state fields like `prev_day_va_position`, `position_in_va`, `value_acceptance_rate_8`, "
+        "or `failed_auction_score` over arbitrary raw distance thresholds when possible."
+    )
+    return "\n".join(lines)
+
+
 def _build_feature_knowledge(
     *,
     mission_bar_configs: list[str],
@@ -1832,10 +1993,12 @@ def _build_feature_knowledge(
     if not columns_by_cfg:
         return {
             "schema_version": "1.0",
+            "session_filter": str(session_filter),
             "bar_configs": {},
             "common_columns": [],
             "per_bar_extra_columns": {},
             "computation_notes": list(FEATURE_COMPUTATION_NOTES),
+            "feature_catalog": FEATURE_CATALOG_LINES,
             "errors": errors,
         }
 
@@ -1859,6 +2022,7 @@ def _build_feature_knowledge(
 
     return {
         "schema_version": "1.0",
+        "session_filter": str(session_filter),
         "bar_configs": counts,
         "common_columns": common_columns,
         "per_bar_extra_columns": extras,
@@ -1896,12 +2060,24 @@ def _compact_feature_knowledge_for_thinker(
         for value in (feature_knowledge.get("computation_notes") or [])
         if str(value).strip()
     ]
+    prioritized_sample = _prioritized_common_columns_sample(common_columns)
+    priority_families = _priority_feature_families(common_columns)
+    feature_catalog_highlights = _feature_catalog_highlights(
+        feature_catalog,
+        selected_columns=prioritized_sample,
+    )
     return {
         "schema_version": str(feature_knowledge.get("schema_version", "1.0")),
+        "session_filter": str(feature_knowledge.get("session_filter", "")),
         "bar_configs": compact_bars,
         "common_column_count": len(common_columns),
-        "common_columns_sample": common_columns[:96],
+        "common_columns_sample": prioritized_sample,
+        "priority_feature_families": priority_families,
         "feature_catalog": feature_catalog[:36],
+        "feature_catalog_highlights": feature_catalog_highlights,
+        "session_structure_guidance": _session_structure_guidance(
+            str(feature_knowledge.get("session_filter", "")),
+        ),
         "computation_notes": computation_notes[:6],
         "errors": dict(feature_knowledge.get("errors") or {}),
     }
@@ -1963,8 +2139,10 @@ def _thinker_handoff_text_fragments(thinker_handoff: dict[str, Any]) -> list[str
     if isinstance(research_brief, dict):
         for key in (
             "event",
-            "mechanism",
             "expected_regime",
+            "macro_location",
+            "micro_trigger",
+            "mechanism",
             "post_cost_rationale",
             "falsification",
             "novelty_vs_recent_failures",
@@ -2311,6 +2489,7 @@ def _build_thinker_user_prompt(
     avoid = ", ".join(existing_strategies[-12:]) if existing_strategies else "(none)"
     focus_blob = "\n".join(f"- {str(x)}" for x in current_focus) if current_focus else "- none provided"
     results_table = _format_results_table(feedback_items)
+    three_layer_context = _format_three_layer_hypothesis_context(feature_knowledge)
     prompt_parts = [
         f"Mission objective:\n{objective}\n\n"
         f"Allowed bar_configs: {bar_configs}\n"
@@ -2340,12 +2519,15 @@ def _build_thinker_user_prompt(
     )
     prompt_parts.append(
         "Define the market event and mechanism first. Do not start with thresholds and then write a story around them.\n"
+        "A proper NQ hypothesis must follow this funnel: Regime -> Macro location -> Micro trigger.\n"
         "You must return a required `research_brief` object before `entry_conditions` with these fields:\n"
         "- `event`: the concrete market event being studied\n"
+        "- `expected_regime`: the market/weather state where the setup should be active\n"
+        "- `macro_location`: the structural location where the setup matters (for example prior value, session VA, POC, breakout/failed auction)\n"
+        "- `micro_trigger`: the L1/orderflow confirmation that says fire now instead of wait\n"
         "- `mechanism`: the economic or microstructure mechanism; this should name the idea family, not a threshold soup\n"
         "- `expected_side`: one of `long`, `short`, `both`\n"
         f"- `expected_horizon_bars`: one of {allowed_horizons}\n"
-        "- `expected_regime`: the regime pocket where the edge should live\n"
         "- `post_cost_rationale`: why this could still survive costs\n"
         "- `falsification`: an observable disconfirming condition that references at least one entry-condition feature by name\n"
         "- `novelty_vs_recent_failures`: how this differs from recently failed ideas\n\n",
@@ -2357,11 +2539,14 @@ def _build_thinker_user_prompt(
         "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
         "For comparison ops, reference a numeric key from `params_template` via `param_key`.\n"
         "For `between`, use `param_key_low` and `param_key_high`.\n"
-        "The `entry_conditions` must be directly traceable to the `research_brief.event` and `research_brief.mechanism`.\n"
+        "The `entry_conditions` must be directly traceable to the `research_brief.expected_regime`, `research_brief.macro_location`, and `research_brief.micro_trigger`.\n"
+        "At least one primary condition should anchor the macro location. The confirmation condition should usually be the micro trigger.\n"
         "Primary conditions must be independently plausible on the provided sample stats. Do not set thresholds far outside observed feature bands.\n"
         "Avoid dead features, avoid impossible cutoffs, and avoid broad cost-destruction patterns that would fire on nearly every bar.\n"
         "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n\n",
     )
+    if three_layer_context.strip():
+        prompt_parts.append(f"{three_layer_context}\n\n")
     if learning_context.strip():
         prompt_parts.append(f"{learning_context}\n\n")
     if thinker_memory_context.strip():
@@ -2501,6 +2686,8 @@ def _build_coder_handoff(
             ("mechanism_key", 80),
             ("expected_side", 12),
             ("expected_regime", 180),
+            ("macro_location", 180),
+            ("micro_trigger", 180),
             ("post_cost_rationale", 260),
             ("falsification", 320),
             ("novelty_vs_recent_failures", 260),

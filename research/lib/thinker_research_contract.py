@@ -8,6 +8,8 @@ _MIN_TEXT_LENGTHS = {
     "event": 24,
     "mechanism": 20,
     "expected_regime": 20,
+    "macro_location": 20,
+    "micro_trigger": 20,
     "post_cost_rationale": 28,
     "falsification": 48,
     "novelty_vs_recent_failures": 28,
@@ -16,6 +18,8 @@ _MAX_TEXT_LENGTHS = {
     "event": 220,
     "mechanism": 180,
     "expected_regime": 220,
+    "macro_location": 220,
+    "micro_trigger": 220,
     "post_cost_rationale": 320,
     "falsification": 420,
     "novelty_vs_recent_failures": 320,
@@ -85,6 +89,8 @@ def _sanitize_raw_brief(raw_brief: dict[str, Any] | None) -> dict[str, Any]:
         "expected_side",
         "expected_horizon_bars",
         "expected_regime",
+        "macro_location",
+        "micro_trigger",
         "post_cost_rationale",
         "falsification",
         "novelty_vs_recent_failures",
@@ -178,6 +184,8 @@ def normalize_research_brief(
     event = _normalized_text_field(raw_brief, field="event")
     mechanism = _normalized_text_field(raw_brief, field="mechanism")
     expected_regime = _normalized_text_field(raw_brief, field="expected_regime")
+    macro_location = _normalized_text_field(raw_brief, field="macro_location")
+    micro_trigger = _normalized_text_field(raw_brief, field="micro_trigger")
     post_cost_rationale = _normalized_text_field(raw_brief, field="post_cost_rationale")
     falsification = _normalized_text_field(raw_brief, field="falsification")
     novelty = _normalized_text_field(raw_brief, field="novelty_vs_recent_failures")
@@ -207,6 +215,8 @@ def normalize_research_brief(
         "expected_side": expected_side,
         "expected_horizon_bars": expected_horizon_bars,
         "expected_regime": expected_regime,
+        "macro_location": macro_location,
+        "micro_trigger": micro_trigger,
         "post_cost_rationale": post_cost_rationale,
         "falsification": falsification,
         "novelty_vs_recent_failures": novelty,
