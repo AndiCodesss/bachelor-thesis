@@ -9,7 +9,9 @@ import polars as pl
 _EPSILON = 1e-12
 _SUPPORTED_OPS = {">", ">=", "<", "<=", "between", "bool_true", "bool_false"}
 _SUPPORTED_ROLES = {"primary", "confirmation"}
-_MAX_CONDITIONS = 6
+_MAX_CONDITIONS = 3
+_MAX_PRIMARY_CONDITIONS = 2
+_MAX_CONFIRMATION_CONDITIONS = 1
 _PROTECTED_PARAM_PREFIXES = ("sl_ticks", "pt_ticks")
 
 
@@ -28,9 +30,16 @@ def normalize_entry_conditions(
 ) -> list[dict[str, Any]]:
     if not isinstance(raw_conditions, list) or not raw_conditions:
         raise ValueError("entry_conditions must be a non-empty list")
+    if len(raw_conditions) > max_conditions:
+        raise ValueError(
+            f"entry_conditions supports at most {max_conditions} conditions "
+            f"({_MAX_PRIMARY_CONDITIONS} primary + {_MAX_CONFIRMATION_CONDITIONS} confirmation)"
+        )
 
     normalized: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_conditions[:max_conditions]):
+    primary_count = 0
+    confirmation_count = 0
+    for index, raw in enumerate(raw_conditions):
         if not isinstance(raw, dict):
             raise ValueError(f"entry_conditions[{index}] must be an object")
 
@@ -49,6 +58,18 @@ def normalize_entry_conditions(
             raise ValueError(
                 f"entry_conditions[{index}].role must be one of {sorted(_SUPPORTED_ROLES)}, got {role!r}"
             )
+        if role == "primary":
+            primary_count += 1
+            if primary_count > _MAX_PRIMARY_CONDITIONS:
+                raise ValueError(
+                    f"entry_conditions supports at most {_MAX_PRIMARY_CONDITIONS} primary conditions",
+                )
+        else:
+            confirmation_count += 1
+            if confirmation_count > _MAX_CONFIRMATION_CONDITIONS:
+                raise ValueError(
+                    f"entry_conditions supports at most {_MAX_CONFIRMATION_CONDITIONS} confirmation condition",
+                )
 
         condition: dict[str, Any] = {
             "feature": feature,

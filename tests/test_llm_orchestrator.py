@@ -20,12 +20,28 @@ def _load_module():
     return mod
 
 
+def _research_brief(**overrides):
+    brief = {
+        "event": "Aggressive participation expands after a quiet rotation and the next few bars should follow through.",
+        "mechanism": "short-term participation imbalance after quiet-session compression",
+        "expected_side": "long",
+        "expected_horizon_bars": 5,
+        "expected_regime": "ETH conditions with rising activity and relative volatility already moving above baseline.",
+        "post_cost_rationale": "The event is sparse and directional enough that a short burst can clear one-turn costs.",
+        "falsification": "If volume_ratio expands but trade_intensity does not stay elevated on entry bars, the imbalance thesis is wrong.",
+        "novelty_vs_recent_failures": "This is not a generic OFI threshold stack; it requires quiet-session compression first and then expansion.",
+    }
+    brief.update(overrides)
+    return brief
+
+
 def test_normalize_generation_payload_filters_bar_configs_and_code():
     mod = _load_module()
     thinker_payload = {
         "hypothesis_id": "OFI Bounce 01",
         "theme_tag": "amt_value_area",
         "strategy_name_hint": "OFI Bounce",
+        "research_brief": _research_brief(),
         "bar_configs": ["foo", "tick_610", "time_1m"],
         "params_template": {"lookback": 12, "vol_ratio_min": 1.1},
         "entry_conditions": [
@@ -46,10 +62,12 @@ def test_normalize_generation_payload_filters_bar_configs_and_code():
     thinker = mod._normalize_thinker_brief(
         thinker_payload,
         mission_bar_configs=["tick_610", "volume_2000"],
+        allowed_horizons=[1, 3, 5, 10],
     )
     assert thinker["hypothesis_id"] == "ofi_bounce_01"
     assert thinker["theme_tag"] == "amt_value_area"
     assert thinker["strategy_name_hint"] == "ofi_bounce"
+    assert thinker["research_brief"]["mechanism_key"] == "short_term_participation_imbalance_after_quiet_session_compression"
     assert thinker["bar_configs"] == ["tick_610"]
     assert thinker["params_template"] == {"lookback": 12, "vol_ratio_min": 1.1}
     assert thinker["entry_conditions"][0]["feature"] == "volume_ratio"
@@ -88,6 +106,32 @@ def test_normalize_coder_payload_preserves_single_thinker_bar_config():
     assert out["bar_configs"] == ["tick_610"]
 
 
+def test_normalize_thinker_brief_requires_research_brief_and_enriches_error():
+    mod = _load_module()
+    with pytest.raises(mod.ThinkerResearchContractError) as exc_info:
+        mod._normalize_thinker_brief(
+            {
+                "hypothesis_id": "missing_brief",
+                "theme_tag": "amt_value_area",
+                "strategy_name_hint": "missing_brief",
+                "bar_configs": ["tick_610"],
+                "params_template": {"vol_ratio_min": 1.1},
+                "entry_conditions": [
+                    {"feature": "volume_ratio", "op": ">", "param_key": "vol_ratio_min", "role": "primary"}
+                ],
+                "thesis": "x",
+                "entry_logic": "y",
+                "exit_logic": "z",
+            },
+            mission_bar_configs=["tick_610"],
+            allowed_horizons=[1, 3, 5, 10],
+        )
+
+    assert "research_brief must be an object" in str(exc_info.value)
+    assert exc_info.value.brief["theme_tag"] == "amt_value_area"
+    assert exc_info.value.brief["entry_conditions"][0]["feature"] == "volume_ratio"
+
+
 def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
     mod = _load_module()
     with pytest.raises(ValueError, match="remove volume_2000 from bar_configs"):
@@ -96,6 +140,7 @@ def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
                 "hypothesis_id": "risk_floor_case",
                 "theme_tag": "amt_value_area",
                 "strategy_name_hint": "risk_floor_case",
+                "research_brief": _research_brief(),
                 "bar_configs": ["volume_2000"],
                 "params_template": {"pt_ticks": 60, "sl_ticks": 22},
                 "entry_conditions": [
@@ -106,6 +151,7 @@ def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
                 "exit_logic": "z",
             },
             mission_bar_configs=["volume_2000"],
+            allowed_horizons=[1, 3, 5, 10],
             sample_bar_context={"volume_2000": {"range_ticks": {"median": 59.0}}},
         )
 
@@ -117,6 +163,7 @@ def test_normalize_thinker_brief_prunes_legacy_multi_bar_risk_floor_payload():
             "hypothesis_id": "risk_floor_prune_case",
             "theme_tag": "amt_value_area",
             "strategy_name_hint": "risk_floor_prune_case",
+            "research_brief": _research_brief(),
             "bar_configs": ["tick_610", "volume_2000"],
             "params_template": {"pt_ticks": 60, "sl_ticks": 20},
             "entry_conditions": [
@@ -127,6 +174,7 @@ def test_normalize_thinker_brief_prunes_legacy_multi_bar_risk_floor_payload():
             "exit_logic": "z",
         },
         mission_bar_configs=["tick_610", "volume_2000"],
+        allowed_horizons=[1, 3, 5, 10],
         sample_bar_context={
             "tick_610": {"range_ticks": {"median": 40.0}},
             "volume_2000": {"range_ticks": {"median": 59.0}},
@@ -425,6 +473,7 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
         "hypothesis_id": "h_01",
         "theme_tag": "amt_value_area",
         "strategy_name_hint": "alpha_hint",
+        "research_brief": _research_brief(),
         "bar_configs": ["tick_610"],
         "params_template": {"lookback": 10},
         "entry_conditions": [
@@ -455,6 +504,7 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
     assert handoff["source_role"] == "quant_thinker"
     assert handoff["payload_hash"] == "abc123"
     assert handoff["hypothesis"]["theme_tag"] == "amt_value_area"
+    assert handoff["hypothesis"]["research_brief"]["mechanism"] == _research_brief()["mechanism"]
     assert handoff["hypothesis"]["entry_conditions"][0]["feature"] == "volume_ratio"
     prompt = mod._build_coder_user_prompt(thinker_handoff=handoff)
     assert "THINKER_HANDOFF_JSON_BEGIN" in prompt
@@ -532,6 +582,7 @@ def test_prompts_include_feature_knowledge_markers():
         runtime_context={
             "split": "validate",
             "min_trade_count": 30,
+            "allowed_edge_horizons": [1, 3, 5, 10],
             "sample_bar_context": {
                 "tick_610": {"sample_rows": 1200, "range_ticks": {"median": 40.0}},
                 "volume_2000": {"sample_rows": 300, "range_ticks": {"median": 59.0}},
@@ -558,6 +609,9 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Current focus anchors" in thinker_prompt
     assert "- amt_value_area" in thinker_prompt
     assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
+    assert "You must return a required `research_brief` object before `entry_conditions`" in thinker_prompt
+    assert "- `expected_horizon_bars`: one of [1, 3, 5, 10]" in thinker_prompt
+    assert "The `entry_conditions` must be directly traceable to the `research_brief.event`" in thinker_prompt
     assert "Return exactly one selected `bar_config` inside `bar_configs`" in thinker_prompt
     assert "LEARNING_SCORECARD:" in thinker_prompt
     assert "FEATURE_SURFACE_INTELLIGENCE:" in thinker_prompt
@@ -1082,6 +1136,12 @@ def test_normalize_and_assess_thinker_brief_rejects_dead_primary_feature():
                 "hypothesis_id": "dead_feature_case",
                 "theme_tag": "amt_value_area",
                 "strategy_name_hint": "dead_feature_case",
+                "research_brief": _research_brief(
+                    falsification=(
+                        "If prev_day_va_position is not consistently elevated on entry bars, the value-area location "
+                        "premise is wrong and the setup should not fire."
+                    ),
+                ),
                 "bar_configs": ["tick_610"],
                 "params_template": {"vol_ratio_min": 1.05, "pt_ticks": 40, "sl_ticks": 20},
                 "entry_conditions": [
@@ -1097,6 +1157,7 @@ def test_normalize_and_assess_thinker_brief_rejects_dead_primary_feature():
                 "exit_logic": "z",
             },
             mission_bar_configs=["tick_610"],
+            allowed_horizons=[1, 3, 5, 10],
             sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
             validation_sample_cache={
                 "tick_610": [
@@ -1121,6 +1182,7 @@ def test_normalize_and_assess_thinker_brief_accepts_feasible_conditions():
             "hypothesis_id": "feasible_case",
             "theme_tag": "amt_value_area",
             "strategy_name_hint": "feasible_case",
+            "research_brief": _research_brief(),
             "bar_configs": ["tick_610"],
             "params_template": {"vol_ratio_min": 1.05, "pt_ticks": 40, "sl_ticks": 20},
             "entry_conditions": [
@@ -1136,6 +1198,7 @@ def test_normalize_and_assess_thinker_brief_accepts_feasible_conditions():
             "exit_logic": "z",
         },
         mission_bar_configs=["tick_610"],
+        allowed_horizons=[1, 3, 5, 10],
         sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
         validation_sample_cache={
             "tick_610": [
@@ -1160,6 +1223,7 @@ def test_normalize_and_assess_thinker_brief_auto_repairs_zero_signal_threshold()
             "hypothesis_id": "auto_repair_zero_signal",
             "theme_tag": "amt_value_area",
             "strategy_name_hint": "auto_repair_zero_signal",
+            "research_brief": _research_brief(),
             "bar_configs": ["tick_610"],
             "params_template": {"vol_ratio_min": 2.0, "pt_ticks": 40, "sl_ticks": 20},
             "entry_conditions": [
@@ -1175,6 +1239,7 @@ def test_normalize_and_assess_thinker_brief_auto_repairs_zero_signal_threshold()
             "exit_logic": "z",
         },
         mission_bar_configs=["tick_610"],
+        allowed_horizons=[1, 3, 5, 10],
         sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
         validation_sample_cache={
             "tick_610": [
@@ -1195,6 +1260,10 @@ def test_normalize_and_assess_thinker_brief_auto_repairs_over_signal_threshold()
             "hypothesis_id": "auto_repair_over_signal",
             "theme_tag": "amt_value_area",
             "strategy_name_hint": "auto_repair_over_signal",
+            "research_brief": _research_brief(
+                mechanism="fade one-sided delta extremes after participation spikes",
+                falsification="If delta_heat stays elevated but volume_ratio does not expand on entry bars, the exhaustion thesis is wrong.",
+            ),
             "bar_configs": ["tick_610"],
             "params_template": {"delta_min": 0.0, "pt_ticks": 40, "sl_ticks": 20},
             "entry_conditions": [
@@ -1210,6 +1279,7 @@ def test_normalize_and_assess_thinker_brief_auto_repairs_over_signal_threshold()
             "exit_logic": "z",
         },
         mission_bar_configs=["tick_610"],
+        allowed_horizons=[1, 3, 5, 10],
         sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
         validation_sample_cache={
             "tick_610": [
@@ -1230,6 +1300,7 @@ def test_normalize_and_assess_thinker_brief_prunes_to_single_best_bar_config():
             "hypothesis_id": "bar_prune_case",
             "theme_tag": "orderflow_divergence",
             "strategy_name_hint": "bar_prune_case",
+            "research_brief": _research_brief(),
             "bar_configs": ["tick_610", "volume_2000"],
             "params_template": {"vol_ratio_min": 1.25, "pt_ticks": 60, "sl_ticks": 40},
             "entry_conditions": [
@@ -1245,6 +1316,7 @@ def test_normalize_and_assess_thinker_brief_prunes_to_single_best_bar_config():
             "exit_logic": "z",
         },
         mission_bar_configs=["tick_610", "volume_2000"],
+        allowed_horizons=[1, 3, 5, 10],
         sample_bar_context={
             "tick_610": {"range_ticks": {"median": 40.0}},
             "volume_2000": {"range_ticks": {"median": 59.0}},
@@ -1377,6 +1449,7 @@ def test_build_validation_attempt_record_captures_blocking_conditions_and_params
         iteration=4,
         hypothesis_id="h004",
         theme_tag="vol_compression",
+        research_brief=_research_brief(mechanism="fade failed compression after volatility expansion"),
         strategy_name="compression_ignition",
         bar_configs=["tick_610"],
         params={"squeeze_threshold": 0.5, "volume_ratio_min": 1.8},
@@ -1417,6 +1490,7 @@ def test_build_validation_attempt_record_captures_blocking_conditions_and_params
     assert record["conditions_label"] == "Blocking"
     assert record["highlighted_conditions"][0]["column"] == "squeeze_score"
     assert record["offending_params"] == {"squeeze_threshold": 0.5}
+    assert record["mechanism"] == "fade failed compression after volatility expansion"
 
 
 def test_build_validation_attempt_record_strips_internal_condition_payload():
@@ -1425,6 +1499,7 @@ def test_build_validation_attempt_record_strips_internal_condition_payload():
         iteration=5,
         hypothesis_id="h005",
         theme_tag="amt_value_area",
+        research_brief=_research_brief(),
         strategy_name="va_rejection",
         bar_configs=["tick_610"],
         params={"vol_ratio_min": 1.2},
@@ -1464,6 +1539,7 @@ def test_build_exception_attempt_record_captures_invalid_risk_floor_params():
         iteration=2,
         hypothesis_id="h002",
         theme_tag="va_rejection",
+        research_brief=_research_brief(),
         bar_configs=["tick_610", "volume_2000"],
         params={"sl_ticks": 22, "pt_ticks": 60},
         exc=ValueError(
@@ -1512,6 +1588,7 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
         iteration=7,
         hypothesis_id="iter_7",
         theme_tag="unknown",
+        research_brief=None,
         bar_configs=[],
         params={},
         exc=exc,

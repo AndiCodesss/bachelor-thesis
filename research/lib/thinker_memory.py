@@ -12,7 +12,7 @@ from research.lib.atomic_io import atomic_json_write
 
 def empty_thinker_memory(*, lane_id: str | None, window_size: int = 3) -> dict[str, Any]:
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "lane_id": lane_id,
         "window_size": max(1, int(window_size)),
         "recent_attempts": [],
@@ -99,9 +99,15 @@ def format_thinker_memory_context(
             continue
         iteration = int(row.get("iteration", 0) or 0)
         theme_tag = str(row.get("theme_tag", "unknown")).strip() or "unknown"
+        mechanism = str(row.get("mechanism", "")).strip()
         status_label = str(row.get("status_label", "UNKNOWN")).strip() or "UNKNOWN"
         summary = str(row.get("summary", "")).strip() or "no summary"
-        lines.append(f"[iter {iteration}] {theme_tag} -> {status_label}: {summary}")
+        if len(mechanism) > 96:
+            mechanism = mechanism[:93].rstrip() + "..."
+        header = f"[iter {iteration}] theme={theme_tag}"
+        if mechanism:
+            header += f" | mechanism={mechanism}"
+        lines.append(f"{header} -> {status_label}: {summary}")
 
         conditions = row.get("highlighted_conditions")
         if isinstance(conditions, list) and conditions:

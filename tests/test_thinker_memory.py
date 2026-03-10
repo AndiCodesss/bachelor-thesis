@@ -45,6 +45,7 @@ def test_format_thinker_memory_context_is_compact_and_includes_params():
                 {
                     "iteration": 4,
                     "theme_tag": "vol_compression",
+                    "mechanism": "fade failed compression that expands without sustained activity",
                     "status_label": "REJECTED (zero_signal)",
                     "summary": "0/523 bars on tick_610.",
                     "conditions_label": "Blocking",
@@ -62,7 +63,10 @@ def test_format_thinker_memory_context_is_compact_and_includes_params():
         }
     )
     assert "RECENT_ATTEMPT_MEMORY" in text
-    assert "[iter 4] vol_compression -> REJECTED (zero_signal): 0/523 bars on tick_610." in text
+    assert (
+        "[iter 4] theme=vol_compression | mechanism=fade failed compression that expands without sustained activity "
+        "-> REJECTED (zero_signal): 0/523 bars on tick_610."
+    ) in text
     assert "Blocking: squeeze_score > 0.5 (0.0% pass)" in text
     assert "Params: squeeze_threshold=0.5" in text
 

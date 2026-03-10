@@ -22,6 +22,28 @@ def test_normalize_entry_conditions_requires_numeric_param_keys():
         )
 
 
+def test_normalize_entry_conditions_limits_primary_and_confirmation_counts():
+    with pytest.raises(ValueError, match="at most 2 primary conditions"):
+        normalize_entry_conditions(
+            [
+                {"feature": "a", "op": ">", "param_key": "a_min", "role": "primary"},
+                {"feature": "b", "op": ">", "param_key": "b_min", "role": "primary"},
+                {"feature": "c", "op": ">", "param_key": "c_min", "role": "primary"},
+            ],
+            params_template={"a_min": 1.0, "b_min": 1.0, "c_min": 1.0},
+        )
+
+    with pytest.raises(ValueError, match="at most 1 confirmation condition"):
+        normalize_entry_conditions(
+            [
+                {"feature": "a", "op": ">", "param_key": "a_min", "role": "primary"},
+                {"feature": "b", "op": ">", "param_key": "b_min", "role": "confirmation"},
+                {"feature": "c", "op": ">", "param_key": "c_min", "role": "confirmation"},
+            ],
+            params_template={"a_min": 1.0, "b_min": 1.0, "c_min": 1.0},
+        )
+
+
 def test_assess_entry_condition_feasibility_detects_dead_primary_feature():
     report = assess_entry_condition_feasibility(
         entry_conditions=[

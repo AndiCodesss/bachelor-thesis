@@ -25,6 +25,7 @@ if __package__ is None or __package__ == "":
 
 from research.lib.atomic_io import atomic_json_write
 from research.lib.coordination import append_handoff, enqueue_task, read_json_file
+from research.lib.edge_surface import normalize_edge_surface_config
 from research.lib.experiments import log_experiment
 from research.lib.feature_groups import filter_strategy_inputs
 from research.lib.feature_surface import (
@@ -70,6 +71,10 @@ from research.lib.thinker_memory import (
     format_thinker_memory_context,
     read_thinker_memory,
 )
+from research.lib.thinker_research_contract import (
+    ThinkerResearchContractError,
+    normalize_research_brief,
+)
 from research.lib.setup_key import build_setup_key
 from research.lib.thinker_feasibility import (
     ThinkerFeasibilityError,
@@ -93,6 +98,11 @@ def _utc_now() -> str:
 
 
 _MAX_THINKER_FEASIBILITY_REPAIR_ATTEMPTS = 6
+_THINKER_SCHEMA_HINT = (
+    "keys in order: hypothesis_id, theme_tag, strategy_name_hint, research_brief, bar_configs, "
+    "params_template, entry_conditions, thesis, entry_logic, exit_logic, risk_controls, "
+    "anti_lookahead_checks, validation_focus"
+)
 
 
 def _slug(value: str) -> str:
@@ -284,7 +294,11 @@ def _normalize_with_semantic_retry(
             if semantic_try >= retries:
                 raise
             previous_payload: dict[str, Any] = current.payload
-            if isinstance(exc, ThinkerFeasibilityError) and isinstance(exc.brief, dict) and exc.brief:
+            if (
+                isinstance(exc, (ThinkerFeasibilityError, ThinkerResearchContractError))
+                and isinstance(exc.brief, dict)
+                and exc.brief
+            ):
                 previous_payload = exc.brief
             repair_prompt = (
                 f"{base_user_prompt}\n\n"
@@ -1034,11 +1048,31 @@ def _select_highlighted_conditions(
     return "Blocking", chosen
 
 
+def _attempt_research_fields(research_brief: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(research_brief, dict):
+        return {}
+    mechanism = str(research_brief.get("mechanism", "")).strip()
+    mechanism_key = str(research_brief.get("mechanism_key", "")).strip()
+    expected_regime = str(research_brief.get("expected_regime", "")).strip()
+    expected_horizon_bars = research_brief.get("expected_horizon_bars")
+    out: dict[str, Any] = {}
+    if mechanism:
+        out["mechanism"] = mechanism
+    if mechanism_key:
+        out["mechanism_key"] = mechanism_key
+    if expected_regime:
+        out["expected_regime"] = expected_regime
+    if isinstance(expected_horizon_bars, int) and expected_horizon_bars > 0:
+        out["expected_horizon_bars"] = int(expected_horizon_bars)
+    return out
+
+
 def _build_validation_attempt_record(
     *,
     iteration: int,
     hypothesis_id: str,
     theme_tag: str,
+    research_brief: dict[str, Any] | None,
     strategy_name: str,
     bar_configs: list[str],
     params: dict[str, Any],
@@ -1116,6 +1150,7 @@ def _build_validation_attempt_record(
         "signal_rate_pct": signal_rate_pct,
         "sample_label": sample_label,
         "bar_config": bar_config,
+        **_attempt_research_fields(research_brief),
     }
 
 
@@ -1124,6 +1159,7 @@ def _build_feasibility_attempt_record(
     iteration: int,
     hypothesis_id: str,
     theme_tag: str,
+    research_brief: dict[str, Any] | None,
     bar_configs: list[str],
     params: dict[str, Any],
     feasibility_report: dict[str, Any] | None,
@@ -1132,6 +1168,7 @@ def _build_feasibility_attempt_record(
         iteration=iteration,
         hypothesis_id=hypothesis_id,
         theme_tag=theme_tag,
+        research_brief=research_brief,
         strategy_name="thinker_hypothesis",
         bar_configs=bar_configs,
         params=params,
@@ -1144,6 +1181,7 @@ def _build_exception_attempt_record(
     iteration: int,
     hypothesis_id: str,
     theme_tag: str,
+    research_brief: dict[str, Any] | None,
     bar_configs: list[str],
     params: dict[str, Any],
     exc: Exception,
@@ -1153,6 +1191,7 @@ def _build_exception_attempt_record(
         if brief:
             hypothesis_id = str(brief.get("hypothesis_id") or hypothesis_id)
             theme_tag = str(brief.get("theme_tag") or theme_tag)
+            research_brief = brief.get("research_brief") if isinstance(brief.get("research_brief"), dict) else research_brief
             if not bar_configs:
                 bar_configs = [str(v) for v in brief.get("bar_configs", []) if str(v).strip()]
             if not params:
@@ -1163,12 +1202,40 @@ def _build_exception_attempt_record(
             iteration=iteration,
             hypothesis_id=hypothesis_id,
             theme_tag=theme_tag,
+            research_brief=research_brief,
             bar_configs=bar_configs,
             params=params,
             feasibility_report=exc.report,
         )
         if record is not None:
             return record
+
+    if isinstance(exc, ThinkerResearchContractError):
+        brief = exc.brief if isinstance(exc.brief, dict) else {}
+        if brief:
+            hypothesis_id = str(brief.get("hypothesis_id") or hypothesis_id)
+            theme_tag = str(brief.get("theme_tag") or theme_tag)
+            research_brief = brief.get("research_brief") if isinstance(brief.get("research_brief"), dict) else research_brief
+            if not bar_configs:
+                bar_configs = [str(v) for v in brief.get("bar_configs", []) if str(v).strip()]
+            if not params:
+                raw_params = brief.get("params_template")
+                if isinstance(raw_params, dict):
+                    params = dict(raw_params)
+        return {
+            "iteration": iteration,
+            "hypothesis_id": hypothesis_id,
+            "theme_tag": theme_tag,
+            "bar_configs": list(bar_configs),
+            "status": "rejected_pre_enqueue",
+            "status_label": "REJECTED (research_contract)",
+            "failure_type": "research_contract_error",
+            "summary": str(exc).strip()[:180] or "research_brief contract failed",
+            "conditions_label": "",
+            "highlighted_conditions": [],
+            "offending_params": {},
+            **_attempt_research_fields(research_brief),
+        }
 
     message = str(exc).strip()
     risk_match = re.search(
@@ -1199,6 +1266,7 @@ def _build_exception_attempt_record(
             "highlighted_conditions": [],
             "offending_params": offending_params,
             "bar_config": bar_config,
+            **_attempt_research_fields(research_brief),
         }
 
     return {
@@ -1213,6 +1281,7 @@ def _build_exception_attempt_record(
         "conditions_label": "",
         "highlighted_conditions": [],
         "offending_params": {},
+        **_attempt_research_fields(research_brief),
     }
 
 
@@ -1221,6 +1290,7 @@ def _build_success_attempt_record(
     iteration: int,
     hypothesis_id: str,
     theme_tag: str,
+    research_brief: dict[str, Any] | None,
     strategy_name: str,
     bar_configs: list[str],
     params: dict[str, Any],
@@ -1252,6 +1322,7 @@ def _build_success_attempt_record(
         "conditions_label": "",
         "highlighted_conditions": [],
         "offending_params": _format_attempt_params(params, param_keys),
+        **_attempt_research_fields(research_brief),
     }
 
 
@@ -1293,12 +1364,14 @@ def _normalize_and_assess_thinker_brief(
     payload: dict[str, Any],
     *,
     mission_bar_configs: list[str],
+    allowed_horizons: list[int],
     sample_bar_context: dict[str, Any] | None,
     validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]],
 ) -> dict[str, Any]:
     thinker_brief = _normalize_thinker_brief(
         payload,
         mission_bar_configs=mission_bar_configs,
+        allowed_horizons=allowed_horizons,
         sample_bar_context=sample_bar_context,
     )
     current_brief = thinker_brief
@@ -1360,6 +1433,7 @@ def _normalize_thinker_brief(
     payload: dict[str, Any],
     *,
     mission_bar_configs: list[str],
+    allowed_horizons: list[int],
     sample_bar_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
@@ -1421,6 +1495,24 @@ def _normalize_thinker_brief(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid pt_ticks/sl_ticks in params_template: {exc}") from exc
 
+    try:
+        research_brief = normalize_research_brief(
+            payload.get("research_brief"),
+            entry_conditions=entry_conditions,
+            allowed_horizons=allowed_horizons,
+        )
+    except ThinkerResearchContractError as exc:
+        enriched_brief = {
+            "hypothesis_id": hypothesis_id,
+            "theme_tag": theme_tag,
+            "strategy_name_hint": strategy_name_hint,
+            "bar_configs": chosen,
+            "params_template": dict(params_template),
+            "entry_conditions": list(entry_conditions),
+            "research_brief": exc.brief if isinstance(exc.brief, dict) and exc.brief else payload.get("research_brief", {}),
+        }
+        raise ThinkerResearchContractError(str(exc), brief=enriched_brief) from exc
+
     thesis = str(payload.get("thesis", "")).strip()[:800]
     entry_logic = str(payload.get("entry_logic", "")).strip()[:1200]
     exit_logic = str(payload.get("exit_logic", "")).strip()[:800]
@@ -1443,6 +1535,7 @@ def _normalize_thinker_brief(
         "hypothesis_id": hypothesis_id,
         "theme_tag": theme_tag,
         "strategy_name_hint": strategy_name_hint,
+        "research_brief": research_brief,
         "bar_configs": chosen,
         "params_template": dict(params_template),
         "entry_conditions": entry_conditions,
@@ -1866,6 +1959,19 @@ def _thinker_handoff_text_fragments(thinker_handoff: dict[str, Any]) -> list[str
         return []
 
     fragments: list[str] = []
+    research_brief = hypothesis.get("research_brief")
+    if isinstance(research_brief, dict):
+        for key in (
+            "event",
+            "mechanism",
+            "expected_regime",
+            "post_cost_rationale",
+            "falsification",
+            "novelty_vs_recent_failures",
+        ):
+            value = research_brief.get(key)
+            if isinstance(value, str) and value.strip():
+                fragments.append(value)
     for key in ("thesis", "entry_logic", "exit_logic"):
         value = hypothesis.get(key)
         if isinstance(value, str) and value.strip():
@@ -1926,6 +2032,7 @@ def _build_runtime_context(
         sample_df = sample_cache.get(bar_config)
         if sample_df is not None:
             bar_context[bar_config] = _sample_bar_context(sample_df)
+    edge_surface_config = normalize_edge_surface_config(mission.get("edge_surface"))
 
     return {
         "schema_version": "1.0",
@@ -1937,6 +2044,7 @@ def _build_runtime_context(
         "session_filter": session_filter,
         "feature_group": feature_group,
         "allowed_bar_configs": list(mission_bar_configs),
+        "allowed_edge_horizons": list(edge_surface_config.get("horizons", [])),
         "target_sharpe": float(mission.get("target_sharpe", 0.0)),
         "min_trade_count": int(mission.get("min_trade_count", 1)),
         "gauntlet_tests": [
@@ -2185,6 +2293,13 @@ def _build_thinker_user_prompt(
     feature_knowledge: dict[str, Any] | None = None,
 ) -> str:
     bar_configs = mission.get("bar_configs", ["tick_610"])
+    allowed_horizons = (
+        [int(v) for v in (runtime_context or {}).get("allowed_edge_horizons", []) if int(v) > 0]
+        if isinstance((runtime_context or {}).get("allowed_edge_horizons", []), list)
+        else []
+    )
+    if not allowed_horizons:
+        allowed_horizons = list(normalize_edge_surface_config(mission.get("edge_surface")).get("horizons", []))
     current_focus = mission.get("current_focus", [])
     if not isinstance(current_focus, list):
         current_focus = []
@@ -2224,11 +2339,25 @@ def _build_thinker_user_prompt(
         "not to micro-optimize a finished trading system. Exits should stay simple and secondary.\n\n",
     )
     prompt_parts.append(
+        "Define the market event and mechanism first. Do not start with thresholds and then write a story around them.\n"
+        "You must return a required `research_brief` object before `entry_conditions` with these fields:\n"
+        "- `event`: the concrete market event being studied\n"
+        "- `mechanism`: the economic or microstructure mechanism; this should name the idea family, not a threshold soup\n"
+        "- `expected_side`: one of `long`, `short`, `both`\n"
+        f"- `expected_horizon_bars`: one of {allowed_horizons}\n"
+        "- `expected_regime`: the regime pocket where the edge should live\n"
+        "- `post_cost_rationale`: why this could still survive costs\n"
+        "- `falsification`: an observable disconfirming condition that references at least one entry-condition feature by name\n"
+        "- `novelty_vs_recent_failures`: how this differs from recently failed ideas\n\n",
+    )
+    prompt_parts.append(
         "You must also return `entry_conditions`: a machine-checkable list of the core gates that must be true before a signal can fire.\n"
-        "Use 2-4 conditions total. Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.\n"
+        "Use 1-3 conditions total with a hard cap of 2 `primary` and 1 `confirmation`. "
+        "Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.\n"
         "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
         "For comparison ops, reference a numeric key from `params_template` via `param_key`.\n"
         "For `between`, use `param_key_low` and `param_key_high`.\n"
+        "The `entry_conditions` must be directly traceable to the `research_brief.event` and `research_brief.mechanism`.\n"
         "Primary conditions must be independently plausible on the provided sample stats. Do not set thresholds far outside observed feature bands.\n"
         "Avoid dead features, avoid impossible cutoffs, and avoid broad cost-destruction patterns that would fire on nearly every bar.\n"
         "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n\n",
@@ -2242,7 +2371,12 @@ def _build_thinker_user_prompt(
     if param_feasibility_context.strip():
         prompt_parts.append(f"{param_feasibility_context}\n\n")
     prompt_parts.append(f"{_format_bar_risk_floor_context(runtime_context)}\n\n")
-    prompt_parts.append("Design exactly one entry setup hypothesis that is implementable by a separate coding model.")
+    prompt_parts.append(
+        "Return the JSON fields in this order: hypothesis_id, theme_tag, strategy_name_hint, research_brief, "
+        "bar_configs, params_template, entry_conditions, thesis, entry_logic, exit_logic, risk_controls, "
+        "anti_lookahead_checks, validation_focus.\n\n"
+        "Design exactly one falsifiable entry setup hypothesis that is implementable by a separate coding model."
+    )
     prompt = "".join(prompt_parts)
     if runtime_context:
         prompt += (
@@ -2357,6 +2491,28 @@ def _build_coder_handoff(
                 break
         return out
 
+    def _clip_research_brief(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for key, max_len in (
+            ("event", 200),
+            ("mechanism", 160),
+            ("mechanism_key", 80),
+            ("expected_side", 12),
+            ("expected_regime", 180),
+            ("post_cost_rationale", 260),
+            ("falsification", 320),
+            ("novelty_vs_recent_failures", 260),
+        ):
+            text = _clip_text(value.get(key, ""), max_len)
+            if text:
+                out[key] = text
+        expected_horizon_bars = value.get("expected_horizon_bars")
+        if isinstance(expected_horizon_bars, int) and expected_horizon_bars > 0:
+            out["expected_horizon_bars"] = int(expected_horizon_bars)
+        return out
+
     return {
         "handoff_version": "1.0",
         "source_role": "quant_thinker",
@@ -2370,12 +2526,14 @@ def _build_coder_handoff(
             "selection_split": (runtime_context or {}).get("selection_split", mission.get("selection_split")),
             "target_sharpe": float((runtime_context or {}).get("target_sharpe", mission.get("target_sharpe", 0.0))),
             "min_trade_count": int((runtime_context or {}).get("min_trade_count", mission.get("min_trade_count", 1))),
+            "allowed_edge_horizons": list((runtime_context or {}).get("allowed_edge_horizons", [])),
             "sample_bar_context": dict((runtime_context or {}).get("sample_bar_context", {})),
         },
         "hypothesis": {
             "hypothesis_id": hypothesis_id,
             "theme_tag": str(thinker_brief.get("theme_tag", "")),
             "strategy_name_hint": strategy_name_hint,
+            "research_brief": _clip_research_brief(thinker_brief.get("research_brief")),
             "bar_configs": list(thinker_brief.get("bar_configs", [])),
             "params_template": dict(thinker_brief.get("params_template", {}))
             if isinstance(thinker_brief.get("params_template"), dict)
@@ -2508,6 +2666,7 @@ def _build_task(
     iteration: int,
     hypothesis_id: str,
     theme_tag: str,
+    research_brief: dict[str, Any] | None,
     setup_key: str,
     setup_label: str,
 ) -> dict[str, Any]:
@@ -2552,6 +2711,7 @@ def _build_task(
             "iteration": int(iteration),
             "hypothesis_id": str(hypothesis_id),
             "theme_tag": str(theme_tag),
+            "research_brief": dict(research_brief) if isinstance(research_brief, dict) else {},
             "setup_key": str(setup_key),
             "setup_label": str(setup_label),
             "code_hash": code_hash,
@@ -3058,10 +3218,7 @@ def main() -> int:
             ):
                 thinker_generation = _call_stage_json(
                     stage_name="quant_thinker",
-                    schema_hint=(
-                        "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
-                        "entry_conditions, entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
-                    ),
+                    schema_hint=_THINKER_SCHEMA_HINT,
                     client=thinker_client,
                     system_prompt=thinker_system_prompt,
                     user_prompt=thinker_user_prompt,
@@ -3079,6 +3236,7 @@ def main() -> int:
                     normalize_fn=lambda payload: _normalize_and_assess_thinker_brief(
                         payload,
                         mission_bar_configs=mission_bar_configs,
+                        allowed_horizons=list(runtime_context.get("allowed_edge_horizons", [])),
                         sample_bar_context=runtime_context.get("sample_bar_context"),
                         validation_sample_cache=validation_sample_cache,
                     ),
@@ -3093,10 +3251,7 @@ def main() -> int:
                     stage_backoff_seconds=stage_backoff_seconds,
                     quota_backoff_seconds=quota_backoff_seconds,
                     max_backoff_seconds=max_backoff_seconds,
-                    schema_hint=(
-                "keys: hypothesis_id, theme_tag, strategy_name_hint, thesis, bar_configs, params_template, "
-                        "entry_conditions, entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus"
-                    ),
+                    schema_hint=_THINKER_SCHEMA_HINT,
                 )
             if notebooklm_configured:
                 notebook_summary = _default_notebook_summary(configured=True)
@@ -3177,6 +3332,11 @@ def main() -> int:
             code_hash = _sha256_text(code)[:16]
             hypothesis_id = str(thinker_brief.get("hypothesis_id", "hyp_unknown"))
             theme_tag = str(thinker_brief.get("theme_tag", "other"))
+            research_brief = (
+                thinker_brief.get("research_brief")
+                if isinstance(thinker_brief.get("research_brief"), dict)
+                else {}
+            )
             setup_key, setup_label = build_setup_key(
                 bar_config=chosen_bars[0] if chosen_bars else "",
                 theme_tag=theme_tag,
@@ -3327,6 +3487,7 @@ def main() -> int:
                     iteration=iteration_no,
                     hypothesis_id=hypothesis_id,
                     theme_tag=theme_tag,
+                    research_brief=research_brief,
                     strategy_name=module_name,
                     bar_configs=chosen_bars,
                     params=params,
@@ -3351,6 +3512,7 @@ def main() -> int:
                         "errors": validation_errors,
                         "hypothesis_id": hypothesis_id,
                         "theme_tag": str(thinker_brief.get("theme_tag", "other")),
+                        "research_brief": research_brief,
                         "setup_key": setup_key,
                         "setup_label": setup_label,
                         "thinker": {
@@ -3391,6 +3553,7 @@ def main() -> int:
                         iteration=iteration_no,
                         hypothesis_id=hypothesis_id,
                         theme_tag=theme_tag,
+                        research_brief=research_brief,
                         setup_key=setup_key,
                         setup_label=setup_label,
                     )
@@ -3430,6 +3593,7 @@ def main() -> int:
                                 "bar_configs": chosen_bars,
                                 "hypothesis_id": hypothesis_id,
                                 "theme_tag": theme_tag,
+                                "research_brief": research_brief,
                                 "setup_key": setup_key,
                                 "setup_label": setup_label,
                             },
@@ -3446,6 +3610,7 @@ def main() -> int:
                         iteration=iteration_no,
                         hypothesis_id=hypothesis_id,
                         theme_tag=theme_tag,
+                        research_brief=research_brief,
                         strategy_name=module_name,
                         bar_configs=chosen_bars,
                         params=params,
@@ -3524,6 +3689,11 @@ def main() -> int:
                     iteration=iteration_no,
                     hypothesis_id=hypothesis_id,
                     theme_tag=theme_tag,
+                    research_brief=(
+                        thinker_brief.get("research_brief")
+                        if isinstance(thinker_brief.get("research_brief"), dict)
+                        else {}
+                    ),
                     bar_configs=chosen_bars,
                     params=params,
                     exc=exc,
@@ -3536,6 +3706,13 @@ def main() -> int:
                     "agent": "llm_orchestrator",
                     "event": "generation_error",
                     "iteration": iteration_no,
+                    "hypothesis_id": hypothesis_id,
+                    "theme_tag": theme_tag,
+                    "research_brief": (
+                        thinker_brief.get("research_brief")
+                        if isinstance(thinker_brief.get("research_brief"), dict)
+                        else {}
+                    ),
                     "error": f"{type(exc).__name__}: {exc}",
                     "traceback": trace,
                     "notebooklm": notebook_summary,
