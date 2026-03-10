@@ -7,8 +7,8 @@ _SUPPORTED_EXPECTED_SIDES = {"long", "short", "both"}
 _MIN_TEXT_LENGTHS = {
     "event": 24,
     "mechanism": 20,
-    "expected_regime": 20,
-    "macro_location": 20,
+    "market_regime": 20,
+    "structural_location": 20,
     "micro_trigger": 20,
     "post_cost_rationale": 28,
     "falsification": 48,
@@ -17,12 +17,16 @@ _MIN_TEXT_LENGTHS = {
 _MAX_TEXT_LENGTHS = {
     "event": 220,
     "mechanism": 180,
-    "expected_regime": 220,
-    "macro_location": 220,
+    "market_regime": 220,
+    "structural_location": 220,
     "micro_trigger": 220,
     "post_cost_rationale": 320,
     "falsification": 420,
     "novelty_vs_recent_failures": 320,
+}
+_LEGACY_FIELD_ALIASES = {
+    "market_regime": ("expected_regime",),
+    "structural_location": ("macro_location",),
 }
 _TAUTOLOGICAL_FALSIFICATION_PATTERNS = (
     "avg_trade_pnl",
@@ -88,18 +92,31 @@ def _sanitize_raw_brief(raw_brief: dict[str, Any] | None) -> dict[str, Any]:
         "mechanism",
         "expected_side",
         "expected_horizon_bars",
-        "expected_regime",
-        "macro_location",
+        "market_regime",
+        "structural_location",
         "micro_trigger",
         "post_cost_rationale",
         "falsification",
         "novelty_vs_recent_failures",
     ):
-        value = raw_brief.get(key)
+        value = _raw_field_value(raw_brief, field=key)
         if value is None:
             continue
         out[key] = value
     return out
+
+
+def _raw_field_value(raw_brief: dict[str, Any], *, field: str) -> Any:
+    if field in raw_brief:
+        direct = raw_brief.get(field)
+        if direct is not None and str(direct).strip():
+            return direct
+    for alias in _LEGACY_FIELD_ALIASES.get(field, ()):
+        if alias in raw_brief:
+            alias_value = raw_brief.get(alias)
+            if alias_value is not None and str(alias_value).strip():
+                return alias_value
+    return None
 
 
 def _normalized_text_field(
@@ -107,7 +124,7 @@ def _normalized_text_field(
     *,
     field: str,
 ) -> str:
-    text = _clip_text(raw_brief.get(field, ""), max_len=_MAX_TEXT_LENGTHS[field])
+    text = _clip_text(_raw_field_value(raw_brief, field=field), max_len=_MAX_TEXT_LENGTHS[field])
     min_len = _MIN_TEXT_LENGTHS[field]
     if len(text) < min_len:
         raise _error(
@@ -183,8 +200,8 @@ def normalize_research_brief(
 
     event = _normalized_text_field(raw_brief, field="event")
     mechanism = _normalized_text_field(raw_brief, field="mechanism")
-    expected_regime = _normalized_text_field(raw_brief, field="expected_regime")
-    macro_location = _normalized_text_field(raw_brief, field="macro_location")
+    market_regime = _normalized_text_field(raw_brief, field="market_regime")
+    structural_location = _normalized_text_field(raw_brief, field="structural_location")
     micro_trigger = _normalized_text_field(raw_brief, field="micro_trigger")
     post_cost_rationale = _normalized_text_field(raw_brief, field="post_cost_rationale")
     falsification = _normalized_text_field(raw_brief, field="falsification")
@@ -214,8 +231,8 @@ def normalize_research_brief(
         "mechanism_key": _slug(mechanism),
         "expected_side": expected_side,
         "expected_horizon_bars": expected_horizon_bars,
-        "expected_regime": expected_regime,
-        "macro_location": macro_location,
+        "market_regime": market_regime,
+        "structural_location": structural_location,
         "micro_trigger": micro_trigger,
         "post_cost_rationale": post_cost_rationale,
         "falsification": falsification,

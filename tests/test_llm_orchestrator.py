@@ -26,8 +26,8 @@ def _research_brief(**overrides):
         "mechanism": "short-term participation imbalance after quiet-session compression",
         "expected_side": "long",
         "expected_horizon_bars": 5,
-        "expected_regime": "ETH conditions with rising activity and relative volatility already moving above baseline.",
-        "macro_location": "Price is interacting with prior value from below and is close enough to the structural level that acceptance or rejection matters now.",
+        "market_regime": "ETH conditions with rising activity and relative volatility already moving above baseline.",
+        "structural_location": "Price is interacting with prior value from below and is close enough to the structural level that acceptance or rejection matters now.",
         "micro_trigger": "order_flow_imbalance turns positive while absorption or CVD divergence confirms buyers are taking control at the level.",
         "post_cost_rationale": "The event is sparse and directional enough that a short burst can clear one-turn costs.",
         "falsification": "If volume_ratio expands but trade_intensity does not stay elevated on entry bars, the imbalance thesis is wrong.",
@@ -668,17 +668,17 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Current focus anchors" in thinker_prompt
     assert "- amt_value_area" in thinker_prompt
     assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
-    assert "A proper NQ hypothesis must follow this funnel: Regime -> Macro location -> Micro trigger." in thinker_prompt
+    assert "A proper NQ hypothesis must follow this funnel: Market regime -> Structural location -> Micro trigger." in thinker_prompt
     assert "You must return a required `research_brief` object before `entry_conditions`" in thinker_prompt
-    assert "- `macro_location`: the structural location where the setup matters" in thinker_prompt
+    assert "- `structural_location`: the structural location where the setup matters" in thinker_prompt
     assert "- `micro_trigger`: the L1/orderflow confirmation that says fire now instead of wait" in thinker_prompt
     assert "- `expected_horizon_bars`: one of [1, 3, 5, 10]" in thinker_prompt
     assert "THREE_LAYER_HYPOTHESIS_ARCHITECTURE:" in thinker_prompt
     assert "Active mission is ETH." in thinker_prompt
-    assert "Regime fields: vol_zscore" in thinker_prompt
-    assert "Macro structure fields: prev_day_va_position" in thinker_prompt
+    assert "Market regime fields: vol_zscore" in thinker_prompt
+    assert "Structural location fields: prev_day_va_position" in thinker_prompt
     assert "Micro execution fields: cvd_price_divergence_3" in thinker_prompt
-    assert "The `entry_conditions` must be directly traceable to the `research_brief.expected_regime`" in thinker_prompt
+    assert "The `entry_conditions` must be directly traceable to the `research_brief.market_regime`" in thinker_prompt
     assert "Return exactly one selected `bar_config` inside `bar_configs`" in thinker_prompt
     assert "LEARNING_SCORECARD:" in thinker_prompt
     assert "FEATURE_SURFACE_INTELLIGENCE:" in thinker_prompt
@@ -772,6 +772,22 @@ def test_disable_notebooklm_runtime_mission_removes_notebook_context():
     )
     assert "KNOWLEDGE_BASE_COMMAND" not in prompt
     assert "NotebookLM is disabled for this run." in prompt
+
+
+def test_attempt_research_fields_canonicalizes_legacy_names():
+    mod = _load_module()
+    out = mod._attempt_research_fields(
+        {
+            "mechanism": "failed auction fade",
+            "mechanism_key": "failed_auction_fade",
+            "expected_regime": "ETH with rising volatility.",
+            "macro_location": "Price is probing prior value from below.",
+            "micro_trigger": "Order flow flips positive at the level.",
+            "expected_horizon_bars": 5,
+        }
+    )
+    assert out["market_regime"] == "ETH with rising volatility."
+    assert out["structural_location"] == "Price is probing prior value from below."
 
 
 def test_resolve_notebook_query_budget_defaults_to_bounded_runtime_policy():

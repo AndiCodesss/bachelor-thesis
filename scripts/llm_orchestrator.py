@@ -1051,21 +1051,27 @@ def _select_highlighted_conditions(
 def _attempt_research_fields(research_brief: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(research_brief, dict):
         return {}
+    def _brief_text(*keys: str) -> str:
+        for key in keys:
+            value = str(research_brief.get(key, "")).strip()
+            if value:
+                return value
+        return ""
     mechanism = str(research_brief.get("mechanism", "")).strip()
     mechanism_key = str(research_brief.get("mechanism_key", "")).strip()
-    expected_regime = str(research_brief.get("expected_regime", "")).strip()
-    macro_location = str(research_brief.get("macro_location", "")).strip()
-    micro_trigger = str(research_brief.get("micro_trigger", "")).strip()
+    market_regime = _brief_text("market_regime", "expected_regime")
+    structural_location = _brief_text("structural_location", "macro_location")
+    micro_trigger = _brief_text("micro_trigger")
     expected_horizon_bars = research_brief.get("expected_horizon_bars")
     out: dict[str, Any] = {}
     if mechanism:
         out["mechanism"] = mechanism
     if mechanism_key:
         out["mechanism_key"] = mechanism_key
-    if expected_regime:
-        out["expected_regime"] = expected_regime
-    if macro_location:
-        out["macro_location"] = macro_location
+    if market_regime:
+        out["market_regime"] = market_regime
+    if structural_location:
+        out["structural_location"] = structural_location
     if micro_trigger:
         out["micro_trigger"] = micro_trigger
     if isinstance(expected_horizon_bars, int) and expected_horizon_bars > 0:
@@ -1944,14 +1950,14 @@ def _format_three_layer_hypothesis_context(feature_knowledge: dict[str, Any] | N
         return ""
     lines = [
         "THREE_LAYER_HYPOTHESIS_ARCHITECTURE:",
-        "Frame every idea as Regime -> Macro location -> Micro trigger.",
+        "Frame every idea as Market regime -> Structural location -> Micro trigger.",
     ]
     session_guidance = str(feature_knowledge.get("session_structure_guidance", "")).strip()
     if session_guidance:
         lines.append(session_guidance)
     labels = {
-        "regime": "Regime fields",
-        "macro_structure": "Macro structure fields",
+        "regime": "Market regime fields",
+        "macro_structure": "Structural location fields",
         "micro_execution": "Micro execution fields",
     }
     for family in ("regime", "macro_structure", "micro_execution"):
@@ -1959,7 +1965,7 @@ def _format_three_layer_hypothesis_context(feature_knowledge: dict[str, Any] | N
         if values:
             lines.append(f"- {labels[family]}: {', '.join(values[:12])}")
     lines.append(
-        "Prefer macro state fields like `prev_day_va_position`, `position_in_va`, `value_acceptance_rate_8`, "
+        "Prefer structural state fields like `prev_day_va_position`, `position_in_va`, `value_acceptance_rate_8`, "
         "or `failed_auction_score` over arbitrary raw distance thresholds when possible."
     )
     return "\n".join(lines)
@@ -2137,19 +2143,22 @@ def _thinker_handoff_text_fragments(thinker_handoff: dict[str, Any]) -> list[str
     fragments: list[str] = []
     research_brief = hypothesis.get("research_brief")
     if isinstance(research_brief, dict):
-        for key in (
-            "event",
-            "expected_regime",
-            "macro_location",
-            "micro_trigger",
-            "mechanism",
-            "post_cost_rationale",
-            "falsification",
-            "novelty_vs_recent_failures",
-        ):
-            value = research_brief.get(key)
-            if isinstance(value, str) and value.strip():
-                fragments.append(value)
+        key_aliases = (
+            ("event",),
+            ("market_regime", "expected_regime"),
+            ("structural_location", "macro_location"),
+            ("micro_trigger",),
+            ("mechanism",),
+            ("post_cost_rationale",),
+            ("falsification",),
+            ("novelty_vs_recent_failures",),
+        )
+        for aliases in key_aliases:
+            for key in aliases:
+                value = research_brief.get(key)
+                if isinstance(value, str) and value.strip():
+                    fragments.append(value)
+                    break
     for key in ("thesis", "entry_logic", "exit_logic"):
         value = hypothesis.get(key)
         if isinstance(value, str) and value.strip():
@@ -2519,11 +2528,11 @@ def _build_thinker_user_prompt(
     )
     prompt_parts.append(
         "Define the market event and mechanism first. Do not start with thresholds and then write a story around them.\n"
-        "A proper NQ hypothesis must follow this funnel: Regime -> Macro location -> Micro trigger.\n"
+        "A proper NQ hypothesis must follow this funnel: Market regime -> Structural location -> Micro trigger.\n"
         "You must return a required `research_brief` object before `entry_conditions` with these fields:\n"
         "- `event`: the concrete market event being studied\n"
-        "- `expected_regime`: the market/weather state where the setup should be active\n"
-        "- `macro_location`: the structural location where the setup matters (for example prior value, session VA, POC, breakout/failed auction)\n"
+        "- `market_regime`: the market/weather state where the setup should be active\n"
+        "- `structural_location`: the structural location where the setup matters (for example prior value, session VA, POC, breakout/failed auction)\n"
         "- `micro_trigger`: the L1/orderflow confirmation that says fire now instead of wait\n"
         "- `mechanism`: the economic or microstructure mechanism; this should name the idea family, not a threshold soup\n"
         "- `expected_side`: one of `long`, `short`, `both`\n"
@@ -2539,8 +2548,8 @@ def _build_thinker_user_prompt(
         "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
         "For comparison ops, reference a numeric key from `params_template` via `param_key`.\n"
         "For `between`, use `param_key_low` and `param_key_high`.\n"
-        "The `entry_conditions` must be directly traceable to the `research_brief.expected_regime`, `research_brief.macro_location`, and `research_brief.micro_trigger`.\n"
-        "At least one primary condition should anchor the macro location. The confirmation condition should usually be the micro trigger.\n"
+        "The `entry_conditions` must be directly traceable to the `research_brief.market_regime`, `research_brief.structural_location`, and `research_brief.micro_trigger`.\n"
+        "At least one primary condition should anchor the structural location. The confirmation condition should usually be the micro trigger.\n"
         "Primary conditions must be independently plausible on the provided sample stats. Do not set thresholds far outside observed feature bands.\n"
         "Avoid dead features, avoid impossible cutoffs, and avoid broad cost-destruction patterns that would fire on nearly every bar.\n"
         "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n\n",
@@ -2685,14 +2694,20 @@ def _build_coder_handoff(
             ("mechanism", 160),
             ("mechanism_key", 80),
             ("expected_side", 12),
-            ("expected_regime", 180),
-            ("macro_location", 180),
+            ("market_regime", 180),
+            ("structural_location", 180),
             ("micro_trigger", 180),
             ("post_cost_rationale", 260),
             ("falsification", 320),
             ("novelty_vs_recent_failures", 260),
         ):
-            text = _clip_text(value.get(key, ""), max_len)
+            if key == "market_regime":
+                raw_value = value.get("market_regime", value.get("expected_regime", ""))
+            elif key == "structural_location":
+                raw_value = value.get("structural_location", value.get("macro_location", ""))
+            else:
+                raw_value = value.get(key, "")
+            text = _clip_text(raw_value, max_len)
             if text:
                 out[key] = text
         expected_horizon_bars = value.get("expected_horizon_bars")

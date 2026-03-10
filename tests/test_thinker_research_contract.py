@@ -21,8 +21,8 @@ def _valid_brief() -> dict[str, object]:
         "mechanism": "short-term inventory imbalance after quiet-session compression",
         "expected_side": "long",
         "expected_horizon_bars": 5,
-        "expected_regime": "ETH only, elevated trade_intensity, and relative volatility already lifting from the prior hour.",
-        "macro_location": "Price is below prior value and re-tests prev_day_val from underneath while still close to that structural boundary.",
+        "market_regime": "ETH only, elevated trade_intensity, and relative volatility already lifting from the prior hour.",
+        "structural_location": "Price is below prior value and re-tests prev_day_val from underneath while still close to that structural boundary.",
         "micro_trigger": "trade_intensity re-accelerates and volume_ratio expands while the orderflow turns back in favor of buyers.",
         "post_cost_rationale": "The event is sparse, directional, and tied to fast participation so a short 5-bar move can outrun one-turn costs.",
         "falsification": "If volume_ratio expands but trade_intensity does not stay elevated on entry bars, the imbalance thesis is wrong.",
@@ -39,6 +39,8 @@ def test_normalize_research_brief_derives_mechanism_key_and_horizon():
     assert out["expected_horizon_bars"] == 5
     assert out["expected_side"] == "long"
     assert out["mechanism_key"] == "short_term_inventory_imbalance_after_quiet_session_compression"
+    assert out["market_regime"].startswith("ETH only")
+    assert out["structural_location"].startswith("Price is below prior value")
 
 
 def test_normalize_research_brief_requires_mission_horizon_membership():
@@ -69,3 +71,19 @@ def test_normalize_research_brief_rejects_tautological_falsification():
             entry_conditions=_entry_conditions(),
             allowed_horizons=[1, 3, 5, 10],
         )
+
+
+def test_normalize_research_brief_accepts_legacy_aliases_and_canonicalizes_output():
+    out = normalize_research_brief(
+        {
+            **_valid_brief(),
+            "market_regime": None,
+            "structural_location": None,
+            "expected_regime": "ETH only, elevated trade_intensity, and relative volatility already lifting from the prior hour.",
+            "macro_location": "Price is below prior value and re-tests prev_day_val from underneath while still close to that structural boundary.",
+        },
+        entry_conditions=_entry_conditions(),
+        allowed_horizons=[1, 3, 5, 10],
+    )
+    assert out["market_regime"].startswith("ETH only")
+    assert out["structural_location"].startswith("Price is below prior value")
