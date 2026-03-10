@@ -14,7 +14,7 @@ claude_cli:
 
 quant_thinker:
   agent_name: quant-thinker
-  model: opus
+  model: claude-sonnet-4-6
   temperature: 0.2  # keep thinker exploratory, but reduce drift into infeasible threshold proposals
   max_output_tokens: 2000
   timeout_seconds: 1200  # 20 min — deep research can take up to 15 min before the chat response
