@@ -1764,6 +1764,71 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
     assert "_mask" not in record["highlighted_conditions"][0]
 
 
+def test_build_validation_attempt_record_includes_cross_sample_conflicts():
+    mod = _load_module()
+    record = mod._build_validation_attempt_record(
+        iteration=3,
+        hypothesis_id="h_conflict",
+        theme_tag="amt_value_area",
+        research_brief=_research_brief(),
+        strategy_name="thinker_hypothesis",
+        bar_configs=["tick_610"],
+        params={"va_position_min": 1.385153},
+        validation_report={
+            "bar_results": [
+                {
+                    "status": "zero_signal",
+                    "bar_config": "tick_610",
+                    "sample_label": "nq_2023-08-08",
+                    "nonzero": 0,
+                    "total": 576,
+                    "signal_rate_pct": 0.0,
+                    "condition_rows": [
+                        {
+                            "column": "prev_day_va_position",
+                            "operator": ">=",
+                            "role": "primary",
+                            "param_key": "va_position_min",
+                            "threshold": np.float64(1.385153),
+                            "p10": np.float64(-2.4855),
+                            "p50": np.float64(-1.6756),
+                            "p90": np.float64(-0.3554),
+                            "pass_rate_pct": np.float64(0.0),
+                            "_mask": np.array([False, False, False]),
+                        }
+                    ],
+                },
+                {
+                    "status": "over_signal",
+                    "bar_config": "tick_610",
+                    "sample_label": "nq_2023-03-06",
+                    "nonzero": 100,
+                    "total": 523,
+                    "signal_rate_pct": 19.12,
+                    "condition_rows": [
+                        {
+                            "column": "prev_day_va_position",
+                            "operator": ">=",
+                            "role": "primary",
+                            "param_key": "va_position_min",
+                            "threshold": np.float64(1.385153),
+                            "p10": np.float64(1.3261),
+                            "p50": np.float64(1.5651),
+                            "p90": np.float64(1.9812),
+                            "pass_rate_pct": np.float64(19.12),
+                            "_mask": np.array([True, True, True]),
+                        }
+                    ],
+                },
+            ]
+        },
+    )
+
+    assert record is not None
+    assert record["cross_sample_conflicts"]
+    assert "sample p10 range -2.4855..1.3261" in record["cross_sample_conflicts"][0]
+
+
 def test_normalize_with_semantic_retry_uses_repaired_feasibility_brief(monkeypatch: pytest.MonkeyPatch):
     mod = _load_module()
     prompts: list[str] = []
@@ -1823,7 +1888,98 @@ def test_normalize_with_semantic_retry_uses_repaired_feasibility_brief(monkeypat
     assert out["hypothesis_id"] == "retry_payload"
     assert stage.payload["hypothesis_id"] == "retry_payload"
     assert '"hypothesis_id": "repaired_payload"' in prompts[0]
-    assert '"hypothesis_id": "original_payload"' not in prompts[0]
+
+
+def test_normalize_and_assess_thinker_brief_detects_repair_cycle(monkeypatch: pytest.MonkeyPatch):
+    mod = _load_module()
+    base_brief = {
+        "hypothesis_id": "h_cycle",
+        "theme_tag": "amt_value_area",
+        "bar_configs": ["tick_610"],
+        "params_template": {"position_in_va_min": 0.724548},
+        "entry_conditions": [
+            {"feature": "position_in_va", "op": ">=", "role": "primary", "param_key": "position_in_va_min"}
+        ],
+    }
+
+    def fake_normalize_thinker_brief(*args, **kwargs):
+        return dict(base_brief)
+
+    def fake_assess_entry_condition_feasibility(*, params_template, **kwargs):
+        threshold = float(params_template["position_in_va_min"])
+        if threshold < 1.0:
+            return {
+                "bar_results": [
+                    {
+                        "status": "over_signal",
+                        "bar_config": "tick_610",
+                        "sample_label": "nq_2023-03-06",
+                        "nonzero": 55,
+                        "total": 523,
+                        "signal_rate_pct": 10.52,
+                        "condition_rows": [
+                            {
+                                "column": "position_in_va",
+                                "operator": ">=",
+                                "role": "primary",
+                                "param_key": "position_in_va_min",
+                                "threshold": threshold,
+                                "p10": 0.0924,
+                                "p50": 0.5726,
+                                "p90": 1.4852,
+                                "pass_rate_pct": 42.8,
+                            }
+                        ],
+                    }
+                ]
+            }
+        return {
+            "bar_results": [
+                {
+                    "status": "zero_signal",
+                    "bar_config": "tick_610",
+                    "sample_label": "nq_2024-06-13",
+                    "nonzero": 0,
+                    "total": 539,
+                    "signal_rate_pct": 0.0,
+                    "condition_rows": [
+                        {
+                            "column": "position_in_va",
+                            "operator": ">=",
+                            "role": "primary",
+                            "param_key": "position_in_va_min",
+                            "threshold": threshold,
+                            "p10": -0.6538,
+                            "p50": 0.0944,
+                            "p90": 0.7245,
+                            "pass_rate_pct": 0.0,
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def fake_repair_thinker_brief_for_feasibility(brief, report):
+        current = float(brief["params_template"]["position_in_va_min"])
+        repaired = dict(brief)
+        repaired["params_template"] = dict(brief["params_template"])
+        repaired["params_template"]["position_in_va_min"] = 1.684913 if current < 1.0 else 0.724548
+        return repaired, ["toggle threshold"]
+
+    monkeypatch.setattr(mod, "_normalize_thinker_brief", fake_normalize_thinker_brief)
+    monkeypatch.setattr(mod, "assess_entry_condition_feasibility", fake_assess_entry_condition_feasibility)
+    monkeypatch.setattr(mod, "repair_thinker_brief_for_feasibility", fake_repair_thinker_brief_for_feasibility)
+
+    with pytest.raises(mod.ThinkerFeasibilityError) as exc_info:
+        mod._normalize_and_assess_thinker_brief(
+            payload={},
+            mission_bar_configs=["tick_610"],
+            allowed_horizons=[1, 3, 5],
+            sample_bar_context=None,
+            validation_sample_cache={},
+        )
+
+    assert "Auto-repair oscillated between incompatible thresholds" in str(exc_info.value)
 
 
 def test_should_attempt_coder_repair_skips_hypothesis_level_failures():

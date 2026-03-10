@@ -128,6 +128,13 @@ def format_thinker_memory_context(
             blob = ", ".join(f"{key}={value}" for key, value in list(params.items())[:3])
             lines.append(f"  Params: {blob}")
 
+        conflicts = row.get("cross_sample_conflicts")
+        if isinstance(conflicts, list):
+            for conflict in conflicts[:2]:
+                text = str(conflict).strip()
+                if text:
+                    lines.append(f"  Cross-sample: {text}")
+
     return "\n".join(lines)
 
 

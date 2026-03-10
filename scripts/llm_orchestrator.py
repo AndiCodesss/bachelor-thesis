@@ -84,6 +84,7 @@ from research.lib.thinker_feasibility import (
     is_context_dependent_feature,
     normalize_entry_conditions,
     repair_thinker_brief_for_feasibility,
+    summarize_cross_sample_conflicts,
 )
 from research.signals import check_signal_causality, load_signal_module
 from src.framework.api import (
@@ -113,6 +114,15 @@ def _slug(value: str) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _repair_brief_signature(brief: dict[str, Any]) -> str:
+    payload = {
+        "bar_configs": list(brief.get("bar_configs", [])),
+        "entry_conditions": list(brief.get("entry_conditions", [])),
+        "params_template": dict(brief.get("params_template", {})),
+    }
+    return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
 
 
 class StageJSONResult:
@@ -1163,6 +1173,10 @@ def _build_validation_attempt_record(
         params,
         [str(row.get("param_key", "")).strip() for row in highlighted_conditions if str(row.get("param_key", "")).strip()],
     )
+    cross_sample_conflicts = summarize_cross_sample_conflicts(
+        validation_report,
+        focus_rows=highlighted_conditions,
+    )
 
     if failure_type == "context_unavailable":
         summary = str(relevant.get("error", "")).strip()[:180] or f"context unavailable on {bar_config}."
@@ -1175,7 +1189,7 @@ def _build_validation_attempt_record(
         status_label = "REJECTED (zero_signal)"
     elif failure_type == "over_signal":
         summary = (
-            f"{nonzero}/{total} bars on {bar_config} ({signal_rate_pct:.2f}% signal rate; target 0.05–0.3%) "
+            f"{nonzero}/{total} bars on {bar_config} ({signal_rate_pct:.2f}% signal rate; target 0.05–0.3%, hard cap 2.0%) "
             f"({sample_label})."
         )
         status_label = "REJECTED (over_signal)"
@@ -1199,6 +1213,7 @@ def _build_validation_attempt_record(
         "signal_rate_pct": signal_rate_pct,
         "sample_label": sample_label,
         "bar_config": bar_config,
+        "cross_sample_conflicts": cross_sample_conflicts,
         **_attempt_research_fields(research_brief),
     }
 
@@ -1440,6 +1455,7 @@ def _normalize_and_assess_thinker_brief(
         max(2, len(list(current_brief.get("entry_conditions", []))) * 2),
     )
     feasibility_report: dict[str, Any] = {"bar_results": []}
+    seen_repair_states = {_repair_brief_signature(current_brief)}
 
     for repair_attempt in range(max_repairs + 1):
         feasibility_report = assess_entry_condition_feasibility(
@@ -1481,6 +1497,16 @@ def _normalize_and_assess_thinker_brief(
                 f"  thinker feasibility auto-repair {repair_attempt + 1}/{max_repairs}: "
                 f"{'; '.join(repair_actions)}"
             )
+        repaired_signature = _repair_brief_signature(repaired_brief)
+        if repaired_signature in seen_repair_states:
+            conflict_report = dict(feasibility_report)
+            conflict_report["repair_cycle_detected"] = True
+            raise ThinkerFeasibilityError(
+                format_feasibility_error(conflict_report),
+                report=conflict_report,
+                brief=current_brief,
+            )
+        seen_repair_states.add(repaired_signature)
         current_brief = repaired_brief
 
     raise ThinkerFeasibilityError(
@@ -2635,7 +2661,8 @@ def _build_thinker_user_prompt(
         "At least one primary condition should anchor the structural location. The confirmation condition should usually be the micro trigger.\n"
         "Primary conditions must be independently plausible on the provided sample stats. Do not set thresholds far outside observed feature bands.\n"
         "Avoid dead features, avoid impossible cutoffs, and avoid broad cost-destruction patterns that would fire on nearly every bar.\n"
-        "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n\n",
+        "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n"
+        "Hard feasibility cap: sampled signal rate must stay at or below 2.0% of bars. The ideal pocket is still roughly 0.05-0.3%.\n\n",
     )
     if three_layer_context.strip():
         prompt_parts.append(f"{three_layer_context}\n\n")
@@ -3377,6 +3404,10 @@ def main() -> int:
     param_feasibility_context = format_param_feasibility_context(
         feature_surface,
         selected_bar_configs=mission_bar_configs,
+        priority_features=_prioritized_common_columns_sample(
+            list(feature_knowledge.get("common_columns", [])),
+        ),
+        max_features_per_bar=10,
     )
     runtime_context = _build_runtime_context(
         mission=active_mission,

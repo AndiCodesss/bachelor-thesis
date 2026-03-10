@@ -156,6 +156,52 @@ def test_format_param_feasibility_context_prioritizes_live_threshold_features():
     assert "dead_feature" not in context
 
 
+def test_format_param_feasibility_context_can_prioritize_key_features_and_show_sample_ranges():
+    surface = {
+        "by_bar_config": {
+            "tick_610": {
+                "feature_stats": {
+                    "bar_duration_ns": {
+                        "kind": "variable",
+                        "null_rate": 0.0,
+                        "p10": 10.0,
+                        "p50": 20.0,
+                        "p90": 30.0,
+                        "sample_profile_count": 2,
+                        "sample_p10_min": 9.0,
+                        "sample_p10_max": 11.0,
+                        "sample_p90_min": 28.0,
+                        "sample_p90_max": 31.0,
+                    },
+                    "prev_day_va_position": {
+                        "kind": "variable",
+                        "null_rate": 0.0,
+                        "p10": -1.7851,
+                        "p50": 1.0192,
+                        "p90": 2.2676,
+                        "sample_profile_count": 10,
+                        "sample_p10_min": -2.4855,
+                        "sample_p10_max": 1.9349,
+                        "sample_p90_min": -0.3554,
+                        "sample_p90_max": 2.4814,
+                    },
+                },
+            },
+        },
+    }
+
+    context = format_param_feasibility_context(
+        surface,
+        selected_bar_configs=["tick_610"],
+        priority_features=["prev_day_va_position"],
+        max_features_per_bar=1,
+    )
+
+    assert "prev_day_va_position: p10=-1.7851 p50=1.0192 p90=2.2676" in context
+    assert "sample p10 range=-2.4855..1.9349 p90 range=-0.3554..2.4814" in context
+    assert "bar_duration_ns" not in context
+
+
 def test_describe_referenced_columns_reports_sparse_boolean_and_percentiles():
     df = pl.DataFrame(
         {

@@ -12,6 +12,7 @@ from research.lib.thinker_feasibility import (
     is_context_dependent_feature,
     normalize_entry_conditions,
     repair_thinker_brief_for_feasibility,
+    summarize_cross_sample_conflicts,
 )
 
 
@@ -275,3 +276,108 @@ def test_thinker_feasibility_error_carries_report_and_brief():
     exc = ThinkerFeasibilityError("bad", report={"bar_results": []}, brief={"hypothesis_id": "h1"})
     assert exc.report == {"bar_results": []}
     assert exc.brief["hypothesis_id"] == "h1"
+
+
+def test_summarize_cross_sample_conflicts_highlights_distribution_drift():
+    report = {
+        "bar_results": [
+            {
+                "status": "over_signal",
+                "sample_label": "nq_2023-03-06",
+                "condition_rows": [
+                    {
+                        "column": "prev_day_va_position",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "va_position_min",
+                        "threshold": 1.385153,
+                        "p10": 1.3261,
+                        "p50": 1.5651,
+                        "p90": 1.9812,
+                        "pass_rate_pct": 19.12,
+                    }
+                ],
+            },
+            {
+                "status": "zero_signal",
+                "sample_label": "nq_2023-08-08",
+                "condition_rows": [
+                    {
+                        "column": "prev_day_va_position",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "va_position_min",
+                        "threshold": 1.385153,
+                        "p10": -2.4855,
+                        "p50": -1.6756,
+                        "p90": -0.3554,
+                        "pass_rate_pct": 0.0,
+                    }
+                ],
+            },
+        ]
+    }
+
+    notes = summarize_cross_sample_conflicts(report)
+
+    assert len(notes) == 1
+    assert "sample p10 range -2.4855..1.3261" in notes[0]
+    assert "p90 range -0.3554..1.9812" in notes[0]
+    assert "likely blocks on nq_2023-08-08" in notes[0]
+    assert "still dense on nq_2023-03-06" in notes[0]
+
+
+def test_format_feasibility_error_includes_cross_sample_conflicts_and_cycle_note():
+    report = {
+        "repair_cycle_detected": True,
+        "bar_results": [
+            {
+                "status": "over_signal",
+                "bar_config": "tick_610",
+                "sample_label": "nq_2023-03-06",
+                "nonzero": 55,
+                "total": 523,
+                "signal_rate_pct": 10.52,
+                "condition_rows": [
+                    {
+                        "column": "position_in_va",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "position_in_va_min",
+                        "threshold": 0.724548,
+                        "p10": 0.0924,
+                        "p50": 0.5726,
+                        "p90": 1.4852,
+                        "pass_rate_pct": 42.8,
+                    }
+                ],
+            },
+            {
+                "status": "zero_signal",
+                "bar_config": "tick_610",
+                "sample_label": "nq_2024-06-13",
+                "nonzero": 0,
+                "total": 539,
+                "signal_rate_pct": 0.0,
+                "condition_rows": [
+                    {
+                        "column": "position_in_va",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "position_in_va_min",
+                        "threshold": 0.724548,
+                        "p10": -0.6538,
+                        "p50": 0.0944,
+                        "p90": 0.7245,
+                        "pass_rate_pct": 0.0,
+                    }
+                ],
+            },
+        ],
+    }
+
+    message = format_feasibility_error(report)
+
+    assert "Cross-sample distribution drift:" in message
+    assert "position_in_va >= 0.724548" in message
+    assert "Auto-repair oscillated between incompatible thresholds" in message

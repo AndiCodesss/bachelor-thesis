@@ -149,6 +149,25 @@ def build_feature_surface(
             }
             continue
 
+        sample_profiles_by_column: dict[str, list[dict[str, Any]]] = {}
+        for label, frame in samples:
+            if len(frame) == 0:
+                continue
+            for column in frame.columns:
+                if column == "ts_event":
+                    continue
+                profile = _compute_column_profile(frame[column])
+                if profile is None:
+                    continue
+                sample_profiles_by_column.setdefault(str(column), []).append(
+                    {
+                        "sample_label": str(label),
+                        "p10": profile.get("p10"),
+                        "p50": profile.get("p50"),
+                        "p90": profile.get("p90"),
+                    }
+                )
+
         combined = pl.concat(frames, how="vertical_relaxed")
         feature_stats: dict[str, dict[str, Any]] = {}
         for column in combined.columns:
@@ -156,6 +175,32 @@ def build_feature_surface(
                 continue
             profile = _compute_column_profile(combined[column])
             if profile is not None:
+                sample_profiles = sample_profiles_by_column.get(str(column), [])
+                p10_values = [
+                    float(row["p10"])
+                    for row in sample_profiles
+                    if isinstance(row.get("p10"), (int, float))
+                ]
+                p50_values = [
+                    float(row["p50"])
+                    for row in sample_profiles
+                    if isinstance(row.get("p50"), (int, float))
+                ]
+                p90_values = [
+                    float(row["p90"])
+                    for row in sample_profiles
+                    if isinstance(row.get("p90"), (int, float))
+                ]
+                if p10_values:
+                    profile["sample_p10_min"] = min(p10_values)
+                    profile["sample_p10_max"] = max(p10_values)
+                if p50_values:
+                    profile["sample_p50_min"] = min(p50_values)
+                    profile["sample_p50_max"] = max(p50_values)
+                if p90_values:
+                    profile["sample_p90_min"] = min(p90_values)
+                    profile["sample_p90_max"] = max(p90_values)
+                profile["sample_profile_count"] = len(sample_profiles)
                 feature_stats[column] = profile
 
         dead_features = sorted(
@@ -277,6 +322,7 @@ def format_param_feasibility_context(
     surface: dict[str, Any],
     *,
     selected_bar_configs: list[str] | None = None,
+    priority_features: list[str] | None = None,
     max_features_per_bar: int = 6,
 ) -> str:
     by_bar_config = surface.get("by_bar_config")
@@ -316,16 +362,59 @@ def format_param_feasibility_context(
         if not candidates:
             continue
 
+        candidate_map = {name: feature_stats for name, feature_stats in candidates}
+        priority_names = [
+            str(name)
+            for name in (priority_features or [])
+            if str(name) in candidate_map
+        ]
         candidates.sort(key=lambda item: _param_hint_priority(item[0], item[1]))
         lines.append(f"- {bar_config}:")
         wrote_bar = True
-        for name, feature_stats in candidates[:max_features_per_bar]:
-            lines.append(
+        chosen_names: list[str] = []
+        seen_names: set[str] = set()
+        for name in priority_names:
+            if name in seen_names:
+                continue
+            chosen_names.append(name)
+            seen_names.add(name)
+            if len(chosen_names) >= max_features_per_bar:
+                break
+        if len(chosen_names) < max_features_per_bar:
+            for name, _ in candidates:
+                if name in seen_names:
+                    continue
+                chosen_names.append(name)
+                seen_names.add(name)
+                if len(chosen_names) >= max_features_per_bar:
+                    break
+
+        for name in chosen_names:
+            feature_stats = candidate_map[name]
+            line = (
                 "  "
                 + f"{name}: p10={float(feature_stats['p10']):.4f} "
                 + f"p50={float(feature_stats['p50']):.4f} "
                 + f"p90={float(feature_stats['p90']):.4f}"
             )
+            sample_profile_count = int(feature_stats.get("sample_profile_count", 0) or 0)
+            sample_p10_min = feature_stats.get("sample_p10_min")
+            sample_p10_max = feature_stats.get("sample_p10_max")
+            sample_p90_min = feature_stats.get("sample_p90_min")
+            sample_p90_max = feature_stats.get("sample_p90_max")
+            if (
+                sample_profile_count > 1
+                and all(
+                    isinstance(value, (int, float))
+                    for value in (sample_p10_min, sample_p10_max, sample_p90_min, sample_p90_max)
+                )
+            ):
+                line += (
+                    " | "
+                    + f"sample p10 range={float(sample_p10_min):.4f}..{float(sample_p10_max):.4f} "
+                    + f"p90 range={float(sample_p90_min):.4f}..{float(sample_p90_max):.4f}"
+                )
+            lines.append(line)
 
     return "\n".join(lines) if wrote_bar else ""
 

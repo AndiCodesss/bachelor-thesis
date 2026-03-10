@@ -262,6 +262,168 @@ def _public_condition_row(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _condition_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(row.get("column", "")).strip(),
+        str(row.get("operator", "")).strip(),
+        str(row.get("role", "primary")).strip() or "primary",
+        str(row.get("param_key", "")).strip(),
+        str(row.get("param_key_low", "")).strip(),
+        str(row.get("param_key_high", "")).strip(),
+    )
+
+
+def _matching_condition_rows(
+    report: dict[str, Any],
+    *,
+    target_row: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(report, dict):
+        return []
+    bar_results = report.get("bar_results")
+    if not isinstance(bar_results, list):
+        return []
+
+    target_identity = _condition_identity(target_row)
+    matches: list[dict[str, Any]] = []
+    for bar_result in bar_results:
+        if not isinstance(bar_result, dict):
+            continue
+        status = str(bar_result.get("status", "")).strip()
+        if status in {"empty_sample", "context_unavailable"}:
+            continue
+        sample_label = str(bar_result.get("sample_label", "")).strip()
+        condition_rows = bar_result.get("condition_rows")
+        if not isinstance(condition_rows, list):
+            continue
+        for row in condition_rows:
+            if not isinstance(row, dict):
+                continue
+            if _condition_identity(row) != target_identity:
+                continue
+            enriched = dict(row)
+            enriched["sample_label"] = sample_label
+            enriched["sample_status"] = status
+            matches.append(enriched)
+    return matches
+
+
+def _format_sample_labels(labels: list[str], *, max_samples: int = 2) -> str:
+    shown = [label for label in labels if label][:max_samples]
+    if not shown:
+        return ""
+    blob = ", ".join(shown)
+    if len(labels) > max_samples:
+        blob += ", ..."
+    return blob
+
+
+def summarize_cross_sample_conflicts(
+    report: dict[str, Any],
+    *,
+    focus_rows: list[dict[str, Any]] | None = None,
+    max_conditions: int = 2,
+    max_samples: int = 2,
+) -> list[str]:
+    if not isinstance(report, dict):
+        return []
+
+    rows = [row for row in (focus_rows or []) if isinstance(row, dict)]
+    if not rows:
+        relevant = _select_relevant_bar_result(
+            [
+                row
+                for row in (report.get("bar_results") or [])
+                if isinstance(row, dict)
+            ],
+        )
+        if not isinstance(relevant, dict):
+            return []
+        rows = [
+            row
+            for row in (relevant.get("condition_rows") or [])
+            if isinstance(row, dict)
+        ]
+
+    notes: list[str] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for row in rows:
+        identity = _condition_identity(row)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        matches = _matching_condition_rows(report, target_row=row)
+        if len(matches) < 2:
+            continue
+
+        p10_values = [
+            float(match["p10"])
+            for match in matches
+            if isinstance(match.get("p10"), (int, float))
+        ]
+        p90_values = [
+            float(match["p90"])
+            for match in matches
+            if isinstance(match.get("p90"), (int, float))
+        ]
+        if not p10_values or not p90_values:
+            continue
+
+        column = str(row.get("column", "?"))
+        operator = str(row.get("operator", "?"))
+        threshold = row.get("threshold", "?")
+        line = (
+            f"{column} {operator} {threshold}: "
+            f"sample p10 range {min(p10_values):.4f}..{max(p10_values):.4f}, "
+            f"p90 range {min(p90_values):.4f}..{max(p90_values):.4f} "
+            f"across {len(matches)} samples"
+        )
+
+        threshold_value: float | None = None
+        if isinstance(threshold, (int, float)):
+            threshold_value = float(threshold)
+        else:
+            try:
+                threshold_value = float(str(threshold))
+            except Exception:
+                threshold_value = None
+
+        dense_labels = [
+            str(match.get("sample_label", ""))
+            for match in matches
+            if float(match.get("pass_rate_pct", 0.0) or 0.0) > 2.0
+        ]
+        blocked_labels: list[str] = []
+        if threshold_value is not None:
+            if operator in {">", ">="}:
+                blocked_labels = [
+                    str(match.get("sample_label", ""))
+                    for match in matches
+                    if isinstance(match.get("p90"), (int, float))
+                    and float(match["p90"]) < threshold_value - _EPSILON
+                ]
+            elif operator in {"<", "<="}:
+                blocked_labels = [
+                    str(match.get("sample_label", ""))
+                    for match in matches
+                    if isinstance(match.get("p10"), (int, float))
+                    and float(match["p10"]) > threshold_value + _EPSILON
+                ]
+
+        blocked_blob = _format_sample_labels(blocked_labels, max_samples=max_samples)
+        dense_blob = _format_sample_labels(dense_labels, max_samples=max_samples)
+        if blocked_blob:
+            line += f"; likely blocks on {blocked_blob}"
+        if dense_blob:
+            line += f"; still dense on {dense_blob}"
+
+        notes.append(line)
+        if len(notes) >= max_conditions:
+            break
+
+    return notes
+
+
 def _format_condition_line(row: dict[str, Any]) -> str:
     column = str(row.get("column", "?"))
     operator = str(row.get("operator", "?"))
@@ -842,6 +1004,21 @@ def format_feasibility_error(report: dict[str, Any]) -> str:
             if isinstance(row, dict):
                 lines.append(f"- {_format_condition_line(row)}")
 
+    conflict_notes = summarize_cross_sample_conflicts(
+        report,
+        focus_rows=[row for row in condition_rows if isinstance(row, dict)],
+    )
+    if conflict_notes:
+        lines.append("Cross-sample distribution drift:")
+        for note in conflict_notes:
+            lines.append(f"- {note}")
+
+    if bool(report.get("repair_cycle_detected", False)):
+        lines.append(
+            "Auto-repair oscillated between incompatible thresholds across sampled days. "
+            "Redesign the setup instead of nudging the same threshold.",
+        )
+
     lines.append("Return corrected JSON only.")
     return "\n".join(lines)
 
@@ -853,4 +1030,5 @@ __all__ = [
     "is_context_dependent_feature",
     "normalize_entry_conditions",
     "repair_thinker_brief_for_feasibility",
+    "summarize_cross_sample_conflicts",
 ]
