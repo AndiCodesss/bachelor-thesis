@@ -9,6 +9,7 @@ from research.lib.thinker_feasibility import (
     ThinkerFeasibilityError,
     assess_entry_condition_feasibility,
     format_feasibility_error,
+    is_context_dependent_feature,
     normalize_entry_conditions,
     repair_thinker_brief_for_feasibility,
 )
@@ -44,7 +45,13 @@ def test_normalize_entry_conditions_limits_primary_and_confirmation_counts():
         )
 
 
-def test_assess_entry_condition_feasibility_detects_dead_primary_feature():
+def test_is_context_dependent_feature_matches_prev_session_columns():
+    assert is_context_dependent_feature("prev_day_va_position") is True
+    assert is_context_dependent_feature("dist_prev_vah") is True
+    assert is_context_dependent_feature("volume_ratio") is False
+
+
+def test_assess_entry_condition_feasibility_marks_context_unavailable_for_prev_session_feature():
     report = assess_entry_condition_feasibility(
         entry_conditions=[
             {"feature": "prev_day_va_position", "op": ">", "param_key": "va_pos_min", "role": "primary"}
@@ -56,6 +63,26 @@ def test_assess_entry_condition_feasibility_detects_dead_primary_feature():
                 (
                     "sample_day",
                     pl.DataFrame({"prev_day_va_position": [None, None, None]}),
+                )
+            ]
+        },
+    )
+    assert report["bar_results"][0]["status"] == "context_unavailable"
+    assert "context-dependent feature(s) unavailable" in report["bar_results"][0]["error"]
+
+
+def test_assess_entry_condition_feasibility_detects_dead_primary_feature():
+    report = assess_entry_condition_feasibility(
+        entry_conditions=[
+            {"feature": "stale_anchor", "op": ">", "param_key": "anchor_min", "role": "primary"}
+        ],
+        params_template={"anchor_min": 1.0},
+        selected_bar_configs=["tick_610"],
+        validation_sample_cache={
+            "tick_610": [
+                (
+                    "sample_day",
+                    pl.DataFrame({"stale_anchor": [None, None, None]}),
                 )
             ]
         },
@@ -208,6 +235,40 @@ def test_repair_thinker_brief_for_feasibility_tightens_over_signal_threshold():
         validation_sample_cache=sample_cache,
     )
     assert repaired_report["bar_results"][0]["status"] == "ok"
+
+
+def test_repair_thinker_brief_for_feasibility_never_drops_primary_conditions():
+    brief = {
+        "params_template": {"anchor_min": 1.0, "confirm_min": 0.5, "pt_ticks": 40, "sl_ticks": 20},
+        "entry_conditions": [
+            {"feature": "stale_anchor", "op": ">", "param_key": "anchor_min", "role": "primary"},
+            {"feature": "volume_ratio", "op": ">", "param_key": "confirm_min", "role": "confirmation"},
+        ],
+    }
+    report = assess_entry_condition_feasibility(
+        entry_conditions=brief["entry_conditions"],
+        params_template=brief["params_template"],
+        selected_bar_configs=["tick_610"],
+        validation_sample_cache={
+            "tick_610": [
+                (
+                    "sample_day",
+                    pl.DataFrame(
+                        {
+                            "stale_anchor": [None, None, None],
+                            "volume_ratio": [0.6, 0.7, 0.8],
+                        }
+                    ),
+                )
+            ]
+        },
+    )
+
+    repaired, actions = repair_thinker_brief_for_feasibility(brief, report)
+
+    assert report["bar_results"][0]["status"] == "dead_feature_primary"
+    assert repaired is None
+    assert actions == []
 
 
 def test_thinker_feasibility_error_carries_report_and_brief():

@@ -571,6 +571,7 @@ def collect_condition_passthrough(
             continue
 
         valid = ~np.isnan(values) if np.issubdtype(values.dtype, np.floating) else np.ones(n, dtype=bool)
+        finite_count = int(np.sum(valid))
         op_fn = _NP_OPS.get(op)
         if op_fn is None:
             continue
@@ -592,6 +593,7 @@ def collect_condition_passthrough(
             "threshold": float(threshold),
             "pass_count": pass_count,
             "total_count": int(n),
+            "finite_count": finite_count,
             "pass_rate_pct": float(pass_pct),
             "severity": severity,
         }

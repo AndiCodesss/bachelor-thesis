@@ -1211,6 +1211,47 @@ def test_validate_generated_strategy_errors_on_zero_signal_rate(tmp_path):
     assert report["bar_results"][0]["status"] == "zero_signal"
 
 
+def test_validate_generated_strategy_skips_context_unavailable_sample(tmp_path):
+    mod = _load_module()
+
+    code = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "from research.signals import safe_f64_col\n"
+        'DEFAULT_PARAMS: dict = {"va_pos_min": 1.0}\n'
+        "def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray:\n"
+        '    cfg = dict(DEFAULT_PARAMS); cfg.update(params or {})\n'
+        '    va_pos = safe_f64_col(df, "prev_day_va_position", fill=np.nan)\n'
+        '    return np.where(va_pos > cfg["va_pos_min"], 1, 0).astype(np.int8)\n'
+        'STRATEGY_METADATA = {"name": "context_sensitive", "version": "1.0",'
+        ' "features_required": ["prev_day_va_position"], "description": "test"}\n'
+    )
+    (tmp_path / "context_sensitive.py").write_text(code, encoding="utf-8")
+
+    errors, report = mod._validate_generated_strategy(
+        strategy_name="context_sensitive",
+        signals_dir=tmp_path,
+        params={},
+        bar_configs=["tick_610"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        validation_sample_cache={
+            "tick_610": [
+                ("nq_2022-10-03", pl.DataFrame({"prev_day_va_position": [None, None, None]})),
+                ("nq_2022-10-04", pl.DataFrame({"prev_day_va_position": [0.8] * 98 + [1.2, 1.3]})),
+            ]
+        },
+        code=code,
+    )
+
+    assert errors == []
+    assert [row["status"] for row in report["bar_results"]] == ["context_unavailable", "ok"]
+    assert report["bar_results"][0]["context_columns"] == ["prev_day_va_position"]
+
+
 def test_normalize_and_assess_thinker_brief_rejects_dead_primary_feature():
     mod = _load_module()
     with pytest.raises(mod.ThinkerFeasibilityError, match="DEAD"):
@@ -1221,17 +1262,17 @@ def test_normalize_and_assess_thinker_brief_rejects_dead_primary_feature():
                 "strategy_name_hint": "dead_feature_case",
                 "research_brief": _research_brief(
                     falsification=(
-                        "If prev_day_va_position is not consistently elevated on entry bars, the value-area location "
+                        "If stale_anchor is not consistently elevated on entry bars, the structural anchor "
                         "premise is wrong and the setup should not fire."
                     ),
                 ),
                 "bar_configs": ["tick_610"],
-                "params_template": {"vol_ratio_min": 1.05, "pt_ticks": 40, "sl_ticks": 20},
+                "params_template": {"anchor_min": 1.05, "pt_ticks": 40, "sl_ticks": 20},
                 "entry_conditions": [
                     {
-                        "feature": "prev_day_va_position",
+                        "feature": "stale_anchor",
                         "op": ">",
-                        "param_key": "vol_ratio_min",
+                        "param_key": "anchor_min",
                         "role": "primary",
                     }
                 ],
@@ -1244,18 +1285,59 @@ def test_normalize_and_assess_thinker_brief_rejects_dead_primary_feature():
             sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
             validation_sample_cache={
                 "tick_610": [
-                    (
-                        "sample_day",
-                        pl.DataFrame(
-                            {
-                                "prev_day_va_position": [None, None, None],
-                                "volume_ratio": [1.0, 1.1, 1.2],
-                            }
-                        ),
+                (
+                    "sample_day",
+                    pl.DataFrame(
+                        {
+                            "stale_anchor": [None, None, None],
+                            "volume_ratio": [1.0, 1.1, 1.2],
+                        }
+                    ),
                     )
                 ]
             },
         )
+
+
+def test_normalize_and_assess_thinker_brief_accepts_context_unavailable_edge_day_when_other_sample_is_usable():
+    mod = _load_module()
+    out = mod._normalize_and_assess_thinker_brief(
+        {
+            "hypothesis_id": "context_edge_case",
+            "theme_tag": "amt_value_area",
+            "strategy_name_hint": "context_edge_case",
+            "research_brief": _research_brief(
+                structural_location="re-enter prior value from below",
+                falsification=(
+                    "If prev_day_va_position is unavailable or fails to recover above the prior-value threshold "
+                    "on usable entry bars, the structural re-entry premise is wrong."
+                ),
+            ),
+            "bar_configs": ["tick_610"],
+            "params_template": {"va_pos_min": 1.0, "pt_ticks": 40, "sl_ticks": 20},
+            "entry_conditions": [
+                {
+                    "feature": "prev_day_va_position",
+                    "op": ">",
+                    "param_key": "va_pos_min",
+                    "role": "primary",
+                }
+            ],
+            "thesis": "x",
+            "entry_logic": "y",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610"],
+        allowed_horizons=[1, 3, 5, 10],
+        sample_bar_context={"tick_610": {"range_ticks": {"median": 12.0}}},
+        validation_sample_cache={
+            "tick_610": [
+                ("nq_2022-10-03", pl.DataFrame({"prev_day_va_position": [None, None, None]})),
+                ("nq_2022-10-04", pl.DataFrame({"prev_day_va_position": [0.8] * 98 + [1.2, 1.3]})),
+            ]
+        },
+    )
+    assert out["entry_conditions"][0]["feature"] == "prev_day_va_position"
 
 
 def test_normalize_and_assess_thinker_brief_accepts_feasible_conditions():
@@ -1638,19 +1720,19 @@ def test_build_exception_attempt_record_captures_invalid_risk_floor_params():
 def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
     mod = _load_module()
     exc = mod.ThinkerFeasibilityError(
-        "THINKER_FEASIBILITY on tick_610 (sample_day): primary feature prev_day_va_position has no finite values",
+        "THINKER_FEASIBILITY on tick_610 (sample_day): primary feature stale_anchor has no finite values",
         report={
             "bar_results": [
                 {
                     "status": "dead_feature_primary",
                     "bar_config": "tick_610",
                     "sample_label": "sample_day",
-                    "error": "primary feature prev_day_va_position has no finite values",
+                    "error": "primary feature stale_anchor has no finite values",
                     "condition_rows": [
                         {
-                            "column": "prev_day_va_position",
+                            "column": "stale_anchor",
                             "operator": ">",
-                            "param_key": "va_pos_min",
+                            "param_key": "anchor_min",
                             "threshold": np.float64(1.2),
                             "severity": "dead_feature",
                             "pass_rate_pct": np.float64(0.0),
@@ -1664,7 +1746,7 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
             "hypothesis_id": "h_dead",
             "theme_tag": "amt_value_area",
             "bar_configs": ["tick_610"],
-            "params_template": {"va_pos_min": 1.2},
+            "params_template": {"anchor_min": 1.2},
         },
     )
     record = mod._build_exception_attempt_record(
@@ -1678,7 +1760,7 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
     )
     assert record["failure_type"] == "dead_feature_primary"
     assert record["bar_config"] == "tick_610"
-    assert record["offending_params"] == {"va_pos_min": 1.2}
+    assert record["offending_params"] == {"anchor_min": 1.2}
     assert "_mask" not in record["highlighted_conditions"][0]
 
 
@@ -1762,6 +1844,7 @@ def test_should_attempt_coder_repair_skips_hypothesis_level_failures():
             validation_report={
                 "bar_results": [
                     {"status": "dead_feature_primary"},
+                    {"status": "context_unavailable"},
                     {"status": "ok"},
                 ]
             }

@@ -33,6 +33,7 @@ from research.lib.feature_surface import (
     collect_condition_passthrough,
     describe_referenced_columns,
     diagnose_condition_passthrough,
+    extract_referenced_columns,
     format_feature_surface_context,
     format_param_feasibility_context,
     format_referenced_surface_warnings,
@@ -80,6 +81,7 @@ from research.lib.thinker_feasibility import (
     ThinkerFeasibilityError,
     assess_entry_condition_feasibility,
     format_feasibility_error,
+    is_context_dependent_feature,
     normalize_entry_conditions,
     repair_thinker_brief_for_feasibility,
 )
@@ -392,6 +394,37 @@ def _validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
 def _diagnose_zero_signal(df: pl.DataFrame, code: str) -> str:
     """Compute empirical firing rates for columns referenced in strategy code."""
     return describe_referenced_columns(df=df, code=code, max_columns=15)
+
+
+def _context_unavailable_columns(
+    *,
+    df: pl.DataFrame,
+    code: str,
+    condition_rows: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    columns: set[str] = set()
+    for row in condition_rows or []:
+        if not isinstance(row, dict):
+            continue
+        column = str(row.get("column", "")).strip()
+        if not column or not is_context_dependent_feature(column):
+            continue
+        finite_count = row.get("finite_count")
+        if isinstance(finite_count, (int, float)) and int(finite_count) == 0:
+            columns.add(column)
+    if columns:
+        return sorted(columns)
+
+    for column in extract_referenced_columns(code, df.columns):
+        if not is_context_dependent_feature(column):
+            continue
+        try:
+            values = np.asarray(df[column].cast(pl.Float64, strict=False).to_numpy(), dtype=np.float64)
+        except Exception:
+            continue
+        if values.size > 0 and not np.isfinite(values).any():
+            columns.add(column)
+    return sorted(columns)
 
 
 def _state_mode(*, fresh_state: bool) -> str:
@@ -830,7 +863,7 @@ def _bar_config_selection_key(
     non_empty_rows = [
         row
         for row in rows
-        if isinstance(row, dict) and str(row.get("status", "")) != "empty_sample"
+        if isinstance(row, dict) and str(row.get("status", "")) not in {"empty_sample", "context_unavailable"}
     ]
     if not non_empty_rows:
         return (1, 0, 0, 0, 0, float("inf"), float("inf"), requested_index)
@@ -1104,6 +1137,7 @@ def _build_validation_attempt_record(
         "contract_failed",
         "causality_failed",
         "runtime_error",
+        "context_unavailable",
     ):
         relevant = next(
             (row for row in bar_results if isinstance(row, dict) and str(row.get("status", "")) == status),
@@ -1130,7 +1164,10 @@ def _build_validation_attempt_record(
         [str(row.get("param_key", "")).strip() for row in highlighted_conditions if str(row.get("param_key", "")).strip()],
     )
 
-    if failure_type == "dead_feature_primary":
+    if failure_type == "context_unavailable":
+        summary = str(relevant.get("error", "")).strip()[:180] or f"context unavailable on {bar_config}."
+        status_label = "REJECTED (context_unavailable)"
+    elif failure_type == "dead_feature_primary":
         summary = str(relevant.get("error", "")).strip()[:180] or f"dead primary feature on {bar_config}."
         status_label = "REJECTED (dead_feature_primary)"
     elif failure_type == "zero_signal":
@@ -1348,7 +1385,7 @@ def _should_attempt_coder_repair(
     if not isinstance(bar_results, list) or not bar_results:
         return True
 
-    neutral_statuses = {"ok", "empty_sample"}
+    neutral_statuses = {"ok", "empty_sample", "context_unavailable"}
     hypothesis_level_statuses = {"dead_feature_primary", "zero_signal", "over_signal"}
     actionable_coder_statuses = {
         "module_validation_failed",
@@ -1411,10 +1448,22 @@ def _normalize_and_assess_thinker_brief(
             selected_bar_configs=list(current_brief.get("bar_configs", [])),
             validation_sample_cache=validation_sample_cache,
         )
+        usable_rows = [
+            row
+            for row in feasibility_report.get("bar_results", [])
+            if isinstance(row, dict) and str(row.get("status", "")) not in {"empty_sample", "context_unavailable"}
+        ]
+        if not usable_rows:
+            raise ThinkerFeasibilityError(
+                "THINKER_FEASIBILITY: all sampled bars lacked usable context for this hypothesis. "
+                "Keep the structural idea, but validate it on samples with available prior-session context.",
+                report=feasibility_report,
+                brief=current_brief,
+            )
         failing = [
             row
             for row in feasibility_report.get("bar_results", [])
-            if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
+            if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample", "context_unavailable"}
         ]
         if not failing:
             return current_brief
@@ -2388,6 +2437,29 @@ def _validate_generated_strategy(
                 df=strategy_df, code=code, params=params,
             )
             if nonzero == 0:
+                context_columns = _context_unavailable_columns(
+                    df=strategy_df,
+                    code=code,
+                    condition_rows=condition_rows,
+                )
+                if context_columns:
+                    report["bar_results"].append(
+                        {
+                            "bar_config": bar_config,
+                            "sample_label": sample_label,
+                            "status": "context_unavailable",
+                            "nonzero": nonzero,
+                            "total": total,
+                            "signal_rate_pct": rate_pct,
+                            "condition_rows": condition_rows,
+                            "context_columns": context_columns,
+                            "error": (
+                                "context-dependent feature(s) unavailable on this sample: "
+                                + ", ".join(context_columns)
+                            ),
+                        }
+                    )
+                    continue
                 diag = _diagnose_zero_signal(strategy_df, code)
                 errors.append(
                     f"{strategy_name}: signal_rate=0.0% for {bar_config} ({sample_label}) "
@@ -2437,6 +2509,17 @@ def _validate_generated_strategy(
                         "signal_rate_pct": rate_pct,
                     }
                 )
+
+    statuses = {
+        str(row.get("status", "")).strip()
+        for row in report.get("bar_results", [])
+        if isinstance(row, dict)
+    }
+    if not errors and statuses and statuses <= {"context_unavailable"}:
+        errors.append(
+            f"{strategy_name}: all validation samples lacked required context-dependent inputs; "
+            "no usable local validation sample was available."
+        )
 
     return errors, report
 

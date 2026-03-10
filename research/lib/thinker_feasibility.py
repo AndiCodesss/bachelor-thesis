@@ -13,6 +13,7 @@ _MAX_CONDITIONS = 3
 _MAX_PRIMARY_CONDITIONS = 2
 _MAX_CONFIRMATION_CONDITIONS = 1
 _PROTECTED_PARAM_PREFIXES = ("sl_ticks", "pt_ticks")
+_CONTEXT_DEPENDENT_PREFIXES = ("prev_day_", "dist_prev_")
 
 
 class ThinkerFeasibilityError(ValueError):
@@ -20,6 +21,11 @@ class ThinkerFeasibilityError(ValueError):
         super().__init__(message)
         self.report = report
         self.brief = dict(brief or {})
+
+
+def is_context_dependent_feature(feature: str) -> bool:
+    feature_name = str(feature).strip().lower()
+    return any(feature_name.startswith(prefix) for prefix in _CONTEXT_DEPENDENT_PREFIXES)
 
 
 def normalize_entry_conditions(
@@ -172,6 +178,7 @@ def _evaluate_condition(
     finite_count = int(finite_values.size)
 
     if finite_count == 0:
+        severity = "context_unavailable" if is_context_dependent_feature(feature) else "dead_feature"
         return {
             "column": feature,
             "operator": op,
@@ -181,7 +188,7 @@ def _evaluate_condition(
             "total_count": total,
             "finite_count": 0,
             "pass_rate_pct": 0.0,
-            "severity": "dead_feature",
+            "severity": severity,
             "threshold": _condition_threshold_blob(condition, params_template),
             "_mask": mask,
         }
@@ -266,6 +273,8 @@ def _format_condition_line(row: dict[str, Any]) -> str:
     tag = ""
     if severity == "dead_feature":
         tag = "  <-- DEAD"
+    elif severity == "context_unavailable":
+        tag = "  <-- CONTEXT UNAVAILABLE"
     elif severity == "blocks_all":
         tag = "  <-- BLOCKS ALL"
     elif severity == "restrictive":
@@ -298,6 +307,7 @@ def _failing_bar_result_priority(row: dict[str, Any]) -> tuple[Any, ...]:
         "dead_feature_primary": 0,
         "zero_signal": 1,
         "over_signal": 2,
+        "context_unavailable": 3,
     }.get(status, 3)
     severity_rank = -signal_rate_pct if status == "over_signal" else 0.0
     return (
@@ -312,7 +322,7 @@ def _select_relevant_bar_result(bar_results: list[dict[str, Any]]) -> dict[str, 
     failing_rows = [
         row
         for row in bar_results
-        if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample"}
+        if isinstance(row, dict) and str(row.get("status", "")) not in {"ok", "empty_sample", "context_unavailable"}
     ]
     if not failing_rows:
         return None
@@ -377,6 +387,28 @@ def assess_entry_condition_feasibility(
                 ),
                 None,
             )
+            context_unavailable = [
+                row
+                for row in rows
+                if str(row.get("severity", "")).strip() == "context_unavailable"
+            ]
+            if context_unavailable:
+                columns = ", ".join(str(row.get("column", "?")) for row in context_unavailable[:3])
+                report["bar_results"].append(
+                    {
+                        "bar_config": bar_config,
+                        "sample_label": label,
+                        "status": "context_unavailable",
+                        "error": (
+                            f"context-dependent feature(s) unavailable on {bar_config} ({label}): {columns}"
+                        ),
+                        "nonzero": 0,
+                        "total": total_count,
+                        "signal_rate_pct": 0.0,
+                        "condition_rows": public_rows,
+                    }
+                )
+                continue
             if dead_primary is not None:
                 report["bar_results"].append(
                     {
@@ -479,41 +511,10 @@ def _find_condition_index(
     return None
 
 
-def _count_primary_conditions(entry_conditions: list[dict[str, Any]], *, skip_idx: int | None = None) -> int:
-    count = 0
-    for idx, condition in enumerate(entry_conditions):
-        if idx == skip_idx or not isinstance(condition, dict):
-            continue
-        if str(condition.get("role", "primary")).strip() == "primary":
-            count += 1
-    return count
-
-
-def _candidate_confirmation_to_promote(
-    entry_conditions: list[dict[str, Any]],
-    *,
-    condition_rows: list[dict[str, Any]],
-    skip_idx: int | None = None,
-) -> int | None:
-    for row in condition_rows:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("role", "")).strip() != "confirmation":
-            continue
-        if str(row.get("severity", "")).strip() == "dead_feature":
-            continue
-        idx = _find_condition_index(entry_conditions, row=row)
-        if idx is None or idx == skip_idx:
-            continue
-        return idx
-    return None
-
-
 def _drop_condition(
     brief: dict[str, Any],
     *,
     row: dict[str, Any],
-    condition_rows: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, str | None]:
     entry_conditions = brief.get("entry_conditions")
     if not isinstance(entry_conditions, list):
@@ -524,21 +525,12 @@ def _drop_condition(
         return None, None
 
     role = str(row.get("role", "primary")).strip() or "primary"
+    if role == "primary":
+        return None, None
     repaired = _clone_brief(brief)
     repaired_conditions = list(repaired.get("entry_conditions", []))
     if len(repaired_conditions) <= 1:
         return None, None
-    if role == "primary" and _count_primary_conditions(repaired_conditions, skip_idx=idx) == 0:
-        promote_idx = _candidate_confirmation_to_promote(
-            repaired_conditions,
-            condition_rows=condition_rows,
-            skip_idx=idx,
-        )
-        if promote_idx is None:
-            return None, None
-        promoted = dict(repaired_conditions[promote_idx])
-        promoted["role"] = "primary"
-        repaired_conditions[promote_idx] = promoted
 
     removed = repaired_conditions.pop(idx)
     repaired["entry_conditions"] = repaired_conditions
@@ -729,10 +721,12 @@ def _repair_condition_row(
     severity = str(row.get("severity", "")).strip()
     role = str(row.get("role", "primary")).strip() or "primary"
 
+    if severity == "context_unavailable":
+        return None, None
     if severity == "dead_feature":
         if role == "confirmation":
-            return _drop_condition(brief, row=row, condition_rows=condition_rows)
-        return _drop_condition(brief, row=row, condition_rows=condition_rows)
+            return _drop_condition(brief, row=row)
+        return None, None
 
     if operator == "between":
         repaired, action = _repair_between_param(brief, row=row, failure_type=failure_type)
@@ -744,7 +738,7 @@ def _repair_condition_row(
             return repaired, action
 
     if failure_type == "zero_signal" and role == "confirmation":
-        return _drop_condition(brief, row=row, condition_rows=condition_rows)
+        return _drop_condition(brief, row=row)
     return None, None
 
 
@@ -822,6 +816,9 @@ def format_feasibility_error(report: dict[str, Any]) -> str:
     if status == "dead_feature_primary":
         lines.append(str(relevant.get("error", "a primary feature has no usable data")))
         lines.append("Replace the dead primary feature or demote it to confirmation.")
+    elif status == "context_unavailable":
+        lines.append(str(relevant.get("error", "context-dependent features are unavailable on this sample")))
+        lines.append("Keep the structural hypothesis intact and evaluate it on samples with valid prior-session context.")
     elif status == "zero_signal":
         total = int(relevant.get("total", 0) or 0)
         lines.append(
@@ -853,6 +850,7 @@ __all__ = [
     "ThinkerFeasibilityError",
     "assess_entry_condition_feasibility",
     "format_feasibility_error",
+    "is_context_dependent_feature",
     "normalize_entry_conditions",
     "repair_thinker_brief_for_feasibility",
 ]
