@@ -25,6 +25,7 @@ from src.dashboard.backend.services import (
     get_signal_details as get_signal_details_payload,
     list_signals as list_signal_rows,
 )
+from research.lib.script_support import make_json_safe
 from src.framework.data.bar_configs import BAR_CONFIGS, bar_config_label
 
 project_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -113,6 +114,21 @@ def _terminate_process(proc) -> None:
         except Exception:
             pass
 
+    break_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if break_signal is not None:
+        try:
+            proc.send_signal(break_signal)
+        except Exception:
+            pass
+        else:
+            time.sleep(3)
+            if getattr(proc, "returncode", None) is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            return
+
     try:
         proc.terminate()
     except Exception:
@@ -133,11 +149,41 @@ def _process_alive(pid: int) -> bool:
 
 
 def _terminate_process_group(procs) -> None:
+    active_procs = [
+        proc
+        for proc in procs
+        if getattr(proc, "pid", None) is not None and getattr(proc, "returncode", None) is None
+    ]
+    if not active_procs:
+        return
+
+    if os.name == "nt":
+        break_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
+        for proc in active_procs:
+            if break_signal is not None:
+                try:
+                    proc.send_signal(break_signal)
+                    continue
+                except Exception:
+                    pass
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+        time.sleep(3)
+
+        for proc in active_procs:
+            if getattr(proc, "returncode", None) is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        return
+
     pgids: list[int] = []
-    for proc in procs:
+    for proc in active_procs:
         pid = getattr(proc, "pid", None)
-        if pid is None or getattr(proc, "returncode", None) is not None:
-            continue
         try:
             pgids.append(os.getpgid(pid))
         except OSError:
@@ -222,17 +268,19 @@ def get_cache_config():
 
 @app.get("/api/autonomy/status")
 def get_autonomy_status():
-    return collect_autonomy_status(project_root=project_root)
+    return make_json_safe(collect_autonomy_status(project_root=project_root))
 
 
 @app.get("/api/signals")
 def list_signals():
-    return list_signal_rows(project_root=project_root)
+    return make_json_safe(list_signal_rows(project_root=project_root))
 
 
 @app.get("/api/signals/{strategy_name}")
 def get_signal_details(strategy_name: str):
-    return get_signal_details_payload(project_root=project_root, strategy_name=strategy_name)
+    return make_json_safe(
+        get_signal_details_payload(project_root=project_root, strategy_name=strategy_name),
+    )
 
 
 async def execute_in_background(run_id: str, cmd: list[str]):
@@ -377,7 +425,7 @@ async def start_cleanup_run(req: CleanupRunRequest):
 
 @app.get("/api/runs")
 def list_runs():
-    return [summarize_run(run_id, run) for run_id, run in runs.items()]
+    return make_json_safe([summarize_run(run_id, run) for run_id, run in runs.items()])
 
 
 @app.get("/api/runs/{run_id}")
@@ -385,7 +433,7 @@ def get_run(run_id: str):
     run = runs.get(run_id)
     if run is None:
         return {"error": "Run not found"}
-    return summarize_run(run_id, run)
+    return make_json_safe(summarize_run(run_id, run))
 
 
 @app.post("/api/runs/{run_id}/stop")

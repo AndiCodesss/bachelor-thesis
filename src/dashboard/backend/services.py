@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
 from research.lib.coordination import read_json_file_if_exists
-from research.lib.script_support import load_yaml_dict
+from research.lib.script_support import load_yaml_dict, make_json_safe
 
 from src.dashboard.backend.log_utils import recent_json_events, recent_task_snapshot
 
@@ -103,7 +104,12 @@ def collect_autonomy_status(*, project_root: Path) -> dict[str, Any]:
             if isinstance(metrics_row, dict):
                 net_pnl = metrics_row.get("net_pnl")
                 sharpe_ratio = metrics_row.get("sharpe_ratio")
-                if isinstance(net_pnl, (int, float)) and isinstance(sharpe_ratio, (int, float)):
+                if (
+                    isinstance(net_pnl, (int, float))
+                    and isinstance(sharpe_ratio, (int, float))
+                    and math.isfinite(float(net_pnl))
+                    and math.isfinite(float(sharpe_ratio))
+                ):
                     financial_points.append(
                         {
                             "strategy": str(row.get("strategy_name", "")),
@@ -129,7 +135,7 @@ def collect_autonomy_status(*, project_root: Path) -> dict[str, Any]:
     except Exception:
         pass
 
-    return metrics
+    return make_json_safe(metrics)
 
 
 def list_signals(*, project_root: Path) -> list[dict[str, str]]:
@@ -155,7 +161,7 @@ def list_signals(*, project_root: Path) -> list[dict[str, str]]:
     except Exception:
         pass
 
-    return sorted(signals, key=lambda row: row["timestamp"], reverse=True)
+    return make_json_safe(sorted(signals, key=lambda row: row["timestamp"], reverse=True))
 
 
 def get_signal_details(*, project_root: Path, strategy_name: str) -> dict[str, Any]:
@@ -187,14 +193,14 @@ def get_signal_details(*, project_root: Path, strategy_name: str) -> dict[str, A
             "error": "No matching experiment metrics found in logs.",
         }
 
-    return {
+    return make_json_safe({
         "strategy": strategy_name,
         "code": code,
         "metrics": experiment_data.get("metrics", {}),
         "gauntlet": experiment_data.get("gauntlet", {}),
         "verdict": experiment_data.get("verdict", "UNKNOWN"),
         "timestamp": experiment_data.get("timestamp", ""),
-    }
+    })
 
 
 __all__ = [

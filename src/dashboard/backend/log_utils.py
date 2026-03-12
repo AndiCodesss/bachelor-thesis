@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -47,11 +48,13 @@ def optional_float(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     try:
-        return float(str(value))
+        result = float(str(value))
     except Exception:
         return None
+    return result if math.isfinite(result) else None
 
 
 def recent_task_snapshot(row: dict[str, Any]) -> dict[str, object]:

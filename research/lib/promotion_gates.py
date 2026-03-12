@@ -320,7 +320,7 @@ def evaluate_promotion_gates(
             "min_required": float(min_aggregate_sharpe),
         },
         "min_deflated_sharpe": {
-            "passed": wfa_result.deflated_sharpe > min_deflated_sharpe,
+            "passed": wfa_result.deflated_sharpe >= min_deflated_sharpe,
             "value": float(wfa_result.deflated_sharpe),
             "min_required": float(min_deflated_sharpe),
         },
@@ -406,4 +406,3 @@ __all__ = [
     "WalkForwardValidator",
     "evaluate_promotion_gates",
 ]
-

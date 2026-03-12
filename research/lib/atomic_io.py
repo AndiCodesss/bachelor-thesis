@@ -8,6 +8,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from research.lib.script_support import make_json_safe
+
 
 def atomic_json_write(file_path: Path | str, data: dict[str, Any]) -> None:
     """Atomically write JSON with durability guarantees.
@@ -20,6 +22,7 @@ def atomic_json_write(file_path: Path | str, data: dict[str, Any]) -> None:
     """
     target = Path(file_path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    payload = make_json_safe(data)
 
     fd, temp_path = tempfile.mkstemp(
         dir=target.parent,
@@ -35,7 +38,7 @@ def atomic_json_write(file_path: Path | str, data: dict[str, Any]) -> None:
             raise
 
         with f:
-            json.dump(data, f, indent=2)
+            json.dump(payload, f, indent=2, allow_nan=False)
             f.flush()
             os.fsync(f.fileno())
 

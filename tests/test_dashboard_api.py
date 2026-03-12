@@ -158,6 +158,37 @@ def test_autonomy_status_reads_runtime_state_and_budget(client: TestClient):
     assert data["recent_results"][1]["best_horizon_bars"] == 5
 
 
+def test_dashboard_endpoints_sanitize_nan_metrics(client: TestClient):
+    logs_dir = dashboard_main.project_root / "results" / "logs"
+
+    _write_jsonl(
+        logs_dir / "research_experiments.jsonl",
+        [
+            {
+                "event": "task_result",
+                "timestamp": "2026-03-06T10:15:00+00:00",
+                "strategy_name": "nan_case",
+                "bar_config": "1m",
+                "verdict": "PASS",
+                "metrics": {"net_pnl": 100.0, "sharpe_ratio": float("nan"), "trade_count": 1},
+            },
+        ],
+    )
+
+    status_resp = client.get("/api/autonomy/status")
+    assert status_resp.status_code == 200
+    status_data = status_resp.json()
+    assert status_data["financial"]["tested"] == 0
+    assert status_data["recent_results"][0]["strategy"] == "nan_case"
+    assert status_data["recent_results"][0]["sharpe"] is None
+
+    detail_resp = client.get("/api/signals/nan_case")
+    assert detail_resp.status_code == 200
+    detail_data = detail_resp.json()
+    assert detail_data["metrics"]["sharpe_ratio"] is None
+    assert detail_data["metrics"]["net_pnl"] == 100.0
+
+
 def test_signals_endpoints_return_recent_results_and_source_code(client: TestClient):
     logs_dir = dashboard_main.project_root / "results" / "logs"
     signals_dir = dashboard_main.project_root / "research" / "signals"
@@ -316,3 +347,34 @@ def test_execute_in_background_launches_in_own_process_group(
     kwargs = captured["kwargs"]
     for key, value in dashboard_main._subprocess_exec_kwargs().items():
         assert kwargs[key] == value
+
+
+def test_terminate_process_group_uses_ctrl_break_on_windows(monkeypatch: pytest.MonkeyPatch):
+    class _FakeProc:
+        def __init__(self):
+            self.pid = 1234
+            self.returncode = None
+            self.sent: list[int] = []
+            self.terminated = False
+            self.killed = False
+
+        def send_signal(self, sig: int) -> None:
+            self.sent.append(sig)
+            self.returncode = 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    proc = _FakeProc()
+    monkeypatch.setattr(dashboard_main.os, "name", "nt", raising=False)
+    monkeypatch.setattr(dashboard_main.signal, "CTRL_BREAK_EVENT", 777, raising=False)
+    monkeypatch.setattr(dashboard_main.time, "sleep", lambda _seconds: None)
+
+    dashboard_main._terminate_process_group([proc])
+
+    assert proc.sent == [777]
+    assert proc.terminated is False
+    assert proc.killed is False

@@ -68,34 +68,43 @@ def _extract_walk_forward_fold_trades(
     history_trades: pl.DataFrame,
     test_df: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Keep trades opened in the test fold and mark open positions to the fold close."""
+    """Project any fold-overlapping trades onto the test window only."""
     if len(history_trades) == 0 or len(test_df) == 0:
         return _empty_trade_frame()
 
     test_start_ts = test_df["ts_event"][0]
     test_end_ts = test_df["ts_event"][-1]
+    fold_open = float(test_df["open"][0]) if "open" in test_df.columns else float(test_df["close"][0])
     fold_close = float(test_df["close"][-1])
 
-    realized = history_trades.filter(
-        (pl.col("entry_time") >= test_start_ts)
-        & (pl.col("entry_time") <= test_end_ts)
-        & (pl.col("exit_time") <= test_end_ts)
+    overlapping = history_trades.filter(
+        (pl.col("entry_time") <= test_end_ts)
+        & (pl.col("exit_time") >= test_start_ts)
     )
-    carry = history_trades.filter(
-        (pl.col("entry_time") >= test_start_ts)
-        & (pl.col("entry_time") <= test_end_ts)
-        & (pl.col("exit_time") > test_end_ts)
-    )
-    if len(carry) > 0:
-        carry = carry.with_columns(
-            pl.lit(test_end_ts).alias("exit_time"),
-            pl.lit(fold_close).alias("exit_price"),
+    if len(overlapping) == 0:
+        return _empty_trade_frame()
+
+    projected_rows: list[dict[str, object]] = []
+    for row in overlapping.iter_rows(named=True):
+        entry_time = row["entry_time"]
+        exit_time = row["exit_time"]
+        if entry_time is None or exit_time is None:
+            continue
+
+        projected_rows.append(
+            {
+                "entry_time": test_start_ts if entry_time < test_start_ts else entry_time,
+                "exit_time": test_end_ts if exit_time > test_end_ts else exit_time,
+                "entry_price": fold_open if entry_time < test_start_ts else row["entry_price"],
+                "exit_price": fold_close if exit_time > test_end_ts else row["exit_price"],
+                "direction": row["direction"],
+                "size": row["size"],
+            }
         )
 
-    frames = [frame for frame in (realized, carry) if len(frame) > 0]
-    if not frames:
+    if not projected_rows:
         return _empty_trade_frame()
-    return pl.concat(frames)
+    return pl.DataFrame(projected_rows).cast(_empty_trade_frame().schema)
 
 
 def shuffle_test(df: pl.DataFrame, signal_col: str = "signal", n_iterations: int = 100, **backtest_kwargs) -> dict:

@@ -29,6 +29,25 @@ def test_atomic_json_write_overwrites_with_valid_json(tmp_path: Path):
     assert payload["ok"] is True
 
 
+def test_atomic_json_write_sanitizes_non_finite_numbers(tmp_path: Path):
+    out = tmp_path / "state.json"
+    atomic_json_write(
+        out,
+        {
+            "nan_value": float("nan"),
+            "inf_value": float("inf"),
+            "nested": [1.0, float("-inf")],
+        },
+    )
+    with open(out, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    assert payload == {
+        "nan_value": None,
+        "inf_value": None,
+        "nested": [1.0, None],
+    }
+
+
 def test_atomic_json_write_closes_fd_if_fdopen_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

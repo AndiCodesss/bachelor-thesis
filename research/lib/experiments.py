@@ -11,7 +11,7 @@ from typing import Any
 
 import portalocker
 
-from research.lib.script_support import tail_lines, utc_now_iso
+from research.lib.script_support import make_json_safe, tail_lines, utc_now_iso
 
 
 def read_recent_event_ids(
@@ -34,7 +34,7 @@ def read_recent_event_ids(
 
 
 def _default_event_id(record: dict[str, Any]) -> str:
-    stable = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
+    stable = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False)
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
 
@@ -53,7 +53,7 @@ def log_experiment(
     path.parent.mkdir(parents=True, exist_ok=True)
     lock.parent.mkdir(parents=True, exist_ok=True)
 
-    row = dict(record)
+    row = make_json_safe(dict(record))
     row.setdefault("schema_version", "1.0")
     row.setdefault("timestamp", utc_now_iso())
     row.setdefault("event_id", _default_event_id(row) if row else str(uuid.uuid4()))
@@ -65,7 +65,7 @@ def log_experiment(
             return False
 
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
+            f.write(json.dumps(row, default=str, allow_nan=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
     return True

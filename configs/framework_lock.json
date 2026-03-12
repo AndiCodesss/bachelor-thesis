@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-03-07T08:46:49.941144+00:00",
+  "generated_at": "2026-03-12T12:59:01.121055+00:00",
   "project_root": "/mnt/c/Users/Andreas Oberd\u00f6rfer/Downloads/bachelor",
   "file_count": 28,
   "files": [
@@ -26,8 +26,8 @@
     },
     {
       "path": "src/framework/backtest/validators.py",
-      "sha256": "8a3b52d4f01e63e77c382d5f8a33838497fb0ff4d15018a7db104d9eecbfafd1",
-      "size_bytes": 20874
+      "sha256": "c18e3baea5bc2d84dc0c3d1fff0186cec8628fcdba7f1153df09b36a8896c63b",
+      "size_bytes": 21375
     },
     {
       "path": "src/framework/data/bars.py",

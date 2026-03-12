@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any
@@ -101,6 +102,24 @@ def validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
     return errors
 
 
+def make_json_safe(value: Any) -> Any:
+    """Recursively normalize values so JSON serialization stays standards-compliant."""
+    if isinstance(value, dict):
+        return {str(key): make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [make_json_safe(item) for item in value]
+    if isinstance(value, set):
+        normalized = [make_json_safe(item) for item in value]
+        return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    if isinstance(value, np.ndarray):
+        return [make_json_safe(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return make_json_safe(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
 def _normalize_json_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -159,6 +178,7 @@ def mission_state_fingerprint(mission: dict[str, Any]) -> str:
 __all__ = [
     "load_json_dict",
     "load_yaml_dict",
+    "make_json_safe",
     "mission_state_fingerprint",
     "mission_state_payload",
     "normalize_feature_group",

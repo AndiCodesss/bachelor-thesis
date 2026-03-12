@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from research.lib.experiments import log_experiment, read_recent_event_ids
@@ -33,3 +34,21 @@ def test_read_recent_event_ids_returns_last_ids(tmp_path: Path) -> None:
     assert "evt-3" in ids
     assert "evt-2" in ids
 
+
+def test_log_experiment_sanitizes_non_finite_numbers(tmp_path: Path) -> None:
+    events = tmp_path / "experiments.jsonl"
+    lock = tmp_path / "experiments.lock"
+
+    written = log_experiment(
+        {
+            "event_id": "evt-nan",
+            "agent": "validator",
+            "metrics": {"sharpe_ratio": float("nan"), "net_pnl": float("inf")},
+        },
+        experiments_path=events,
+        lock_path=lock,
+    )
+
+    assert written is True
+    row = json.loads(events.read_text(encoding="utf-8").strip())
+    assert row["metrics"] == {"sharpe_ratio": None, "net_pnl": None}

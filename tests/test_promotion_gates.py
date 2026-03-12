@@ -183,3 +183,32 @@ def test_walk_forward_lockbox_checks_applied() -> None:
 
     assert out["passed"] is False
     assert out["checks"]["min_lockbox_trade_count"]["passed"] is False
+
+
+def test_min_deflated_sharpe_threshold_is_inclusive() -> None:
+    class _Stub:
+        folds = ()
+        fold_sharpes = ()
+        pct_positive = 1.0
+        aggregate_sharpe = 1.0
+        aggregate_trade_count = 10
+        aggregate_net_pnl = 100.0
+        raw_trial_count = 10
+        effective_trial_count = 10
+        deflated_sharpe = 0.0
+        expected_max_sharpe_null = 0.0
+        dsr_probability = 1.0
+
+    out = evaluate_promotion_gates(
+        wfa_result=_Stub(),  # type: ignore[arg-type]
+        thresholds={
+            "min_fold_count": 0,
+            "min_positive_fold_ratio": 0.0,
+            "min_aggregate_sharpe": 0.0,
+            "min_deflated_sharpe": 0.0,
+            "min_dsr_probability": 0.0,
+        },
+    )
+
+    assert out["checks"]["min_deflated_sharpe"]["passed"] is True
+    assert out["passed"] is True

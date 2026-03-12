@@ -3,7 +3,7 @@
 import polars as pl
 import numpy as np
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import src.framework.backtest.validators as validators_mod
 from src.framework.backtest.validators import (
     shuffle_test,
@@ -236,6 +236,41 @@ def test_walk_forward_marks_cross_boundary_trades_to_fold_close(monkeypatch: pyt
     result = walk_forward_test(df, signal_col="signal", n_folds=3)
     assert result["verdict"] == "PASS"
     assert any(count == 1 for count in seen_trade_counts), "Cross-boundary fold trade should be retained"
+
+
+def test_extract_walk_forward_fold_trades_includes_carry_in_overlap():
+    ts = [
+        datetime(2025, 1, 1, 9, 30, tzinfo=timezone.utc) + timedelta(minutes=5 * i)
+        for i in range(4)
+    ]
+    test_df = pl.DataFrame(
+        {
+            "ts_event": ts[1:3],
+            "open": [101.0, 102.0],
+            "close": [101.5, 102.5],
+        }
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", "UTC")))
+    history_trades = pl.DataFrame(
+        {
+            "entry_time": [ts[0]],
+            "exit_time": [ts[2]],
+            "entry_price": [100.0],
+            "exit_price": [102.5],
+            "direction": [1],
+            "size": [1],
+        }
+    ).with_columns(
+        pl.col("entry_time").cast(pl.Datetime("ns", "UTC")),
+        pl.col("exit_time").cast(pl.Datetime("ns", "UTC")),
+    )
+
+    fold_trades = validators_mod._extract_walk_forward_fold_trades(history_trades, test_df)
+
+    assert len(fold_trades) == 1
+    assert fold_trades["entry_time"][0] == test_df["ts_event"][0]
+    assert fold_trades["entry_price"][0] == test_df["open"][0]
+    assert fold_trades["exit_time"][0] == history_trades["exit_time"][0]
+    assert fold_trades["exit_price"][0] == history_trades["exit_price"][0]
 
 
 def test_regime_test_perfect_signal():
