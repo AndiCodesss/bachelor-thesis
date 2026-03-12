@@ -95,20 +95,25 @@ export function CacheTab({
           </div>
           <div className="form-group">
             <label>Options</label>
-            <label className={`checkbox-label ${clean ? 'active' : ''}`} style={{ width: 'fit-content' }}>
+            <label className={`checkbox-label checkbox-label--fit ${clean ? 'active' : ''}`}>
               <input type="checkbox" checked={clean} onChange={event => onCleanChange(event.target.checked)} />
               Clean Cache First
             </label>
           </div>
-          <div style={{ display: 'flex', gap: '1rem', marginTop: 'auto' }}>
-            <button className="action-btn" style={{ flex: 1 }} onClick={onStart} disabled={status === 'running' || splits.length === 0}>
+          <div className="action-row">
+            <button
+              type="button"
+              className="action-btn action-btn--fill"
+              onClick={onStart}
+              disabled={status === 'running' || splits.length === 0}
+            >
               {status === 'running' ? <><span className="loader" />Running...</> : 'Execute Cache Builder'}
             </button>
             {status === 'running' && <StopButton onClick={onStop} />}
           </div>
         </>
       ) : (
-        <p style={{ color: 'var(--text-muted)' }}>Loading config...</p>
+        <p className="loading-text">Loading config...</p>
       )}
     </>
   )

@@ -14,11 +14,15 @@ export function SignalsTab({
   signalsList,
   onSelectSignal,
 }: SignalsTabProps) {
+  const gauntletVerdict = typeof signalDetails?.gauntlet?.overall_verdict === 'string'
+    ? signalDetails.gauntlet.overall_verdict
+    : null
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+    <div className="signal-explorer">
       <div>
         <h2 className="panel-title">Signals Explorer</h2>
-        <p className="panel-desc" style={{ marginBottom: '1rem' }}>Inspect the generated files and detailed verification constraints of every tested strategy.</p>
+        <p className="panel-desc panel-desc--compact">Inspect the generated files and detailed verification constraints of every tested strategy.</p>
       </div>
 
       <div className="explorer-container">
@@ -26,12 +30,13 @@ export function SignalsTab({
           {signalsList.length > 0 ? signalsList.map(signal => (
             <button
               key={signal.strategy}
+              type="button"
               className={`signal-list-item ${selectedSignal === signal.strategy ? 'selected' : ''}`}
               onClick={() => onSelectSignal(signal.strategy)}
             >
               <div className="signal-header">
                 <span className="signal-name">{signal.strategy}</span>
-                <span className={`status-indicator ${signal.verdict === 'PASS' ? 'completed' : (signal.verdict === 'FAIL' ? 'failed' : '')}`} style={{ fontSize: '0.65rem', padding: '0.1rem 0.4rem' }}>
+                <span className={`status-indicator status-indicator--compact ${signal.verdict === 'PASS' ? 'completed' : (signal.verdict === 'FAIL' ? 'failed' : '')}`}>
                   {signal.verdict}
                 </span>
               </div>
@@ -46,7 +51,7 @@ export function SignalsTab({
           {signalDetails ? (
             <>
               <div className="signal-code-view">
-                <div style={{ color: 'var(--accent-primary)', marginBottom: '1rem', borderBottom: '1px solid var(--border-dim)', paddingBottom: '0.5rem' }}>
+                <div className="signal-file-header">
                   // File: research/signals/{signalDetails.strategy}.py
                 </div>
                 {signalDetails.code}
@@ -54,12 +59,12 @@ export function SignalsTab({
               <div className="signal-metrics-view">
                 <div className="metric-card">
                   <span className="metric-label">All Financial Metrics</span>
-                  <div className="hyp-list" style={{ marginTop: '0.75rem' }}>
+                  <div className="hyp-list hyp-list--spacious">
                     {Object.keys(signalDetails.metrics).length > 0 ? (
                       Object.entries(signalDetails.metrics).map(([key, value]) => (
-                        <div key={key} className="hyp-item" style={{ display: 'flex', justifyContent: 'space-between', width: '100%', padding: '0.3rem 0' }}>
+                        <div key={key} className="hyp-item metric-list-row">
                           <span className="metric-sub">{formatMetricKey(key)}</span>
-                          <span className="metric-value" style={{ fontSize: '0.9rem' }}>{formatMetricValue(key, value)}</span>
+                          <span className="metric-value metric-value--small">{formatMetricValue(key, value)}</span>
                         </div>
                       ))
                     ) : (
@@ -71,18 +76,12 @@ export function SignalsTab({
                 <div className="metric-card">
                   <span className="metric-label">Gauntlet Verification</span>
                   <span
-                    className="metric-value"
-                    style={{
-                      fontSize: '1.2rem',
-                      color: signalDetails.gauntlet?.overall_verdict === 'PASS' ? 'var(--success)' : 'var(--danger)',
-                    }}
+                    className={`metric-value gauntlet-verdict ${gauntletVerdict === 'PASS' ? 'gauntlet-pass' : 'gauntlet-fail'}`}
                   >
-                    {typeof signalDetails.gauntlet?.overall_verdict === 'string'
-                      ? signalDetails.gauntlet.overall_verdict
-                      : 'No Data'}
+                    {gauntletVerdict ?? 'No Data'}
                   </span>
 
-                  <div className="hyp-list" style={{ marginTop: '1rem' }}>
+                  <div className="hyp-list hyp-list--block">
                     {Object.entries(signalDetails.gauntlet).map(([key, value]) => {
                       if (key === 'overall_verdict' || key === 'pass_count' || key === 'total_tests') {
                         return null
@@ -93,12 +92,12 @@ export function SignalsTab({
                       const item = value as GauntletItem
                       const passed = item.verdict === 'PASS'
                       return (
-                        <div key={key} className="hyp-item" style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                        <div key={key} className="hyp-item hyp-item--stacked">
+                          <div className="metric-list-row">
                             <span className="metric-sub">{key}</span>
                             <span className={passed ? 'gauntlet-pass' : 'gauntlet-fail'}>{item.verdict}</span>
                           </div>
-                          <span style={{ fontSize: '0.7rem', color: 'var(--border-focus)', marginTop: '0.2rem' }}>{item.msg}</span>
+                          <span className="gauntlet-msg">{item.msg}</span>
                         </div>
                       )
                     })}
@@ -107,7 +106,7 @@ export function SignalsTab({
               </div>
             </>
           ) : (
-            <div className="terminal-empty" style={{ flex: 1, border: '1px dashed var(--border-dim)', borderRadius: 'var(--radius-md)' }}>
+            <div className="terminal-empty empty-state--framed">
               <p>Select a signal from the sidebar to inspect</p>
             </div>
           )}

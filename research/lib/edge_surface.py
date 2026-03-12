@@ -516,7 +516,6 @@ def run_edge_surface(
     for frame in usable_frames:
         timestamps = frame["ts_event"].to_list()
         closes = frame["close"].to_list()
-        opens = frame["open"].to_list() if "open" in frame.columns else closes
         entries = _extract_entry_events(frame, entry_on_next_open=entry_on_next_open)
         label_lookup = _frame_family_labels(frame, families)
 

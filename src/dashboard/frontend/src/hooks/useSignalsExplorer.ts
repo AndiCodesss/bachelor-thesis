@@ -12,6 +12,11 @@ export function useSignalsExplorer({ apiUrl, enabled }: UseSignalsExplorerOption
   const [selectedSignal, setSelectedSignal] = useState<string | null>(null)
   const [signalDetails, setSignalDetails] = useState<SignalDetails | null>(null)
 
+  const selectSignal = (strategy: string | null) => {
+    setSelectedSignal(strategy)
+    setSignalDetails(null)
+  }
+
   useEffect(() => {
     if (!enabled) {
       return
@@ -43,7 +48,6 @@ export function useSignalsExplorer({ apiUrl, enabled }: UseSignalsExplorerOption
     }
 
     let cancelled = false
-    setSignalDetails(null)
 
     const loadSignalDetails = async () => {
       try {
@@ -65,7 +69,7 @@ export function useSignalsExplorer({ apiUrl, enabled }: UseSignalsExplorerOption
 
   return {
     selectedSignal,
-    setSelectedSignal,
+    setSelectedSignal: selectSignal,
     signalDetails,
     signalsList,
   }

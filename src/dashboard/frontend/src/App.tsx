@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 
 import { TerminalPanel } from './components/TerminalPanel'
 import { AutonomyTab } from './components/tabs/AutonomyTab'
@@ -11,6 +11,20 @@ import { useRunConsole } from './hooks/useRunConsole'
 import { useSignalsExplorer } from './hooks/useSignalsExplorer'
 import { API_URL, WS_URL } from './lib/api'
 import type { TabType } from './types'
+
+const TAB_OPTIONS: Array<{ id: TabType; label: string }> = [
+  { id: 'cache', label: 'Cache Builder' },
+  { id: 'autonomy', label: 'Autonomy Control' },
+  { id: 'cleanup', label: 'System Cleanup' },
+  { id: 'signals', label: 'Signals Explorer' },
+]
+
+function resolveOption(value: string, options: string[] | undefined, fallback: string): string {
+  if (!options || options.length === 0) {
+    return value || fallback
+  }
+  return options.includes(value) ? value : options[0]
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('cache')
@@ -54,24 +68,15 @@ export default function App() {
   const [thinkerView, setThinkerView] = useState<'logs' | 'thinker'>('logs')
 
   const [cleanupForce, setCleanupForce] = useState(false)
-
-  useEffect(() => {
-    if (!cacheConfig) {
-      return
-    }
-    if (cacheConfig.session_filters.length > 0 && !cacheConfig.session_filters.includes(cacheSession)) {
-      setCacheSession(cacheConfig.session_filters[0])
-    }
-    if (cacheConfig.exec_modes.length > 0 && !cacheConfig.exec_modes.includes(cacheExecMode)) {
-      setCacheExecMode(cacheConfig.exec_modes[0])
-    }
-  }, [cacheConfig, cacheExecMode, cacheSession])
+  const isSignalsTab = activeTab === 'signals'
+  const resolvedCacheSession = resolveOption(cacheSession, cacheConfig?.session_filters, 'eth')
+  const resolvedCacheExecMode = resolveOption(cacheExecMode, cacheConfig?.exec_modes, 'auto')
 
   const startCache = () => {
     void triggerRun('cache', {
       splits: cacheSplits,
-      session_filter: cacheSession,
-      exec_mode: cacheExecMode,
+      session_filter: resolvedCacheSession,
+      exec_mode: resolvedCacheExecMode,
       bar_filter: cacheBarFilter || null,
       clean: cacheClean,
     })
@@ -107,30 +112,28 @@ export default function App() {
             NQ-Alpha Core
           </h1>
           <div className="tabs">
-            <button className={`tab-btn ${activeTab === 'cache' ? 'active' : ''}`} onClick={() => setActiveTab('cache')}>
-              Cache Builder
-            </button>
-            <button className={`tab-btn ${activeTab === 'autonomy' ? 'active' : ''}`} onClick={() => setActiveTab('autonomy')}>
-              Autonomy Control
-            </button>
-            <button className={`tab-btn ${activeTab === 'cleanup' ? 'active' : ''}`} onClick={() => setActiveTab('cleanup')}>
-              System Cleanup
-            </button>
-            <button className={`tab-btn ${activeTab === 'signals' ? 'active' : ''}`} onClick={() => setActiveTab('signals')}>
-              Signals Explorer
-            </button>
+            {TAB_OPTIONS.map(tab => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`tab-btn ${activeTab === tab.id ? 'active' : ''}`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
         </div>
       </header>
 
       <main className="main-content">
-        <div className="panel config-panel" style={activeTab === 'signals' ? { flex: 1, maxWidth: 'none', overflow: 'hidden' } : {}}>
+        <div className={`panel config-panel${isSignalsTab ? ' config-panel--wide' : ''}`}>
           {activeTab === 'cache' && (
             <CacheTab
               cacheConfig={cacheConfig}
               splits={cacheSplits}
-              session={cacheSession}
-              execMode={cacheExecMode}
+              session={resolvedCacheSession}
+              execMode={resolvedCacheExecMode}
               barFilter={cacheBarFilter}
               clean={cacheClean}
               status={status}
@@ -189,7 +192,7 @@ export default function App() {
           )}
         </div>
 
-        {activeTab !== 'signals' && (
+        {!isSignalsTab && (
           <TerminalPanel
             activeTab={activeTab}
             currentCmd={currentCmd}

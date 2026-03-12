@@ -23,6 +23,7 @@ export function TerminalPanel({
 }: TerminalPanelProps) {
   const terminalRef = useRef<HTMLDivElement>(null)
   const thinkerFeedRef = useRef<HTMLDivElement>(null)
+  const thinkerMode = activeTab === 'autonomy' && thinkerView === 'thinker'
 
   useEffect(() => {
     if (terminalRef.current) {
@@ -36,7 +37,7 @@ export function TerminalPanel({
     }
   }, [thinkerData])
 
-  const title = thinkerView === 'logs' || activeTab !== 'autonomy'
+  const title = !thinkerMode
     ? (currentCmd || 'Output Terminal')
     : `Thinker · ${thinkerData?.session_id?.slice(0, 8) ?? '...'}`
 
@@ -50,18 +51,22 @@ export function TerminalPanel({
           </svg>
           {title}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <div className="terminal-controls">
           {activeTab === 'autonomy' && (
             <div className="thinker-view-toggle">
               <button
+                type="button"
                 className={`thinker-toggle-btn ${thinkerView === 'logs' ? 'active' : ''}`}
                 onClick={() => onThinkerViewChange('logs')}
+                aria-pressed={thinkerView === 'logs'}
               >
                 Logs
               </button>
               <button
+                type="button"
                 className={`thinker-toggle-btn ${thinkerView === 'thinker' ? 'active' : ''}`}
                 onClick={() => onThinkerViewChange('thinker')}
+                aria-pressed={thinkerView === 'thinker'}
               >
                 Thinker
                 {thinkerData?.is_active && <span className="thinker-active-dot" />}
@@ -75,7 +80,7 @@ export function TerminalPanel({
         </div>
       </div>
 
-      {thinkerView === 'thinker' ? (
+      {thinkerMode ? (
         <div className="thinker-feed" ref={thinkerFeedRef}>
           {thinkerData && thinkerData.events.length > 0 ? (
             thinkerData.events.map((event, idx) => {
@@ -98,14 +103,7 @@ export function TerminalPanel({
                 return (
                   <div key={idx} className="thinker-event thinker-event-result">
                     {event.tool && (
-                      <span
-                        className="thinker-tool-badge"
-                        style={{
-                          background: 'rgba(16,185,129,0.1)',
-                          color: '#10b981',
-                          borderColor: 'rgba(16,185,129,0.25)',
-                        }}
-                      >
+                      <span className="thinker-tool-badge thinker-tool-badge--result">
                         {event.tool}
                       </span>
                     )}

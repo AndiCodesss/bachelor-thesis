@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import type { RunStatus } from '../types'
 
@@ -15,7 +15,7 @@ export function useRunConsole({ apiUrl, wsUrl }: UseRunConsoleOptions) {
 
   const wsRef = useRef<WebSocket | null>(null)
 
-  const syncRunStatus = useEffectEvent(async (id: string) => {
+  const syncRunStatus = async (id: string) => {
     try {
       const resp = await fetch(`${apiUrl}/runs/${id}`)
       const data = await resp.json()
@@ -25,11 +25,11 @@ export function useRunConsole({ apiUrl, wsUrl }: UseRunConsoleOptions) {
     } catch (error) {
       console.error('Failed to refresh run status:', error)
     }
-  })
+  }
 
-  const appendLog = useEffectEvent((line: string) => {
+  const appendLog = (line: string) => {
     setLogs(prev => [...prev, line])
-  })
+  }
 
   useEffect(() => {
     return () => {
@@ -48,7 +48,9 @@ export function useRunConsole({ apiUrl, wsUrl }: UseRunConsoleOptions) {
 
     const ws = new WebSocket(`${wsUrl}/runs/${id}/logs`)
     wsRef.current = ws
-    ws.onmessage = event => appendLog(event.data)
+    ws.onmessage = event => {
+      appendLog(event.data)
+    }
     ws.onclose = () => {
       void syncRunStatus(id)
     }

@@ -3,6 +3,18 @@ import type { AutonomyStatus, RunStatus } from '../../types'
 
 import { StopButton } from '../StopButton'
 
+const LANE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+function verdictClass(verdict: string): string {
+  if (verdict === 'PASS') {
+    return 'completed'
+  }
+  if (verdict === 'FAIL') {
+    return 'failed'
+  }
+  return ''
+}
+
 interface AutonomyTabProps {
   agentConfig: string
   allowBootstrap: boolean
@@ -51,11 +63,29 @@ export function AutonomyTab({
   const orchestratorEnabled = !validatorOnly
   const autonomySelectionInvalid = validatorOnly && orchestratorOnly
 
+  const setValidatorEnabled = (enabled: boolean) => {
+    if (enabled) {
+      onOrchestratorOnlyChange(false)
+      return
+    }
+    onValidatorOnlyChange(false)
+    onOrchestratorOnlyChange(true)
+  }
+
+  const setOrchestratorEnabled = (enabled: boolean) => {
+    if (enabled) {
+      onValidatorOnlyChange(false)
+      return
+    }
+    onOrchestratorOnlyChange(false)
+    onValidatorOnlyChange(true)
+  }
+
   return (
     <>
       <div>
         <h2 className="panel-title">Autonomy Overview</h2>
-        <p className="panel-desc" style={{ marginBottom: '1rem' }}>Monitor experiments and control the discovery pipeline.</p>
+        <p className="panel-desc panel-desc--compact">Monitor experiments and control the discovery pipeline.</p>
       </div>
 
       {statusData && (
@@ -77,16 +107,16 @@ export function AutonomyTab({
             </span>
           </div>
           {statusData.financial.tested > 0 && (
-            <div className="metric-card" style={{ gridColumn: '1 / -1' }}>
+            <div className="metric-card metric-card--wide">
               <span className="metric-label">Financial Snapshot (Last {statusData.financial.tested} Experiments)</span>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
-                <div>
+              <div className="metrics-summary">
+                <div className="metrics-summary-item">
                   <span className="metric-sub">Avg Net PNL: </span>
-                  <span className="metric-value" style={{ fontSize: '1.2rem' }}>${statusData.financial.avg_net_pnl.toFixed(2)}</span>
+                  <span className="metric-value metric-value--medium">${statusData.financial.avg_net_pnl.toFixed(2)}</span>
                 </div>
-                <div>
+                <div className="metrics-summary-item">
                   <span className="metric-sub">Pass Rate: </span>
-                  <span className="metric-value" style={{ fontSize: '1.2rem' }}>{statusData.financial.pass_rate_pct.toFixed(1)}%</span>
+                  <span className="metric-value metric-value--medium">{statusData.financial.pass_rate_pct.toFixed(1)}%</span>
                 </div>
               </div>
               <div className="hyp-list">
@@ -106,12 +136,11 @@ export function AutonomyTab({
             </div>
           )}
           {statusData.recent_results.length > 0 && (
-            <div className="metric-card" style={{ gridColumn: '1 / -1' }}>
+            <div className="metric-card metric-card--wide">
               <span className="metric-label">Recent Results</span>
-              <div className="hyp-list" style={{ marginTop: '0.75rem' }}>
+              <div className="hyp-list hyp-list--spacious">
                 {statusData.recent_results.map(result => {
                   const edgeRejected = Boolean(result.edge_status) && !['global_edge', 'disabled', 'selection_skip'].includes(result.edge_status)
-                  const verdictClass = result.verdict === 'PASS' ? 'completed' : (result.verdict === 'FAIL' ? 'failed' : '')
                   const edgeNote = edgeRejected
                     ? `Edge discovery stopped the full backtest (${result.edge_status}).`
                     : 'Full backtest executed.'
@@ -121,31 +150,30 @@ export function AutonomyTab({
                   return (
                     <div
                       key={`${result.strategy}-${result.timestamp}`}
-                      className="hyp-item"
-                      style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '0.5rem' }}
+                      className="hyp-item hyp-item--stacked"
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', width: '100%' }}>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem 0.75rem', minWidth: 0 }}>
-                          <span className="metric-sub" style={{ color: 'var(--text-primary)' }}>{result.strategy}</span>
+                      <div className="hyp-item-header">
+                        <div className="hyp-item-meta">
+                          <span className="metric-sub metric-sub--primary">{result.strategy}</span>
                           <span className="metric-sub">{result.bar}</span>
                           <span className="metric-sub">{formatAutonomyTimestamp(result.timestamp)}</span>
                         </div>
-                        <span className={`status-indicator ${verdictClass}`} style={{ fontSize: '0.65rem', padding: '0.1rem 0.4rem' }}>
+                        <span className={`status-indicator status-indicator--compact ${verdictClass(result.verdict)}`}>
                           {result.verdict}
                         </span>
                       </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.5rem 1rem', width: '100%' }}>
+                      <div className="result-stats-grid">
                         <div>
                           <div className="metric-sub">Signals</div>
-                          <div style={{ fontFamily: 'var(--font-mono)' }}>{result.signal_count ?? 'n/a'}</div>
+                          <div className="mono-text">{result.signal_count ?? 'n/a'}</div>
                         </div>
                         <div>
                           <div className="metric-sub">Edge Events</div>
-                          <div style={{ fontFamily: 'var(--font-mono)' }}>{result.edge_events ?? 'n/a'}</div>
+                          <div className="mono-text">{result.edge_events ?? 'n/a'}</div>
                         </div>
                         <div>
                           <div className="metric-sub">Backtest Trades</div>
-                          <div style={{ fontFamily: 'var(--font-mono)' }}>{result.backtest_trades ?? 'n/a'}</div>
+                          <div className="mono-text">{result.backtest_trades ?? 'n/a'}</div>
                         </div>
                         <div>
                           <div className="metric-sub">Net PNL</div>
@@ -166,13 +194,13 @@ export function AutonomyTab({
             </div>
           )}
           {statusData.active_hypotheses.length > 0 && (
-            <div className="metric-card" style={{ gridColumn: '1 / -1' }}>
+            <div className="metric-card metric-card--wide">
               <span className="metric-label">Active Hypotheses</span>
               <div className="hyp-list">
                 {statusData.active_hypotheses.map(hypothesis => (
                   <div key={hypothesis.id} className="hyp-item">
                     <span className="metric-sub">{hypothesis.id}</span>
-                    <span style={{ fontFamily: 'var(--font-mono)' }}>{hypothesis.tasks} tasks</span>
+                    <span className="mono-text">{hypothesis.tasks} tasks</span>
                   </div>
                 ))}
               </div>
@@ -181,7 +209,7 @@ export function AutonomyTab({
         </div>
       )}
 
-      <div className="form-group" style={{ borderTop: '1px solid var(--border-dim)', paddingTop: '1.5rem' }}>
+      <div className="form-group form-group--top-divider">
         <label>Mission Config Path</label>
         <input type="text" value={mission} onChange={event => onMissionChange(event.target.value)} />
       </div>
@@ -197,14 +225,7 @@ export function AutonomyTab({
             <input
               type="checkbox"
               checked={!orchestratorOnly}
-              onChange={event => {
-                if (!event.target.checked) {
-                  onValidatorOnlyChange(false)
-                  onOrchestratorOnlyChange(true)
-                } else {
-                  onOrchestratorOnlyChange(false)
-                }
-              }}
+              onChange={event => setValidatorEnabled(event.target.checked)}
             />
             Enable Validator
           </label>
@@ -212,14 +233,7 @@ export function AutonomyTab({
             <input
               type="checkbox"
               checked={!validatorOnly}
-              onChange={event => {
-                if (!event.target.checked) {
-                  onOrchestratorOnlyChange(false)
-                  onValidatorOnlyChange(true)
-                } else {
-                  onValidatorOnlyChange(false)
-                }
-              }}
+              onChange={event => setOrchestratorEnabled(event.target.checked)}
             />
             Enable Orchestrator
           </label>
@@ -228,32 +242,25 @@ export function AutonomyTab({
 
       <div className="form-group">
         <label>Orchestrator Lanes</label>
-        <div className="checkbox-group">
-          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(count => (
-            <label
+        <div className="lane-selector" role="group" aria-label="Orchestrator lanes">
+          {LANE_OPTIONS.map(count => (
+            <button
               key={count}
-              className={`checkbox-label ${laneCount === count ? 'active' : ''}`}
-              style={{
-                cursor: orchestratorEnabled ? 'pointer' : 'not-allowed',
-                minWidth: '2.2rem',
-                justifyContent: 'center',
-                opacity: orchestratorEnabled ? 1 : 0.45,
-              }}
-              onClick={() => {
-                if (orchestratorEnabled) {
-                  onLaneCountChange(count)
-                }
-              }}
+              type="button"
+              className={`checkbox-label lane-button ${laneCount === count ? 'active' : ''}`}
+              onClick={() => onLaneCountChange(count)}
+              disabled={!orchestratorEnabled}
+              aria-pressed={laneCount === count}
             >
               {count}
-            </label>
+            </button>
           ))}
         </div>
       </div>
 
       <div className="form-group">
         <label>Execution Flags</label>
-        <div className="checkbox-group" style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
+        <div className="checkbox-group toggle-group--stacked">
           <label className={`checkbox-label ${noResume ? 'active' : ''}`}>
             <input type="checkbox" checked={noResume} onChange={event => onNoResumeChange(event.target.checked)} />
             Fresh State (Reset Runtime State)
@@ -269,8 +276,13 @@ export function AutonomyTab({
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: '1rem', marginTop: 'auto' }}>
-        <button className="action-btn" style={{ flex: 1 }} onClick={onStart} disabled={status === 'running' || autonomySelectionInvalid}>
+      <div className="action-row">
+        <button
+          type="button"
+          className="action-btn action-btn--fill"
+          onClick={onStart}
+          disabled={status === 'running' || autonomySelectionInvalid}
+        >
           {status === 'running' ? <><span className="loader" />Deploying Mission...</> : 'Launch Autonomy'}
         </button>
         {status === 'running' && <StopButton onClick={onStop} />}
