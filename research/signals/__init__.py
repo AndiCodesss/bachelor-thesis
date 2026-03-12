@@ -432,15 +432,20 @@ def compute_strategy_id(
     strategy_function: SignalFn,
     bar_config: str = "",
     session_filter: str = "",
+    feature_group: str = "",
 ) -> str:
-    """Stable strategy id from name + params + source + bar config + session."""
+    """Stable strategy id from name + params + source + execution context."""
     params_blob = json.dumps(params, sort_keys=True, separators=(",", ":"))
     params_hash = hashlib.sha256(params_blob.encode("utf-8")).hexdigest()[:16]
     source = inspect.getsource(strategy_function)
     code_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
-    if bar_config or session_filter:
+    if bar_config or session_filter or feature_group:
         env_blob = json.dumps(
-            {"bar_config": str(bar_config), "session_filter": str(session_filter)},
+            {
+                "bar_config": str(bar_config),
+                "session_filter": str(session_filter),
+                "feature_group": str(feature_group),
+            },
             sort_keys=True,
             separators=(",", ":"),
         )

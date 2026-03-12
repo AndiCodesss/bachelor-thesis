@@ -1,34 +1,40 @@
-# NQ-Alpha Cache Runner Dashboard
+# Dashboard
 
-A modern, glassmorphism-themed web dashboard to cleanly set constraints, execute, and monitor the `cache_runner.py` real-time progress.
+The dashboard is a local operator UI for the research runtime. It covers four workflows:
 
-## Technologies Used
+- cache rebuilds
+- autonomy launch and monitoring
+- cleanup runs
+- signal inspection
 
-- **Backend**: FastAPI + WebSockets (Python). Isolated via `uv run --with ...` so it doesn't pollute your main project dependencies.
-- **Frontend**: Vite + React + TypeScript.
-- **Styling**: Pure CSS with rich dark-mode aesthetics, dynamic background blob animations, glassmorphism panels, and vibrant accents.
+## Backend
 
-## Running the Dashboard
+Run the API from the repository root:
 
-You will need two terminal windows to run the dashboard. Please execute these from the **root of your bachelor project**.
-
-### 1. Start the Backend API
-
-In your first terminal, from the root where `pyproject.toml` is located, run:
-
-```powershell
-uv run --with fastapi --with uvicorn --with websockets --with pydantic uvicorn src.dashboard.backend.main:app --port 8000
+```bash
+uv run --with fastapi --with uvicorn --with websockets --with pydantic \
+  uvicorn src.dashboard.backend.main:app --port 8000
 ```
 
-### 2. Start the Frontend UI
+## Frontend
 
-In your second terminal, launch the Vite dev server:
+Run the Vite app from `src/dashboard/frontend`:
 
-```powershell
-cd src/dashboard/frontend
+```bash
 npm run dev
 ```
 
-### 3. Open the Dashboard
+Optional environment variables:
 
-Navigate to [http://localhost:5173](http://localhost:5173) in your browser. Configure your runner execution, and hit the start button. The terminal window will stream live logs directly from the background cache runner task!
+- `VITE_API_ORIGIN`: defaults to `http://localhost:8000`
+- `VITE_WS_ORIGIN`: defaults to the websocket form of `VITE_API_ORIGIN`
+
+## One-command Start
+
+From the repo root:
+
+```bash
+./start-dashboard.sh
+```
+
+The UI is available at `http://localhost:5173`.

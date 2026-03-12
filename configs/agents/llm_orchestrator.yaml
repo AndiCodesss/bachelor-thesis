@@ -34,7 +34,6 @@ coder:
 
 runtime:
   max_iterations: 200
-  max_pending_tasks: 25
   poll_seconds: 10
   max_runtime_hours: 6
   stage_max_attempts: 3

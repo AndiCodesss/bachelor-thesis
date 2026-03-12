@@ -18,6 +18,8 @@ SIGNAL_KEEP = {"__init__.py", "example_ema_turn.py"}
 
 # State/log patterns to reset (written fresh on next run)
 STATE_PATTERNS = [
+    "research/.state/state_meta.json",
+    "research/.state/state_meta.lock",
     "research/.state/experiment_queue.json",
     "research/.state/experiment_queue.lock",
     "research/.state/handoffs.json",

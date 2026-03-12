@@ -18,7 +18,6 @@ from typing import Any, Callable
 
 import numpy as np
 import polars as pl
-import yaml
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -45,10 +44,8 @@ from research.lib.learning_scorecard import (
     resolve_focus_anchors,
 )
 from research.lib.llm_client import (
-    ClaudeCodeCLIClient,
     LLMClientError,
     LLMRawClient,
-    extract_json_object,
 )
 from research.lib.mission_splits import resolve_research_splits
 from research.lib.notebook_guidance import (
@@ -58,6 +55,15 @@ from research.lib.notebook_guidance import (
 )
 from research.lib.notebook_runtime import ensure_lane_notebook
 from research.lib.notebook_audit import notebook_audit_context, summarize_notebook_queries
+from research.lib.orchestrator_stage import (
+    StageJSONResult,
+    build_llm_client as _orchestrator_build_llm_client,
+    call_stage_json as _orchestrator_call_stage_json,
+    cfg_dict as _orchestrator_cfg_dict,
+    extract_retry_after_seconds as _orchestrator_extract_retry_after_seconds,
+    normalize_with_semantic_retry as _orchestrator_normalize_with_semantic_retry,
+    resolve_role_cfg as _orchestrator_resolve_role_cfg,
+)
 from research.lib.runtime_state import (
     ensure_orchestrator_state,
     ensure_shared_state,
@@ -66,6 +72,18 @@ from research.lib.runtime_state import (
     thinker_memory_lock_path,
     thinker_memory_path,
     write_orchestrator_state,
+)
+from research.lib.script_support import (
+    load_json_dict as _read_json,
+    load_yaml_dict as _load_yaml,
+    mission_state_fingerprint,
+    normalize_feature_group,
+    normalize_session_filter,
+    parse_bar_config as _parse_bar_config,
+    state_mode as _state_mode,
+    tail_lines as _tail_lines,
+    utc_now_iso as _utc_now,
+    validate_signal_array as _validate_signal_array,
 )
 from research.lib.thinker_memory import (
     append_thinker_attempt,
@@ -95,11 +113,6 @@ from src.framework.api import (
 )
 from src.framework.data.constants import TICK_SIZE
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 _MAX_THINKER_FEASIBILITY_REPAIR_ATTEMPTS = 6
 _THINKER_SCHEMA_HINT = (
     "keys in order: hypothesis_id, theme_tag, strategy_name_hint, research_brief, bar_configs, "
@@ -125,74 +138,8 @@ def _repair_brief_signature(brief: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
 
 
-class StageJSONResult:
-    def __init__(
-        self,
-        *,
-        payload: dict[str, Any],
-        model: str,
-        response_id: str | None,
-        usage: dict[str, Any],
-        raw_text: str,
-        attempts: int,
-        repaired: bool,
-    ) -> None:
-        self.payload = payload
-        self.model = model
-        self.response_id = response_id
-        self.usage = usage
-        self.raw_text = raw_text
-        self.attempts = attempts
-        self.repaired = repaired
-
-
 def _extract_retry_after_seconds(error_text: str) -> float | None:
-    raw = str(error_text)
-    match = re.search(r"retry in\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|s|sec|secs|second|seconds)", raw, re.IGNORECASE)
-    if not match:
-        return None
-    value = float(match.group(1))
-    unit = match.group(2).lower()
-    if unit == "ms":
-        return max(0.1, value / 1000.0)
-    return max(0.1, value)
-
-
-def _repair_json_payload(
-    *,
-    stage_name: str,
-    schema_hint: str,
-    raw_text: str,
-    client: LLMRawClient,
-    max_output_tokens: int,
-) -> StageJSONResult:
-    system_prompt = (
-        "You are a strict JSON repair engine. "
-        "Return ONLY one valid JSON object and no markdown, no prose."
-    )
-    user_prompt = (
-        f"Stage: {stage_name}\n"
-        f"Required schema summary:\n{schema_hint}\n\n"
-        "Fix this output into valid JSON matching the schema:\n"
-        f"{raw_text}"
-    )
-    repaired = client.generate_raw(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        temperature=0.0,
-        max_output_tokens=max(300, min(int(max_output_tokens), 1800)),
-        force_json_object=True,
-    )
-    payload = extract_json_object(repaired.raw_text)
-    return StageJSONResult(
-        payload=payload,
-        model=repaired.model,
-        response_id=repaired.response_id,
-        usage=repaired.usage,
-        raw_text=repaired.raw_text,
-        attempts=1,
-        repaired=True,
-    )
+    return _orchestrator_extract_retry_after_seconds(error_text)
 
 
 def _call_stage_json(
@@ -210,73 +157,20 @@ def _call_stage_json(
     quota_backoff_seconds: float,
     max_backoff_seconds: float,
 ) -> StageJSONResult:
-    attempts = max(1, int(max_attempts))
-    last_exc: Exception | None = None
-
-    for attempt in range(1, attempts + 1):
-        try:
-            raw = client.generate_raw(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=float(temperature),
-                max_output_tokens=int(max_output_tokens),
-                force_json_object=True,
-            )
-            try:
-                payload = extract_json_object(raw.raw_text)
-                return StageJSONResult(
-                    payload=payload,
-                    model=raw.model,
-                    response_id=raw.response_id,
-                    usage=raw.usage,
-                    raw_text=raw.raw_text,
-                    attempts=attempt,
-                    repaired=False,
-                )
-            except LLMClientError as parse_exc:
-                last_exc = parse_exc
-                repairs = max(0, int(json_repair_attempts))
-                for _ in range(repairs):
-                    try:
-                        repaired = _repair_json_payload(
-                            stage_name=stage_name,
-                            schema_hint=schema_hint,
-                            raw_text=raw.raw_text,
-                            client=client,
-                            max_output_tokens=max_output_tokens,
-                        )
-                        return StageJSONResult(
-                            payload=repaired.payload,
-                            model=repaired.model,
-                            response_id=repaired.response_id,
-                            usage=repaired.usage,
-                            raw_text=repaired.raw_text,
-                            attempts=attempt,
-                            repaired=True,
-                        )
-                    except Exception as repair_exc:  # pragma: no cover - best-effort repair
-                        last_exc = repair_exc
-        except Exception as exc:
-            last_exc = exc
-
-        if attempt >= attempts:
-            break
-
-        delay = float(stage_backoff_seconds) * float(attempt)
-        if last_exc is not None:
-            err = str(last_exc)
-            if "HTTP 429" in err or "RESOURCE_EXHAUSTED" in err:
-                retry_after = _extract_retry_after_seconds(err)
-                delay = max(float(quota_backoff_seconds), (retry_after or 0.0) + 1.0)
-            elif "HTTP 503" in err or "UNAVAILABLE" in err:
-                delay = max(delay, float(stage_backoff_seconds) * 2.0)
-        time.sleep(min(float(max_backoff_seconds), max(0.1, delay)))
-
-    if last_exc is None:
-        raise RuntimeError(f"{stage_name}: failed without explicit error")
-    if isinstance(last_exc, Exception):
-        raise last_exc
-    raise RuntimeError(f"{stage_name}: {last_exc}")
+    return _orchestrator_call_stage_json(
+        stage_name=stage_name,
+        schema_hint=schema_hint,
+        client=client,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        max_attempts=max_attempts,
+        json_repair_attempts=json_repair_attempts,
+        stage_backoff_seconds=stage_backoff_seconds,
+        quota_backoff_seconds=quota_backoff_seconds,
+        max_backoff_seconds=max_backoff_seconds,
+    )
 
 
 def _normalize_with_semantic_retry(
@@ -297,67 +191,24 @@ def _normalize_with_semantic_retry(
     max_backoff_seconds: float,
     schema_hint: str,
 ) -> tuple[Any, StageJSONResult]:
-    current = stage_result
-    retries = max(0, int(max_semantic_retries))
-    for semantic_try in range(retries + 1):
-        try:
-            return normalize_fn(current.payload), current
-        except ValueError as exc:
-            if semantic_try >= retries:
-                raise
-            previous_payload: dict[str, Any] = current.payload
-            if (
-                isinstance(exc, (ThinkerFeasibilityError, ThinkerResearchContractError))
-                and isinstance(exc.brief, dict)
-                and exc.brief
-            ):
-                previous_payload = exc.brief
-            repair_prompt = (
-                f"{base_user_prompt}\n\n"
-                f"Validation error: {exc}\n"
-                f"Previous JSON:\n{json.dumps(previous_payload, indent=2, default=str)}\n\n"
-                "Return corrected JSON only."
-            )
-            current = _call_stage_json(
-                stage_name=stage_name,
-                schema_hint=schema_hint,
-                client=client,
-                system_prompt=system_prompt,
-                user_prompt=repair_prompt,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                max_attempts=max_attempts,
-                json_repair_attempts=json_repair_attempts,
-                stage_backoff_seconds=stage_backoff_seconds,
-                quota_backoff_seconds=quota_backoff_seconds,
-                max_backoff_seconds=max_backoff_seconds,
-            )
-    raise RuntimeError(f"{stage_name}: normalization retry failed unexpectedly")
-
-
-def _load_yaml(path: Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        payload = yaml.safe_load(f)
-    if not isinstance(payload, dict):
-        raise ValueError(f"YAML object expected: {path}")
-    return payload
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    if not isinstance(payload, dict):
-        raise ValueError(f"JSON object expected: {path}")
-    return payload
-
-
-def _tail_lines(path: Path, limit: int) -> list[str]:
-    if not path.exists():
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        rows = f.readlines()
-    return rows[-limit:] if limit > 0 else rows
-
+    return _orchestrator_normalize_with_semantic_retry(
+        stage_name=stage_name,
+        stage_result=stage_result,
+        normalize_fn=normalize_fn,
+        client=client,
+        system_prompt=system_prompt,
+        base_user_prompt=base_user_prompt,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        max_semantic_retries=max_semantic_retries,
+        max_attempts=max_attempts,
+        json_repair_attempts=json_repair_attempts,
+        stage_backoff_seconds=stage_backoff_seconds,
+        quota_backoff_seconds=quota_backoff_seconds,
+        max_backoff_seconds=max_backoff_seconds,
+        schema_hint=schema_hint,
+        call_stage_json_fn=_call_stage_json,
+    )
 
 def _strip_code_fences(text: str) -> str:
     raw = str(text).strip()
@@ -366,40 +217,6 @@ def _strip_code_fences(text: str) -> str:
         if len(lines) >= 3 and lines[-1].strip() == "```":
             return "\n".join(lines[1:-1]).strip()
     return raw
-
-
-def _parse_bar_config(bar_config: str) -> dict[str, Any]:
-    raw = str(bar_config).strip().lower()
-    match = re.fullmatch(r"(tick|volume|vol|time)_(.+)", raw)
-    if not match:
-        raise ValueError(f"Unsupported bar_config '{bar_config}'")
-    kind, suffix = match.groups()
-
-    if kind == "time":
-        if not re.fullmatch(r"[1-9][0-9]*[mh]", suffix):
-            raise ValueError(f"Invalid time bar size in '{bar_config}'")
-        return {"bar_type": "time", "bar_size": suffix, "bar_threshold": None}
-
-    if not suffix.isdigit() or int(suffix) <= 0:
-        raise ValueError(f"Invalid bar threshold in '{bar_config}'")
-
-    bar_type = "volume" if kind in {"volume", "vol"} else "tick"
-    return {"bar_type": bar_type, "bar_size": "5m", "bar_threshold": int(suffix)}
-
-
-def _validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
-    errors: list[str] = []
-    if signal.ndim != 1:
-        return [f"signal must be 1D, got ndim={signal.ndim}"]
-    if len(signal) != expected_len:
-        return [f"signal length {len(signal)} != expected {expected_len}"]
-    if np.isnan(signal).any():
-        errors.append("signal contains NaN")
-    uniq = set(np.unique(signal).tolist())
-    if not uniq.issubset({-1, 0, 1}):
-        errors.append(f"signal contains invalid values: {sorted(uniq)}")
-    return errors
-
 
 def _diagnose_zero_signal(df: pl.DataFrame, code: str) -> str:
     """Compute empirical firing rates for columns referenced in strategy code."""
@@ -435,11 +252,6 @@ def _context_unavailable_columns(
         if values.size > 0 and not np.isfinite(values).any():
             columns.add(column)
     return sorted(columns)
-
-
-def _state_mode(*, fresh_state: bool) -> str:
-    return "fresh" if fresh_state else "resume"
-
 
 def _queue_counts(queue_path: Path, queue_lock: Path) -> dict[str, int]:
     payload = read_json_file(
@@ -2959,9 +2771,31 @@ def _build_coder_repair_user_prompt(
     )
 
 
-def _task_id(strategy_name: str, bar_config: str, params: dict[str, Any], code_hash: str) -> str:
+def _task_id(
+    strategy_name: str,
+    bar_config: str,
+    params: dict[str, Any],
+    code_hash: str,
+    *,
+    search_split: str = "",
+    selection_split: str | None = None,
+    session_filter: str = "",
+    feature_group: str = "",
+) -> str:
+    sel = str(selection_split).strip().lower() if selection_split is not None else ""
     digest = _sha256_text(
-        f"{strategy_name}|{bar_config}|{json.dumps(params, sort_keys=True, separators=(',', ':'))}|{code_hash}",
+        "|".join(
+            [
+                str(strategy_name),
+                str(search_split).strip().lower(),
+                sel,
+                str(bar_config),
+                str(session_filter).strip().lower(),
+                str(feature_group).strip().lower(),
+                json.dumps(params, sort_keys=True, separators=(",", ":")),
+                str(code_hash),
+            ]
+        ),
     )[:12]
     return f"llm_{_slug(strategy_name)}_{_slug(bar_config)}_{digest}"
 
@@ -2985,6 +2819,8 @@ def _build_task(
     max_retries = int(mission.get("max_retries", 2))
     timeout_minutes = int(mission.get("task_timeout_minutes", 30))
     heartbeat_seconds = int(mission.get("heartbeat_interval_seconds", 300))
+    session_filter = normalize_session_filter(mission.get("session_filter", "eth"))
+    feature_group = normalize_feature_group(mission.get("feature_group", "all"))
 
     # Promote engine exit params from params dict to task top-level so research.py
     # can pass them directly to run_backtest(). Canonical names: pt_ticks, sl_ticks,
@@ -2997,7 +2833,16 @@ def _build_task(
     exit_bars = int(_exit_bars) if _exit_bars is not None else None
 
     return {
-        "task_id": _task_id(strategy_name, bar_config, params, code_hash),
+        "task_id": _task_id(
+            strategy_name,
+            bar_config,
+            params,
+            code_hash,
+            search_split=search_split,
+            selection_split=selection_split,
+            session_filter=session_filter,
+            feature_group=feature_group,
+        ),
         "state": "pending",
         "assigned_to": None,
         "strategy_name": strategy_name,
@@ -3005,6 +2850,8 @@ def _build_task(
         "search_split": search_split,
         "selection_split": selection_split,
         "bar_config": bar_config,
+        "session_filter": session_filter,
+        "feature_group": feature_group,
         "theme_tag": str(theme_tag),
         "setup_key": str(setup_key),
         "setup_label": str(setup_label),
@@ -3064,7 +2911,7 @@ def _maybe_write(path: Path, content: str, *, allow_overwrite: bool = True) -> N
 
 
 def _cfg_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+    return _orchestrator_cfg_dict(value)
 
 
 def _build_llm_client(
@@ -3078,45 +2925,15 @@ def _build_llm_client(
     role_disable_slash_commands: bool | None = None,
     role_timeout_seconds: float | None = None,
 ) -> LLMRawClient:
-    raw_provider = str(provider).strip().lower()
-    if raw_provider not in {"claude", "claude_cli", "claude_code"}:
-        raise ValueError(
-            "Unsupported provider. This orchestrator is configured for Claude Code only "
-            "(set `provider: claude_cli`)."
-        )
-
-    cli_cfg = _cfg_dict(agent_cfg.get("claude_cli"))
-    cli_binary = str(
-        cli_cfg.get(
-            "binary",
-            agent_cfg.get("claude_binary", os.getenv("CLAUDE_CODE_BIN", "claude")),
-        ),
-    ).strip() or "claude"
-    timeout_seconds = float(cli_cfg.get("timeout_seconds", agent_cfg.get("timeout_seconds", 180)))
-    if role_timeout_seconds is not None:
-        timeout_seconds = float(role_timeout_seconds)
-    retries = int(cli_cfg.get("retries", agent_cfg.get("retries", 2)))
-    retry_backoff_seconds = float(cli_cfg.get("retry_backoff_seconds", agent_cfg.get("retry_backoff_seconds", 1.5)))
-    disable_slash_commands_raw = cli_cfg.get("disable_slash_commands", agent_cfg.get("disable_slash_commands", True))
-    disable_slash_commands = bool(disable_slash_commands_raw)
-    if role_disable_slash_commands is not None:
-        disable_slash_commands = bool(role_disable_slash_commands)
-    workdir_raw = str(cli_cfg.get("workdir", "")).strip()
-    workdir = root if not workdir_raw else (Path(workdir_raw) if Path(workdir_raw).is_absolute() else (root / workdir_raw))
-    global_extra_args_raw = cli_cfg.get("extra_args", [])
-    global_extra_args = [str(v) for v in global_extra_args_raw] if isinstance(global_extra_args_raw, list) else []
-    extra_args = global_extra_args + (role_extra_args or [])
-
-    return ClaudeCodeCLIClient(
+    return _orchestrator_build_llm_client(
+        provider=provider,
         model=model,
-        cli_binary=cli_binary,
-        agent_name=role_agent_name,
-        timeout_seconds=timeout_seconds,
-        max_retries=retries,
-        retry_backoff_seconds=retry_backoff_seconds,
-        workdir=workdir,
-        extra_args=extra_args,
-        disable_slash_commands=disable_slash_commands,
+        agent_cfg=agent_cfg,
+        root=root,
+        role_agent_name=role_agent_name,
+        role_extra_args=role_extra_args,
+        role_disable_slash_commands=role_disable_slash_commands,
+        role_timeout_seconds=role_timeout_seconds,
     )
 
 
@@ -3127,44 +2944,12 @@ def _resolve_role_cfg(
     default_temperature: float,
     default_max_output_tokens: int,
 ) -> dict[str, Any]:
-    role_cfg = _cfg_dict(agent_cfg.get(role))
-    model = str(role_cfg.get("model", agent_cfg.get("model", ""))).strip()
-    if not model:
-        raise ValueError(f"agent config requires `{role}.model` (or legacy `model`)")
-
-    role_cli_cfg = _cfg_dict(role_cfg.get("claude_cli"))
-    role_extra_args_raw = role_cli_cfg.get("extra_args", [])
-    role_extra_args = [str(v) for v in role_extra_args_raw] if isinstance(role_extra_args_raw, list) else []
-    disable_slash_commands = role_cli_cfg.get("disable_slash_commands")
-    disable_slash_commands_out = (
-        bool(disable_slash_commands)
-        if isinstance(disable_slash_commands, bool)
-        else None
+    return _orchestrator_resolve_role_cfg(
+        agent_cfg=agent_cfg,
+        role=role,
+        default_temperature=default_temperature,
+        default_max_output_tokens=default_max_output_tokens,
     )
-
-    role_timeout_raw = role_cfg.get("timeout_seconds")
-    role_timeout_out = float(role_timeout_raw) if role_timeout_raw is not None else None
-    agent_name = str(role_cfg.get("agent_name", "")).strip() or None
-
-    return {
-        "agent_name": agent_name,
-        "model": model,
-        "temperature": float(
-            role_cfg.get(
-                "temperature",
-                agent_cfg.get("temperature", default_temperature),
-            ),
-        ),
-        "max_output_tokens": int(
-            role_cfg.get(
-                "max_output_tokens",
-                agent_cfg.get("max_output_tokens", default_max_output_tokens),
-            ),
-        ),
-        "extra_args": role_extra_args,
-        "disable_slash_commands": disable_slash_commands_out,
-        "timeout_seconds": role_timeout_out,
-    }
 
 
 def main() -> int:
@@ -3230,15 +3015,30 @@ def main() -> int:
         if split_plan["selection_split"] is not None
         else None
     )
-    session_filter = str(runtime_mission.get("session_filter", "eth")).lower()
-    feature_group = str(runtime_mission.get("feature_group", "all")).lower()
+    session_filter = normalize_session_filter(runtime_mission.get("session_filter", "eth"))
+    feature_group = normalize_feature_group(runtime_mission.get("feature_group", "all"))
+    mission_fingerprint = mission_state_fingerprint(runtime_mission)
 
     state_mode = _state_mode(fresh_state=bool(args.fresh_state))
-    shared_paths = ensure_shared_state(root, mission_name=mission_name)
+    shared_paths = ensure_shared_state(
+        root,
+        mission_name=mission_name,
+        mission_fingerprint=mission_fingerprint,
+    )
     orchestrator_state_file = (
-        reset_orchestrator_state(root, mission_name=mission_name, lane_id=lane_id)
+        reset_orchestrator_state(
+            root,
+            mission_name=mission_name,
+            mission_fingerprint=mission_fingerprint,
+            lane_id=lane_id,
+        )
         if state_mode == "fresh"
-        else ensure_orchestrator_state(root, mission_name=mission_name, lane_id=lane_id)
+        else ensure_orchestrator_state(
+            root,
+            mission_name=mission_name,
+            mission_fingerprint=mission_fingerprint,
+            lane_id=lane_id,
+        )
     )
     state_paths = {
         "queue": shared_paths["queue"],
@@ -3265,7 +3065,6 @@ def main() -> int:
     if max_iterations <= 0:
         raise ValueError("max_iterations must be > 0")
 
-    max_pending_tasks = int(runtime_cfg.get("max_pending_tasks", agent_cfg.get("max_pending_tasks", 25)))
     poll_seconds = int(
         args.poll_seconds
         if args.poll_seconds is not None
@@ -3287,11 +3086,6 @@ def main() -> int:
     stage_backoff_seconds = float(runtime_cfg.get("stage_backoff_seconds", 3.0))
     quota_backoff_seconds = float(runtime_cfg.get("quota_backoff_seconds", 20.0))
     max_backoff_seconds = float(runtime_cfg.get("max_backoff_seconds", 90.0))
-    if max_pending_tasks != 1:
-        print(
-            "Sequential mode active: "
-            f"runtime.max_pending_tasks={max_pending_tasks} is ignored (effective=1).",
-        )
 
     thinker_role = _resolve_role_cfg(
         agent_cfg=agent_cfg,

@@ -243,6 +243,15 @@ def test_build_autonomy_commands_disables_notebooklm_only_for_orchestrators():
     assert commands[2]["cmd"][-1] == "--disable-notebooklm"
 
 
+def test_build_autonomy_commands_omits_resume_for_fresh_state():
+    req = dashboard_main.AutonomyRunRequest(no_resume=True, lane_count=1)
+
+    commands = dashboard_main._build_autonomy_commands(req)
+
+    assert "--resume" not in commands[0]["cmd"]
+    assert "--resume" not in commands[1]["cmd"]
+
+
 def test_stop_run_uses_tree_termination_for_single_process(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):

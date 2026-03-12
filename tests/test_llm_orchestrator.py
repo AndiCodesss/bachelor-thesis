@@ -366,6 +366,64 @@ def test_task_id_is_stable_for_same_inputs():
     assert t1 == t2
 
 
+def test_task_id_differs_by_execution_context():
+    mod = _load_module()
+    params = {"a": 1}
+    base = mod._task_id(
+        "alpha_x",
+        "tick_610",
+        params,
+        "abcd1234",
+        search_split="train",
+        selection_split="validate",
+        session_filter="eth",
+        feature_group="all",
+    )
+    other_arm = mod._task_id(
+        "alpha_x",
+        "tick_610",
+        params,
+        "abcd1234",
+        search_split="train",
+        selection_split="validate",
+        session_filter="eth",
+        feature_group="ohlcv",
+    )
+    other_session = mod._task_id(
+        "alpha_x",
+        "tick_610",
+        params,
+        "abcd1234",
+        search_split="train",
+        selection_split="validate",
+        session_filter="rth",
+        feature_group="all",
+    )
+    assert base != other_arm
+    assert base != other_session
+
+
+def test_build_task_persists_runtime_context():
+    mod = _load_module()
+    task = mod._build_task(
+        strategy_name="alpha_x",
+        search_split="train",
+        selection_split="validate",
+        bar_config="tick_610",
+        params={"lookback": 5},
+        mission={"session_filter": "eth", "feature_group": "ohlcv"},
+        code_hash="abcd1234",
+        iteration=1,
+        hypothesis_id="hyp_1",
+        theme_tag="reversion",
+        research_brief={},
+        setup_key="setup_1",
+        setup_label="setup 1",
+    )
+    assert task["session_filter"] == "eth"
+    assert task["feature_group"] == "ohlcv"
+
+
 def test_extract_retry_after_seconds():
     mod = _load_module()
     assert mod._extract_retry_after_seconds("Please retry in 18.817401823s.") == 18.817401823

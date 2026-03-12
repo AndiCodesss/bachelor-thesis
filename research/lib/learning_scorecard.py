@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 from typing import Any
 
 from research.lib.coordination import read_json_file_if_exists, update_json_file
+from research.lib.script_support import utc_now_iso
 from research.lib.setup_key import task_setup_identity
 
 SCHEMA_VERSION = "1.0"
 OTHER_THEME_TAG = "other"
 LOW_SAMPLE_ATTEMPTS = 3
 NEAR_MISS_LIMIT = 10
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def laplace_rate(passes: int, attempts: int) -> float:
     """Laplace-smoothed success rate: (passes + 1) / (attempts + 2)."""
@@ -650,7 +645,7 @@ def _apply_task_update(scorecard: dict[str, Any], task: dict[str, Any]) -> None:
         }
     )
     setup_entry["recent_outcomes"] = recent[-5:]
-    setup_entry["updated_at"] = str(task.get("completed_at") or _utc_now())
+    setup_entry["updated_at"] = str(task.get("completed_at") or utc_now_iso())
     _refresh_setup_entry(setup_entry)
     _refresh_theme_entry(theme_entry)
 
@@ -751,7 +746,7 @@ def _finalize_scorecard(scorecard: dict[str, Any]) -> dict[str, Any]:
     )
     scorecard["low_sample_themes"] = _compute_low_sample_themes(theme_stats)
     scorecard["schema_version"] = SCHEMA_VERSION
-    scorecard["rebuilt_at"] = _utc_now()
+    scorecard["rebuilt_at"] = utc_now_iso()
     return scorecard
 
 

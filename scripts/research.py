@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
-import inspect
 import json
 from pathlib import Path
 import re
@@ -19,7 +18,6 @@ from typing import Any, Callable
 
 import numpy as np
 import polars as pl
-import yaml
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -38,7 +36,17 @@ from research.lib.learning_scorecard import (
     rebuild_learning_scorecard,
     update_learning_scorecard,
 )
-from research.lib.mission_splits import ALLOWED_RESEARCH_SPLITS, resolve_research_splits
+from research.lib.script_support import (
+    load_yaml_dict as _load_yaml,
+    mission_state_fingerprint,
+    normalize_feature_group,
+    normalize_session_filter,
+    parse_bar_config as _parse_bar_config,
+    state_mode as _state_mode,
+    utc_now_iso as _utc_now,
+    validate_signal_array as _validate_signal_array,
+)
+from research.lib.mission_splits import resolve_research_splits
 from research.lib.coordination import (
     claim_task,
     complete_task,
@@ -57,6 +65,21 @@ from research.lib.runtime_state import (
 )
 from research.lib.setup_key import task_setup_identity
 from research.lib.trial_counter import estimate_effective_trials
+from research.lib.validator_execution import (
+    ValidatorExecutionDeps,
+    as_float as _validator_as_float,
+    as_int as _validator_as_int,
+    daily_net_pnl_series as _validator_daily_net_pnl_series,
+    empty_signal_frame as _validator_empty_signal_frame,
+    evaluate_advanced_validation_gates as _validator_evaluate_advanced_validation_gates,
+    evaluate_strategy_split as _validator_evaluate_strategy_split,
+    execute_claimed_task as _validator_execute_claimed_task,
+    invoke_strategy_callable as _validator_invoke_strategy_callable,
+    resolve_strategy_callable as _validator_resolve_strategy_callable,
+    selection_gate_config as _validator_selection_gate_config,
+    task_backtest_params as _validator_task_backtest_params,
+    task_split_plan as _validator_task_split_plan,
+)
 from research.signals import (
     CAUSALITY_MIN_PREFIX_BARS,
     check_signal_causality,
@@ -79,18 +102,12 @@ from src.framework.api import (
     set_execution_mode,
 )
 from src.framework.backtest.engine import TRADE_SCHEMA
-from src.framework.backtest.metrics import compute_daily_pnl_series
 from src.framework.data.constants import RESULTS_DIR
 from src.framework.security.framework_lock import verify_manifest
 
 _CAUSALITY_MIN_ROWS = CAUSALITY_MIN_PREFIX_BARS + 1
 _DEFAULT_QUEUE_TERMINAL_KEEP = 2000
 _MIN_QUEUE_TERMINAL_KEEP = 200
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def _slug(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", s).strip("-").lower() or "mission"
@@ -99,19 +116,6 @@ def _slug(s: str) -> str:
 def _run_id(mission_name: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return f"run_{ts}_{_slug(mission_name)}"
-
-
-def _load_yaml(path: Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        payload = yaml.safe_load(f)
-    if not isinstance(payload, dict):
-        raise ValueError(f"Mission file must be a YAML object: {path}")
-    return payload
-
-
-def _state_mode(*, fresh_state: bool) -> str:
-    return "fresh" if fresh_state else "resume"
-
 
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -308,65 +312,14 @@ def _pending_validation_task_ids(
 
 
 def _daily_net_pnl_series(trades: pl.DataFrame) -> np.ndarray:
-    """Daily net PnL series used for DSR diagnostics."""
-    if len(trades) == 0:
-        return np.array([], dtype=np.float64)
-    cost_col = "adaptive_cost_rt" if "adaptive_cost_rt" in trades.columns else None
-    daily = compute_daily_pnl_series(trades, cost_override_col=cost_col)
-    return daily["net_pnl"].to_numpy().astype(np.float64)
+    return _validator_daily_net_pnl_series(trades)
 
 
 def _evaluate_advanced_validation_gates(
     mission: dict[str, Any],
     advanced_validation: dict[str, Any],
 ) -> dict[str, Any]:
-    cfg = mission.get("advanced_validation")
-    if not isinstance(cfg, dict):
-        return {"enabled": False, "passed": True, "checks": {}}
-
-    checks: dict[str, Any] = {}
-
-    min_dsr = cfg.get("min_dsr_probability")
-    if min_dsr is not None:
-        payload = advanced_validation.get("deflated_sharpe")
-        available = isinstance(payload, dict) and bool(payload.get("available", False))
-        value = float(payload.get("dsr", 0.0)) if available and isinstance(payload, dict) else 0.0
-        checks["min_dsr_probability"] = {
-            "passed": available and value >= float(min_dsr),
-            "available": available,
-            "value": value,
-            "min_required": float(min_dsr),
-        }
-
-    allowed_decay = cfg.get("allowed_alpha_decay_verdicts")
-    if isinstance(allowed_decay, list):
-        payload = advanced_validation.get("alpha_decay")
-        verdict = str(payload.get("verdict", "")).strip() if isinstance(payload, dict) else ""
-        allowed = [str(v).strip() for v in allowed_decay if str(v).strip()]
-        checks["alpha_decay_verdict"] = {
-            "passed": verdict in allowed,
-            "available": bool(verdict),
-            "value": verdict,
-            "allowed": allowed,
-        }
-
-    allowed_factor = cfg.get("allowed_factor_verdicts")
-    if isinstance(allowed_factor, list):
-        payload = advanced_validation.get("factor_attribution")
-        verdict = str(payload.get("verdict", "")).strip() if isinstance(payload, dict) else ""
-        allowed = [str(v).strip() for v in allowed_factor if str(v).strip()]
-        checks["factor_verdict"] = {
-            "passed": verdict in allowed,
-            "available": bool(verdict),
-            "value": verdict,
-            "allowed": allowed,
-        }
-
-    return {
-        "enabled": bool(checks),
-        "passed": all(bool(check.get("passed", False)) for check in checks.values()) if checks else True,
-        "checks": checks,
-    }
+    return _validator_evaluate_advanced_validation_gates(mission, advanced_validation)
 
 
 def _task_feedback_summary(task: dict[str, Any]) -> dict[str, Any]:
@@ -637,73 +590,14 @@ def _read_persisted_task_row(
 
 
 def _as_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)
+    return _validator_as_int(value, default)
 
 
 def _as_float(value: Any, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float(default)
-
-
-def _parse_bar_config(bar_config: str) -> dict[str, Any]:
-    raw = str(bar_config).strip().lower()
-    if raw.startswith("tick_"):
-        return {
-            "bar_type": "tick",
-            "bar_size": "5m",
-            "bar_threshold": int(raw.split("_", 1)[1]),
-        }
-    if raw.startswith("volume_"):
-        return {
-            "bar_type": "volume",
-            "bar_size": "5m",
-            "bar_threshold": int(raw.split("_", 1)[1]),
-        }
-    if raw.startswith("vol_"):
-        return {
-            "bar_type": "volume",
-            "bar_size": "5m",
-            "bar_threshold": int(raw.split("_", 1)[1]),
-        }
-    if raw.startswith("time_"):
-        return {
-            "bar_type": "time",
-            "bar_size": raw.split("_", 1)[1],
-            "bar_threshold": None,
-        }
-    raise ValueError(f"Unsupported bar_config '{bar_config}'")
-
+    return _validator_as_float(value, default)
 
 def _empty_signal_frame() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "ts_event": pl.Series([], dtype=pl.Datetime("ns", "UTC")),
-            "close": pl.Series([], dtype=pl.Float64),
-            "signal": pl.Series([], dtype=pl.Int8),
-        }
-    )
-
-
-def _validate_signal_array(signal: np.ndarray, expected_len: int) -> list[str]:
-    errors: list[str] = []
-    if signal.ndim != 1:
-        errors.append(f"signal must be 1D, got ndim={signal.ndim}")
-        return errors
-    if len(signal) != expected_len:
-        errors.append(f"signal length {len(signal)} != expected {expected_len}")
-        return errors
-    if np.isnan(signal).any():
-        errors.append("signal contains NaN")
-    uniq = set(np.unique(signal).tolist())
-    if not uniq.issubset({-1, 0, 1}):
-        errors.append(f"signal contains invalid values: {sorted(uniq)}")
-    return errors
-
+    return _validator_empty_signal_frame()
 
 def _resolve_strategy_callable(
     *,
@@ -711,29 +605,11 @@ def _resolve_strategy_callable(
     strategy_name: str,
     strategy_module: Any,
 ) -> tuple[Callable[..., Any], bool]:
-    strategy_fn = getattr(strategy_module, "generate_signal", None)
-    if not callable(strategy_fn):
-        strategy_fn = getattr(strategy_module, "signal", None)
-    if not callable(strategy_fn):
-        raise ValueError(
-            f"{task_id}: strategy '{strategy_name}' has no callable "
-            "generate_signal(df, params[, model_state]) or signal(...)",
-        )
-
-    sig = inspect.signature(strategy_fn)
-    params = list(sig.parameters.values())
-    positional = [
-        p for p in params
-        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
-    if len(positional) < 2 and not has_varargs:
-        raise ValueError(
-            f"{task_id}: strategy '{strategy_name}' must accept at least "
-            "df and params positional arguments",
-        )
-    accepts_state = len(positional) >= 3 or has_varargs
-    return strategy_fn, accepts_state
+    return _validator_resolve_strategy_callable(
+        task_id=task_id,
+        strategy_name=strategy_name,
+        strategy_module=strategy_module,
+    )
 
 
 def _invoke_strategy_callable(
@@ -744,9 +620,13 @@ def _invoke_strategy_callable(
     accepts_state: bool,
     model_state: Any | None,
 ) -> np.ndarray:
-    if accepts_state:
-        return np.asarray(strategy_fn(strategy_df, params, model_state))
-    return np.asarray(strategy_fn(strategy_df, params))
+    return _validator_invoke_strategy_callable(
+        strategy_fn=strategy_fn,
+        strategy_df=strategy_df,
+        params=params,
+        accepts_state=accepts_state,
+        model_state=model_state,
+    )
 
 
 def _task_bootstrap_key(
@@ -756,11 +636,16 @@ def _task_bootstrap_key(
     bar_config: str,
     params: dict[str, Any],
     selection_split: str | None = None,
+    session_filter: str = "",
+    feature_group: str = "",
 ) -> str:
     params_obj = params if isinstance(params, dict) else {}
     params_blob = json.dumps(params_obj, sort_keys=True, separators=(",", ":"), default=str)
     sel = str(selection_split).strip().lower() if selection_split is not None else ""
-    return f"{strategy_name}|{split}|{sel}|{bar_config}|{params_blob}"
+    return (
+        f"{strategy_name}|{split}|{sel}|{bar_config}|"
+        f"{str(session_filter).strip().lower()}|{str(feature_group).strip().lower()}|{params_blob}"
+    )
 
 
 def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
@@ -817,6 +702,8 @@ def _bootstrap_tasks_if_empty(
         if split_plan["selection_split"] is not None
         else None
     )
+    session_filter = normalize_session_filter(mission.get("session_filter", "eth"))
+    feature_group = normalize_feature_group(mission.get("feature_group", "all"))
 
     max_retries = _as_int(mission.get("max_retries"), 2)
     timeout_minutes = _as_int(mission.get("task_timeout_minutes"), 30)
@@ -845,6 +732,8 @@ def _bootstrap_tasks_if_empty(
                     if t.get("selection_split") is not None
                     else None
                 ),
+                session_filter=str(t.get("session_filter", session_filter)),
+                feature_group=str(t.get("feature_group", feature_group)),
             )
             for t in tasks
         }
@@ -871,6 +760,8 @@ def _bootstrap_tasks_if_empty(
                     bar_config=bar_cfg,
                     params=default_params,
                     selection_split=selection_split,
+                    session_filter=session_filter,
+                    feature_group=feature_group,
                 )
                 if task_key in existing_task_keys:
                     continue
@@ -885,6 +776,8 @@ def _bootstrap_tasks_if_empty(
                     "search_split": search_split,
                     "selection_split": selection_split,
                     "bar_config": bar_cfg,
+                    "session_filter": session_filter,
+                    "feature_group": feature_group,
                     "params": dict(default_params),
                     "priority": serial,
                     "retries": 0,
@@ -917,51 +810,24 @@ def _bootstrap_tasks_if_empty(
 
 
 def _task_backtest_params(task: dict[str, Any], mission: dict[str, Any]) -> dict[str, Any]:
-    mission_bt = mission.get("backtest", {})
-    if not isinstance(mission_bt, dict):
-        mission_bt = {}
+    return _validator_task_backtest_params(task, mission)
 
-    exit_bars_raw = task.get("exit_bars", mission_bt.get("exit_bars"))
-    profit_target_raw = task.get("profit_target", mission_bt.get("profit_target"))
-    stop_loss_raw = task.get("stop_loss", mission_bt.get("stop_loss"))
 
+def _task_runtime_context(task: dict[str, Any], mission: dict[str, Any]) -> dict[str, str]:
     return {
-        "entry_on_next_open": bool(task.get("entry_on_next_open", mission_bt.get("entry_on_next_open", True))),
-        "max_daily_loss": _as_float(task.get("max_daily_loss", mission_bt.get("max_daily_loss", 1000.0)), 1000.0),
-        "exit_bars": int(exit_bars_raw) if exit_bars_raw is not None else None,
-        "profit_target": float(profit_target_raw) if profit_target_raw is not None else None,
-        "stop_loss": float(stop_loss_raw) if stop_loss_raw is not None else None,
+        "session_filter": normalize_session_filter(
+            task.get("session_filter", mission.get("session_filter", "eth")),
+            default="eth",
+        ),
+        "feature_group": normalize_feature_group(
+            task.get("feature_group", mission.get("feature_group", "all")),
+            default="all",
+        ),
     }
 
 
 def _task_split_plan(task: dict[str, Any], mission: dict[str, Any]) -> dict[str, str | None]:
-    plan = resolve_research_splits(mission)
-    search_split = str(task.get("search_split") or task.get("split") or plan["search_split"]).strip().lower()
-    if search_split not in ALLOWED_RESEARCH_SPLITS:
-        allowed = ", ".join(sorted(ALLOWED_RESEARCH_SPLITS))
-        raise ValueError(f"unsupported split '{search_split}'. Allowed: {allowed}")
-
-    selection_raw = task.get("selection_split", plan["selection_split"])
-    selection_split = str(selection_raw).strip().lower() if selection_raw is not None else None
-    if selection_split:
-        if selection_split not in ALLOWED_RESEARCH_SPLITS:
-            allowed = ", ".join(sorted(ALLOWED_RESEARCH_SPLITS))
-            raise ValueError(f"unsupported selection split '{selection_split}'. Allowed: {allowed}")
-        if selection_split == search_split:
-            # Resume compatibility: legacy queued tasks may only carry `split`.
-            if task.get("selection_split") is None and task.get("split") is not None:
-                selection_split = None
-            else:
-                raise ValueError("selection_split must differ from search_split")
-    else:
-        selection_split = None
-
-    return {
-        "search_split": search_split,
-        "selection_split": selection_split,
-        "feedback_split": search_split,
-        "promotion_split": plan["promotion_split"],
-    }
+    return _validator_task_split_plan(task, mission)
 
 
 def _selection_gate_config(
@@ -969,14 +835,45 @@ def _selection_gate_config(
     *,
     base_run_gauntlet: bool,
 ) -> dict[str, Any]:
-    cfg = mission.get("selection_gate")
-    if not isinstance(cfg, dict):
-        cfg = {}
-    return {
-        "target_sharpe": float(cfg.get("target_sharpe", mission.get("target_sharpe", 0.0))),
-        "min_trade_count": int(cfg.get("min_trade_count", mission.get("min_trade_count", 1))),
-        "run_gauntlet": bool(cfg.get("require_gauntlet", base_run_gauntlet)),
-    }
+    return _validator_selection_gate_config(
+        mission,
+        base_run_gauntlet=base_run_gauntlet,
+    )
+
+
+def _validator_execution_deps() -> ValidatorExecutionDeps:
+    return ValidatorExecutionDeps(
+        atomic_json_write=atomic_json_write,
+        check_signal_causality=check_signal_causality,
+        compute_adaptive_costs=compute_adaptive_costs,
+        compute_event_id=compute_event_id,
+        compute_metrics=compute_metrics,
+        compute_strategy_id=compute_strategy_id,
+        deflated_sharpe_ratio=deflated_sharpe_ratio,
+        estimate_effective_trials=estimate_effective_trials,
+        factor_attribution=factor_attribution,
+        filter_strategy_inputs=filter_strategy_inputs,
+        fit_alpha_decay=fit_alpha_decay,
+        get_split_files=get_split_files,
+        load_cached_matrix=load_cached_matrix,
+        load_signal_module=load_signal_module,
+        log_experiment=log_experiment,
+        normalize_feature_group=normalize_feature_group,
+        normalize_edge_surface_config=normalize_edge_surface_config,
+        normalize_session_filter=normalize_session_filter,
+        parse_bar_config=_parse_bar_config,
+        run_backtest=run_backtest,
+        run_edge_surface=run_edge_surface,
+        run_validation_gauntlet=run_validation_gauntlet,
+        sha256_file=_sha256_file,
+        task_setup_identity=task_setup_identity,
+        validate_signal_array=_validate_signal_array,
+        write_candidate=write_candidate,
+        causality_min_prefix_bars=CAUSALITY_MIN_PREFIX_BARS,
+        causality_min_rows=_CAUSALITY_MIN_ROWS,
+        edge_surface_analysis_columns=EDGE_SURFACE_ANALYSIS_COLUMNS,
+        trade_schema=TRADE_SCHEMA,
+    )
 
 
 def _evaluate_strategy_split(
@@ -1001,222 +898,28 @@ def _evaluate_strategy_split(
     task_dir: Path,
     edge_surface_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    files = get_split_files(split)
-    if max_files is not None:
-        files = files[: int(max_files)]
-    if not files:
-        raise ValueError(f"{task_id}: no data files for split={split}")
-
-    split_dir = task_dir / split_label
-    split_dir.mkdir(parents=True, exist_ok=True)
-
-    all_signals: list[pl.DataFrame] = []
-    all_bars: list[pl.DataFrame] = []
-    execution_frames: list[pl.DataFrame] = []
-    analysis_frames: list[pl.DataFrame] = []
-    bars_processed = 0
-    signal_count = 0
-    causality_checked = False
-    causality_frames: list[pl.DataFrame] = []
-    causality_row_count = 0
-    strategy_state: Any | None = {} if strategy_accepts_state else None
-
-    for file_path in files:
-        full_df = load_cached_matrix(
-            file_path,
-            bar_size=parsed_bar["bar_size"],
-            bar_type=parsed_bar["bar_type"],
-            bar_threshold=parsed_bar["bar_threshold"],
-            include_bar_columns=True,
-            session_filter=session_filter,
-        )
-        if len(full_df) == 0:
-            continue
-
-        strategy_df = filter_strategy_inputs(full_df, feature_group)
-
-        if not causality_checked:
-            causality_frames.append(strategy_df)
-            causality_row_count += len(strategy_df)
-            if causality_row_count >= _CAUSALITY_MIN_ROWS:
-                causality_df = pl.concat(causality_frames).sort("ts_event")
-                causality_errors = check_signal_causality(
-                    generate_fn=strategy_fn,
-                    df=causality_df,
-                    params=params,
-                    accepts_state=strategy_accepts_state,
-                    model_state={} if strategy_accepts_state else None,
-                    mode="strict",
-                    min_prefix_bars=CAUSALITY_MIN_PREFIX_BARS,
-                )
-                if causality_errors:
-                    raise ValueError(
-                        f"{task_id}: signal causality failed on {split_label} split: {causality_errors}",
-                    )
-                causality_checked = True
-                causality_frames.clear()
-
-        raw_signal = _invoke_strategy_callable(
-            strategy_fn=strategy_fn,
-            strategy_df=strategy_df,
-            params=params,
-            accepts_state=strategy_accepts_state,
-            model_state=strategy_state,
-        )
-        signal_errors = _validate_signal_array(raw_signal, len(strategy_df))
-        if signal_errors:
-            raise ValueError(f"{task_id}: signal contract failed on {split_label} split: {signal_errors}")
-
-        signal_i8 = raw_signal.astype(np.int8, copy=False)
-        bars_with_signal = full_df.with_columns(pl.Series("signal", signal_i8).cast(pl.Int8))
-        bars_processed += len(bars_with_signal)
-        signal_count += int((bars_with_signal["signal"] != 0).sum())
-
-        signal_cols = ["ts_event", "close", "signal"]
-        for col in ("open", "high", "low", "volume", "bid_price", "ask_price"):
-            if col in bars_with_signal.columns:
-                signal_cols.append(col)
-        all_signals.append(bars_with_signal.select(signal_cols))
-
-        analysis_cols = [col for col in EDGE_SURFACE_ANALYSIS_COLUMNS if col in bars_with_signal.columns]
-        analysis_frames.append(bars_with_signal.select(analysis_cols))
-
-        eval_bar_cols = [
-            col for col in ("ts_event", "open", "high", "low", "close", "volume", "bid_price", "ask_price", "signal")
-            if col in bars_with_signal.columns
-        ]
-        execution_frame = bars_with_signal.select(eval_bar_cols)
-        execution_frames.append(execution_frame)
-        all_bars.append(execution_frame.drop("signal"))
-
-    if causality_row_count > 0 and not causality_checked:
-        raise ValueError(
-            f"{task_id}: signal causality check on {split_label} split requires at least "
-            f"{_CAUSALITY_MIN_ROWS} bars, got {causality_row_count}",
-        )
-
-    signals_df = pl.concat(all_signals).sort("ts_event") if all_signals else _empty_signal_frame()
-    bars_df = pl.concat(all_bars).sort("ts_event") if all_bars else pl.DataFrame()
-    edge_surface_summary = (
-        run_edge_surface(
-            analysis_frames=analysis_frames,
-            entry_on_next_open=bool(bt_kwargs.get("entry_on_next_open", False)),
-            config=edge_surface_config,
-        )
-        if split_label == "search"
-        else {
-            "enabled": False,
-            "passed": True,
-            "status": "selection_skip",
-            "has_localized_edge": False,
-            "global_probe": {},
-            "by_side": {},
-            "conditional_slices": {},
-            "best_pockets": [],
-            "omitted_families": [],
-        }
+    return _validator_evaluate_strategy_split(
+        deps=_validator_execution_deps(),
+        task_id=task_id,
+        split_label=split_label,
+        split=split,
+        bar_config=bar_config,
+        parsed_bar=parsed_bar,
+        strategy_fn=strategy_fn,
+        strategy_accepts_state=strategy_accepts_state,
+        params=params,
+        session_filter=session_filter,
+        feature_group=feature_group,
+        bt_kwargs=bt_kwargs,
+        target_sharpe=target_sharpe,
+        min_trade_count=min_trade_count,
+        run_gauntlet=run_gauntlet,
+        max_files=max_files,
+        mission=mission,
+        experiments_path=experiments_path,
+        task_dir=task_dir,
+        edge_surface_config=edge_surface_config,
     )
-
-    trades_df = pl.DataFrame(schema=TRADE_SCHEMA)
-    if bool(edge_surface_summary.get("passed", True)):
-        all_trades: list[pl.DataFrame] = []
-        for frame in execution_frames:
-            trades = run_backtest(frame, signal_col="signal", **bt_kwargs)
-            if len(trades) > 0:
-                trades = compute_adaptive_costs(trades, frame)
-                all_trades.append(trades)
-        if all_trades:
-            trades_df = pl.concat(all_trades)
-
-    metrics = compute_metrics(
-        trades_df,
-        cost_override_col="adaptive_cost_rt" if "adaptive_cost_rt" in trades_df.columns else None,
-    )
-
-    gauntlet: dict[str, Any] | None = None
-    if (
-        bool(edge_surface_summary.get("passed", True))
-        and run_gauntlet
-        and len(signals_df) > 0
-        and signal_count > 0
-    ):
-        gauntlet = run_validation_gauntlet(
-            signals_df,
-            signal_col="signal",
-            min_trades=int(min_trade_count),
-            **bt_kwargs,
-        )
-
-    advanced_validation: dict[str, Any] = {}
-    if bool(edge_surface_summary.get("passed", True)) and len(trades_df) > 0:
-        trial_stats = deflated_sharpe_ratio(
-            _daily_net_pnl_series(trades_df),
-            n_trials=max(1, int(estimate_effective_trials(experiments_path).get("effective_trials", 1))),
-        )
-        advanced_validation["deflated_sharpe"] = trial_stats
-        advanced_validation["alpha_decay"] = fit_alpha_decay(trades_df)
-        if len(bars_df) > 0:
-            advanced_validation["factor_attribution"] = factor_attribution(trades_df, bars_df)
-    advanced_validation_gates = _evaluate_advanced_validation_gates(mission, advanced_validation)
-
-    meets_metric_thresholds = (
-        metrics["sharpe_ratio"] >= float(target_sharpe)
-        and metrics["trade_count"] >= int(min_trade_count)
-    )
-    meets_advanced_gates = bool(advanced_validation_gates.get("passed", True))
-
-    verdict = "FAIL"
-    failure_code: str | None = None
-    if not bool(edge_surface_summary.get("passed", True)):
-        failure_code = str(edge_surface_summary.get("status", "no_edge"))
-    elif run_gauntlet:
-        if gauntlet and gauntlet.get("overall_verdict") == "PASS" and meets_metric_thresholds and meets_advanced_gates:
-            verdict = "PASS"
-    elif meets_metric_thresholds and meets_advanced_gates:
-        verdict = "PASS"
-
-    summary = {
-        "split_label": split_label,
-        "split": split,
-        "bars_processed": bars_processed,
-        "signal_count": signal_count,
-        "target_sharpe": float(target_sharpe),
-        "min_trade_count": int(min_trade_count),
-        "run_gauntlet": bool(run_gauntlet),
-        "edge_surface": edge_surface_summary,
-        "metrics": metrics,
-        "gauntlet": gauntlet,
-        "advanced_validation": advanced_validation,
-        "advanced_validation_gates": advanced_validation_gates,
-        "verdict": verdict,
-    }
-    if failure_code:
-        summary["failure_code"] = failure_code
-    summary_path = split_dir / "summary.json"
-    signals_path = split_dir / "signals.parquet"
-    trades_path = split_dir / "trades.parquet"
-    atomic_json_write(summary_path, summary)
-    signals_df.write_parquet(signals_path)
-    trades_df.write_parquet(trades_path)
-
-    artifacts = {
-        "summary": str(summary_path),
-        "signals": str(signals_path),
-        "trades": str(trades_path),
-    }
-    if edge_surface_summary.get("enabled", False):
-        edge_surface_path = split_dir / "edge_surface.json"
-        atomic_json_write(edge_surface_path, edge_surface_summary)
-        artifacts["edge_surface"] = str(edge_surface_path)
-    if gauntlet is not None:
-        gauntlet_path = split_dir / "gauntlet.json"
-        atomic_json_write(gauntlet_path, gauntlet)
-        artifacts["gauntlet"] = str(gauntlet_path)
-
-    return {
-        **summary,
-        "artifacts": artifacts,
-    }
 
 
 def _execute_claimed_task(
@@ -1230,258 +933,17 @@ def _execute_claimed_task(
     experiments_path: Path,
     experiments_lock: Path,
 ) -> tuple[str, dict[str, Any]]:
-    task_id = str(task.get("task_id", "")).strip()
-    strategy_name = str(task.get("strategy_name", "")).strip()
-    bar_config = str(task.get("bar_config", "volume_2000"))
-    params = task.get("params", {})
-    if not isinstance(params, dict):
-        raise ValueError(f"{task_id}: params must be an object")
-    if not task_id:
-        raise ValueError("task_id is required")
-    if not strategy_name:
-        raise ValueError(f"{task_id}: strategy_name is required")
-
-    split_plan = _task_split_plan(task, mission)
-    search_split = str(split_plan["search_split"])
-    selection_split = (
-        str(split_plan["selection_split"])
-        if split_plan["selection_split"] is not None
-        else None
-    )
-
-    # Session filter from mission config (default: eth for extended hours)
-    session_filter = str(mission.get("session_filter", "eth")).lower()
-
-    parsed_bar = _parse_bar_config(bar_config)
-    strategy_module = load_signal_module(strategy_name)
-    strategy_fn, strategy_accepts_state = _resolve_strategy_callable(
-        task_id=task_id,
-        strategy_name=strategy_name,
-        strategy_module=strategy_module,
-    )
-    theme_tag = str(task.get("theme_tag", "")).strip() or "other"
-    setup_key, setup_label = task_setup_identity(task)
-
-    strategy_id = compute_strategy_id(
-        strategy_name, params, strategy_fn,
-        bar_config=bar_config, session_filter=session_filter,
-    )
-    bt_kwargs = _task_backtest_params(task, mission)
-    run_gauntlet = bool(task.get("run_gauntlet", mission.get("run_gauntlet", True)))
-    write_candidate_flag = bool(task.get("write_candidate", mission.get("write_candidates", True)))
-    max_files = task.get("max_files", mission.get("max_files_per_task"))
-    max_files = int(max_files) if max_files is not None else None
-    edge_surface_config = normalize_edge_surface_config(mission.get("edge_surface"))
-
-    # A/B experiment: restrict features visible to the strategy
-    feature_group = str(mission.get("feature_group", "all")).lower()
-
-    task_dir = run_dir / "tasks" / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
-
-    search_result = _evaluate_strategy_split(
-        task_id=task_id,
-        split_label="search",
-        split=search_split,
-        bar_config=bar_config,
-        parsed_bar=parsed_bar,
-        strategy_fn=strategy_fn,
-        strategy_accepts_state=strategy_accepts_state,
-        params=params,
-        session_filter=session_filter,
-        feature_group=feature_group,
-        bt_kwargs=bt_kwargs,
-        target_sharpe=float(mission.get("target_sharpe", 0.0)),
-        min_trade_count=int(mission.get("min_trade_count", 1)),
-        run_gauntlet=run_gauntlet,
-        max_files=max_files,
+    return _validator_execute_claimed_task(
+        deps=_validator_execution_deps(),
+        task=task,
         mission=mission,
-        experiments_path=experiments_path,
-        task_dir=task_dir,
-        edge_surface_config=edge_surface_config,
-    )
-
-    selection_result: dict[str, Any] | None = None
-    if search_result["verdict"] == "PASS" and selection_split is not None:
-        selection_gate = _selection_gate_config(
-            mission,
-            base_run_gauntlet=run_gauntlet,
-        )
-        selection_result = _evaluate_strategy_split(
-            task_id=task_id,
-            split_label="selection",
-            split=selection_split,
-            bar_config=bar_config,
-            parsed_bar=parsed_bar,
-            strategy_fn=strategy_fn,
-            strategy_accepts_state=strategy_accepts_state,
-            params=params,
-            session_filter=session_filter,
-            feature_group=feature_group,
-            bt_kwargs=bt_kwargs,
-            target_sharpe=float(selection_gate["target_sharpe"]),
-            min_trade_count=int(selection_gate["min_trade_count"]),
-            run_gauntlet=bool(selection_gate["run_gauntlet"]),
-            max_files=max_files,
-            mission=mission,
-            experiments_path=experiments_path,
-            task_dir=task_dir,
-        )
-
-    final_verdict = "FAIL"
-    if search_result["verdict"] == "PASS":
-        if selection_result is None or selection_result["verdict"] == "PASS":
-            final_verdict = "PASS"
-
-    candidate_status = "rejected_search"
-    if search_result["verdict"] == "PASS":
-        if selection_split is None:
-            candidate_status = "selected"
-        elif selection_result is None:
-            candidate_status = "selection_not_run"
-        elif selection_result["verdict"] == "PASS":
-            candidate_status = "selected"
-        else:
-            candidate_status = "rejected_selection"
-
-    summary = {
-        "task_id": task_id,
-        "run_id": run_id,
-        "strategy_name": strategy_name,
-        "strategy_id": strategy_id,
-        "search_split": search_split,
-        "selection_split": selection_split,
-        "feedback_split": search_split,
-        "feature_group": feature_group,
-        "theme_tag": theme_tag,
-        "setup_key": setup_key,
-        "setup_label": setup_label,
-        "bar_config": bar_config,
-        "bar_params": parsed_bar,
-        "params": params,
-        "backtest": bt_kwargs,
-        "search_result": search_result,
-        "selection_result": selection_result,
-        "final_verdict": final_verdict,
-        "candidate_status": candidate_status,
-    }
-    summary_path = task_dir / "summary.json"
-    atomic_json_write(summary_path, summary)
-
-    candidate_path: str | None = None
-    candidate_result = selection_result or search_result
-    if final_verdict == "PASS" and write_candidate_flag:
-        signal_file = Path(strategy_module.__file__).resolve()
-        candidate_payload = {
-            "strategy_id": strategy_id,
-            "strategy_name": strategy_name,
-            "version": str(getattr(strategy_module, "STRATEGY_METADATA", {}).get("version", "1.0")),
-            "bar_config": bar_config,
-            "session_filter": session_filter,
-            "feature_group": feature_group,
-            "backtest": bt_kwargs,
-            "parameters": params,
-            "setup_key": setup_key,
-            "setup_label": setup_label,
-            "search_split": search_split,
-            "selection_split": selection_split,
-            "validation_metrics": candidate_result["metrics"],
-            "gauntlet_results": candidate_result.get("gauntlet") or {},
-            "edge_surface": search_result.get("edge_surface") or {},
-            "advanced_validation": candidate_result.get("advanced_validation") or {},
-            "advanced_validation_gates": candidate_result.get("advanced_validation_gates") or {},
-            "search_result": search_result,
-            "selection_result": selection_result,
-            "artifacts": {
-                "signal_file": str(signal_file),
-                "signal_file_hash": _sha256_file(signal_file),
-                "task_summary": str(summary_path),
-                "search": dict(search_result["artifacts"]),
-            },
-            "provenance": {
-                "run_id": run_id,
-                "git_commit": git_commit,
-                "framework_lock_hash": framework_lock_hash,
-            },
-        }
-        if selection_result is not None:
-            candidate_payload["artifacts"]["selection"] = dict(selection_result["artifacts"])
-        candidate_out = write_candidate(agent_name="validator", candidate_data=candidate_payload)
-        candidate_path = str(candidate_out)
-        candidate_status = "candidate_written"
-
-    summary["candidate_status"] = candidate_status
-    if candidate_path is not None:
-        summary["candidate_path"] = candidate_path
-    atomic_json_write(summary_path, summary)
-
-    attempt = _as_int(task.get("retries"), 0) + 1
-    event_id = compute_event_id(
         run_id=run_id,
-        task_id=task_id,
-        strategy_id=strategy_id,
-        stage="task",
-        attempt=attempt,
-    )
-    log_experiment(
-        {
-            "event_id": event_id,
-            "run_id": run_id,
-            "agent": "validator",
-            "event": "task_result",
-            "task_id": task_id,
-            "strategy_name": strategy_name,
-            "strategy_id": strategy_id,
-            "split": search_split,
-            "search_split": search_split,
-            "selection_split": selection_split,
-            "feature_group": feature_group,
-            "theme_tag": theme_tag,
-            "setup_key": setup_key,
-            "setup_label": setup_label,
-            "bar_config": bar_config,
-            "metrics": search_result["metrics"],
-            "edge_surface": search_result.get("edge_surface"),
-            "gauntlet": search_result.get("gauntlet"),
-            "advanced_validation": search_result.get("advanced_validation"),
-            "advanced_validation_gates": search_result.get("advanced_validation_gates"),
-            "verdict": search_result["verdict"],
-            "artifacts": search_result["artifacts"],
-            "search_result": search_result,
-            "selection_result": selection_result,
-            "final_verdict": final_verdict,
-            "candidate_status": candidate_status,
-            "candidate_path": candidate_path,
-        },
+        run_dir=run_dir,
+        framework_lock_hash=framework_lock_hash,
+        git_commit=git_commit,
         experiments_path=experiments_path,
-        lock_path=experiments_lock,
+        experiments_lock=experiments_lock,
     )
-
-    details: dict[str, Any] = {
-        "strategy_id": strategy_id,
-        "metrics": search_result["metrics"],
-        "artifacts": search_result["artifacts"],
-        "gauntlet": search_result.get("gauntlet"),
-        "advanced_validation": search_result.get("advanced_validation"),
-        "advanced_validation_gates": search_result.get("advanced_validation_gates"),
-        "feature_group": feature_group,
-        "theme_tag": theme_tag,
-        "setup_key": setup_key,
-        "setup_label": setup_label,
-        "feedback_split": search_split,
-        "feedback_verdict": search_result["verdict"],
-        "search_split": search_split,
-        "selection_split": selection_split,
-        "edge_surface": search_result.get("edge_surface"),
-        "search_result": search_result,
-        "selection_result": selection_result,
-        "final_verdict": final_verdict,
-        "candidate_status": candidate_status,
-        "summary": str(summary_path),
-    }
-    if candidate_path:
-        details["candidate_path"] = candidate_path
-    return final_verdict, details
 
 
 def main() -> None:
@@ -1534,6 +996,7 @@ def main() -> None:
         _run_contract_tests(root)
 
     mission = _load_yaml(mission_path)
+    mission_fingerprint = mission_state_fingerprint(mission)
     split_plan = resolve_research_splits(mission)
     mission_name = str(mission.get("mission_name", mission_path.stem))
     queue_terminal_keep = _as_int(
@@ -1547,10 +1010,18 @@ def main() -> None:
 
     state_mode = _state_mode(fresh_state=bool(args.fresh_state))
     if state_mode == "fresh":
-        state_paths = reset_shared_state(root, mission_name=mission_name)
+        state_paths = reset_shared_state(
+            root,
+            mission_name=mission_name,
+            mission_fingerprint=mission_fingerprint,
+        )
         clear_orchestrator_state(root)
     else:
-        state_paths = ensure_shared_state(root, mission_name=mission_name)
+        state_paths = ensure_shared_state(
+            root,
+            mission_name=mission_name,
+            mission_fingerprint=mission_fingerprint,
+        )
     budget = MissionBudget(
         max_experiments=int(args.max_experiments if args.max_experiments is not None else mission.get("max_experiments", 100)),
         kill_criteria=dict(mission.get("kill_criteria", {"FAIL": 10, "ERROR": 5})),

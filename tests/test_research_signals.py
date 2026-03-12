@@ -80,6 +80,29 @@ def test_strategy_id_differs_by_session_filter() -> None:
     assert id_eth != id_rth
 
 
+def test_strategy_id_differs_by_feature_group() -> None:
+    signals = discover_signals()
+    fn = signals["example_ema_turn"]
+    params = {"x": 1}
+    id_all = compute_strategy_id(
+        "example_ema_turn",
+        params,
+        fn,
+        bar_config="tick_610",
+        session_filter="eth",
+        feature_group="all",
+    )
+    id_ohlcv = compute_strategy_id(
+        "example_ema_turn",
+        params,
+        fn,
+        bar_config="tick_610",
+        session_filter="eth",
+        feature_group="ohlcv",
+    )
+    assert id_all != id_ohlcv
+
+
 def test_strategy_id_stable_with_no_env() -> None:
     """Backwards compatibility: no bar_config/session still produces a valid ID."""
     signals = discover_signals()

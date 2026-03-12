@@ -16,12 +16,16 @@ import time
 from statistics import mean
 from typing import Any, NamedTuple
 
-import yaml
-
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research.lib.runtime_state import clear_orchestrator_state, reset_shared_state
+from research.lib.script_support import (
+    load_json_dict,
+    mission_state_fingerprint,
+    load_yaml_dict,
+    tail_lines as _tail_lines,
+)
 
 
 RESET = "\033[0m"
@@ -128,27 +132,20 @@ def _shutdown_sessions_gracefully(
 
 def _read_json(path: Path, default: Any) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return load_json_dict(path)
     except Exception:
         return default
 
 
 def _read_yaml(path: Path, default: Any) -> Any:
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        return load_yaml_dict(path)
     except Exception:
         return default
 
 
-def _tail_lines(path: Path, max_lines: int = 300) -> list[str]:
-    if not path.exists():
-        return []
-    data = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return data[-max_lines:] if max_lines > 0 else data
-
-
 def _last_json_event(path: Path, event_names: set[str] | None = None) -> dict[str, Any] | None:
-    for raw in reversed(_tail_lines(path, max_lines=1200)):
+    for raw in reversed(_tail_lines(path, 1200)):
         line = raw.strip()
         if not line:
             continue
@@ -166,7 +163,7 @@ def _last_json_event(path: Path, event_names: set[str] | None = None) -> dict[st
 
 def _recent_json_events(path: Path, *, event_names: set[str], limit: int, scan_lines: int = 3000) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for raw in reversed(_tail_lines(path, max_lines=scan_lines)):
+    for raw in reversed(_tail_lines(path, scan_lines)):
         line = raw.strip()
         if not line:
             continue
@@ -213,7 +210,7 @@ def _recent_json_events_across(
 
 
 def _last_nonempty_line(path: Path) -> str:
-    for raw in reversed(_tail_lines(path, max_lines=200)):
+    for raw in reversed(_tail_lines(path, 200)):
         if raw.strip():
             return raw.strip()
     return "(no output yet)"
@@ -683,8 +680,10 @@ def main() -> int:
     mission_payload = _read_yaml(mission, default={})
     mission_max_experiments: int | None = None
     mission_name = mission.stem
+    mission_fingerprint: str | None = None
     if isinstance(mission_payload, dict):
         mission_name = str(mission_payload.get("mission_name", mission.stem))
+        mission_fingerprint = mission_state_fingerprint(mission_payload)
         raw = mission_payload.get("max_experiments")
         try:
             mission_max_experiments = int(raw) if raw is not None else None
@@ -719,7 +718,11 @@ def main() -> int:
             _tmux_kill_session(val_session)
 
     if fresh_state:
-        reset_shared_state(root, mission_name=mission_name)
+        reset_shared_state(
+            root,
+            mission_name=mission_name,
+            mission_fingerprint=mission_fingerprint,
+        )
         clear_orchestrator_state(root)
 
     state_flag = " --resume"

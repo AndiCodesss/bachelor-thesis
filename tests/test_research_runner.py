@@ -102,6 +102,8 @@ def test_bootstrap_tasks_and_claim_priority(tmp_path: Path, monkeypatch: pytest.
         "bar_configs": ["tick_610", "volume_2000"],
         "search_split": "train",
         "selection_split": "validate",
+        "session_filter": "eth",
+        "feature_group": "ohlcv",
         "run_gauntlet": True,
         "write_candidates": True,
     }
@@ -121,6 +123,8 @@ def test_bootstrap_tasks_and_claim_priority(tmp_path: Path, monkeypatch: pytest.
     assert {t["split"] for t in tasks} == {"train"}
     assert {t["search_split"] for t in tasks} == {"train"}
     assert {t["selection_split"] for t in tasks} == {"validate"}
+    assert {t["session_filter"] for t in tasks} == {"eth"}
+    assert {t["feature_group"] for t in tasks} == {"ohlcv"}
     assert all(t["params"] == {"lookback": 5} for t in tasks)
 
     # Reorder priorities to verify claim order is priority-ascending.
@@ -192,9 +196,17 @@ def test_execute_claimed_task_passes_session_filter_to_strategy_id(
 
     captured: dict[str, str] = {}
 
-    def _fake_compute_strategy_id(_name, _params, _fn, bar_config="", session_filter=""):
+    def _fake_compute_strategy_id(
+        _name,
+        _params,
+        _fn,
+        bar_config="",
+        session_filter="",
+        feature_group="",
+    ):
         captured["bar_config"] = bar_config
         captured["session_filter"] = session_filter
+        captured["feature_group"] = feature_group
         raise RuntimeError("stop_after_strategy_id")
 
     def _dummy_signal(_df, _params):
@@ -216,9 +228,10 @@ def test_execute_claimed_task_passes_session_filter_to_strategy_id(
                 "strategy_name": "dummy",
                 "split": "validate",
                 "bar_config": "tick_610",
+                "feature_group": "ohlcv",
                 "params": {},
             },
-            mission={"session_filter": "rth"},
+            mission={"session_filter": "rth", "feature_group": "all"},
             run_id="run_x",
             run_dir=tmp_path,
             framework_lock_hash="abc123",
@@ -229,6 +242,65 @@ def test_execute_claimed_task_passes_session_filter_to_strategy_id(
 
     assert captured["bar_config"] == "tick_610"
     assert captured["session_filter"] == "rth"
+    assert captured["feature_group"] == "ohlcv"
+
+
+def test_execute_claimed_task_prefers_task_runtime_context_over_mission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_runner_module()
+
+    captured: dict[str, str] = {}
+
+    def _fake_compute_strategy_id(
+        _name,
+        _params,
+        _fn,
+        bar_config="",
+        session_filter="",
+        feature_group="",
+    ):
+        captured["bar_config"] = bar_config
+        captured["session_filter"] = session_filter
+        captured["feature_group"] = feature_group
+        raise RuntimeError("stop_after_strategy_id")
+
+    def _dummy_signal(_df, _params):
+        return np.array([0], dtype=np.int8)
+
+    dummy_module = types.SimpleNamespace(
+        generate_signal=_dummy_signal,
+        __file__=str(tmp_path / "dummy_signal.py"),
+        STRATEGY_METADATA={"version": "1.0"},
+    )
+
+    monkeypatch.setattr(mod, "compute_strategy_id", _fake_compute_strategy_id)
+    monkeypatch.setattr(mod, "load_signal_module", lambda _name: dummy_module)
+
+    with pytest.raises(RuntimeError, match="stop_after_strategy_id"):
+        mod._execute_claimed_task(
+            task={
+                "task_id": "t1",
+                "strategy_name": "dummy",
+                "split": "validate",
+                "bar_config": "tick_610",
+                "session_filter": "eth",
+                "feature_group": "ohlcv",
+                "params": {},
+            },
+            mission={"session_filter": "rth", "feature_group": "all"},
+            run_id="run_x",
+            run_dir=tmp_path,
+            framework_lock_hash="abc123",
+            git_commit=None,
+            experiments_path=tmp_path / "experiments.jsonl",
+            experiments_lock=tmp_path / "experiments.lock",
+        )
+
+    assert captured["bar_config"] == "tick_610"
+    assert captured["session_filter"] == "eth"
+    assert captured["feature_group"] == "ohlcv"
 
 
 def test_seed_seen_terminal_task_ids_prevents_resume_double_count(tmp_path: Path):

@@ -19,7 +19,7 @@ def _normalize_split(value: Any) -> str | None:
 def resolve_research_splits(
     mission: dict[str, Any],
     *,
-    default_search_split: str = "validate",
+    default_search_split: str = "train",
 ) -> dict[str, str | None]:
     """Resolve search/selection split semantics for research mode.
 

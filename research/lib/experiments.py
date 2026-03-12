@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -12,19 +11,7 @@ from typing import Any
 
 import portalocker
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _tail_lines(path: Path, limit: int) -> list[str]:
-    if not path.exists():
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    if limit <= 0:
-        return lines
-    return lines[-limit:]
+from research.lib.script_support import tail_lines, utc_now_iso
 
 
 def read_recent_event_ids(
@@ -35,7 +22,7 @@ def read_recent_event_ids(
     """Read most recent event ids from JSONL log."""
     path = Path(experiments_path)
     out: set[str] = set()
-    for raw in _tail_lines(path, limit):
+    for raw in tail_lines(path, limit):
         try:
             row = json.loads(raw)
         except Exception:
@@ -68,7 +55,7 @@ def log_experiment(
 
     row = dict(record)
     row.setdefault("schema_version", "1.0")
-    row.setdefault("timestamp", _utc_now())
+    row.setdefault("timestamp", utc_now_iso())
     row.setdefault("event_id", _default_event_id(row) if row else str(uuid.uuid4()))
     event_id = str(row["event_id"])
 

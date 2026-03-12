@@ -21,6 +21,8 @@ def test_collect_state_files_includes_runtime_scorecard_trial_and_thinker_memory
     state_dir = tmp_path / "research" / ".state"
     state_dir.mkdir(parents=True, exist_ok=True)
     for rel in (
+        "state_meta.json",
+        "state_meta.lock",
         "experiment_queue.json",
         "handoffs.json",
         "learning_scorecard.json",
@@ -37,6 +39,8 @@ def test_collect_state_files_includes_runtime_scorecard_trial_and_thinker_memory
         (state_dir / rel).write_text("", encoding="utf-8")
 
     files = [path.relative_to(tmp_path).as_posix() for path in mod.collect_state_files()]
+    assert "research/.state/state_meta.json" in files
+    assert "research/.state/state_meta.lock" in files
     assert "research/.state/learning_scorecard.json" in files
     assert "research/.state/learning_scorecard.lock" in files
     assert "research/.state/mission_budget.lock" in files
