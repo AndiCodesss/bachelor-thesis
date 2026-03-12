@@ -37,7 +37,7 @@ export default function App() {
     stopRun,
     triggerRun,
   } = useRunConsole({ apiUrl: API_URL, wsUrl: WS_URL })
-  const { statusData, thinkerData } = useAutonomyMonitor({
+  const { statusData } = useAutonomyMonitor({
     apiUrl: API_URL,
     enabled: activeTab === 'autonomy',
   })
@@ -65,7 +65,6 @@ export default function App() {
   const [validatorOnly, setValidatorOnly] = useState(false)
   const [orchestratorOnly, setOrchestratorOnly] = useState(false)
   const [laneCount, setLaneCount] = useState(2)
-  const [thinkerView, setThinkerView] = useState<'logs' | 'thinker'>('logs')
 
   const [cleanupForce, setCleanupForce] = useState(false)
   const isSignalsTab = activeTab === 'signals'
@@ -194,13 +193,9 @@ export default function App() {
 
         {!isSignalsTab && (
           <TerminalPanel
-            activeTab={activeTab}
             currentCmd={currentCmd}
             logs={logs}
             status={status}
-            thinkerData={thinkerData}
-            thinkerView={thinkerView}
-            onThinkerViewChange={setThinkerView}
           />
         )}
       </main>

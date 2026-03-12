@@ -13,7 +13,6 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from src.dashboard.backend import log_utils
 from src.dashboard.backend.run_state import (
     RunRecord,
     append_run_log,
@@ -27,11 +26,6 @@ from src.dashboard.backend.services import (
     list_signals as list_signal_rows,
 )
 from src.framework.data.bar_configs import BAR_CONFIGS, bar_config_label
-
-_summarize_tool_input = log_utils.summarize_tool_input
-_parse_thinker_events = log_utils.parse_thinker_events
-_find_thinker_session_file = log_utils.find_thinker_session_file
-_find_fallback_session_file = log_utils.find_fallback_session_file
 
 project_root = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -223,29 +217,6 @@ def get_cache_config():
         "session_filters": ["eth", "rth", "both"],
         "exec_modes": ["auto", "research", "promotion"],
         "bar_filters": AVAILABLE_BARS,
-    }
-
-
-@app.get("/api/autonomy/thinker")
-def get_thinker_activity():
-    session_file = _find_thinker_session_file(project_root)
-    is_active = session_file is not None
-
-    if not is_active:
-        session_file = _find_fallback_session_file(project_root)
-        if session_file is None:
-            return {
-                "events": [],
-                "session_id": None,
-                "is_active": False,
-                "last_updated": None,
-            }
-
-    return {
-        "events": _parse_thinker_events(session_file),
-        "session_id": session_file.stem,
-        "is_active": is_active,
-        "last_updated": log_utils.session_file_last_updated(session_file),
     }
 
 

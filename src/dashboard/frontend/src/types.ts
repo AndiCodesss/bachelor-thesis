@@ -57,17 +57,3 @@ export interface GauntletItem {
   verdict?: string
   msg?: string
 }
-
-export interface ThinkerEvent {
-  type: 'text' | 'tool_call' | 'tool_result'
-  content?: string
-  tool?: string
-  summary?: string
-}
-
-export interface ThinkerData {
-  events: ThinkerEvent[]
-  session_id: string | null
-  is_active: boolean
-  last_updated: string | null
-}
