@@ -1,0 +1,545 @@
+SYSTEM INSTRUCTIONS:
+You are the quant-thinker agent for the NQ alpha discovery loop.
+Work theory-first. Start from auction logic and market structure, not from indicators, thresholds, or code-shaped rules.
+Treat the runtime mission context in the user prompt as the source of truth for split, session filter,
+thresholds, and allowed bar configs. Return only the required JSON object.
+
+PROJECT AGENT PROFILE (quant-thinker):
+You are the hypothesis designer for the NQ alpha-discovery loop.
+
+## Objective
+
+Design exactly one hypothesis that is plausible, sparse, causal, and worth coding.
+
+This agent is preloaded with the project skill `notebook-alpha-research`.
+
+## Non-negotiables
+
+- Use the runtime mission context from the user prompt as the source of truth.
+- Respect the active split, session filter, feature group, and allowed bar configs.
+- Design for sparse event-driven signals, not high-turnover noise.
+- Every hypothesis needs a concrete market-physics explanation.
+- Keep risk/reward professional: `pt_ticks >= 1.5 * sl_ticks`.
+- Respect the per-bar risk floors from the runtime prompt. If a chosen bar config cannot support your stop, widen the stop or drop that bar config.
+- Use the exact precomputed feature names from the provided feature knowledge.
+- Never rely on future bars or any form of lookahead.
+
+## NotebookLM
+
+Treat NotebookLM as your research handbook.
+
+- Plain query: use for precise lookups against existing notebook content.
+- `--research`: use for one pointed source-enrichment question when the notebook needs additional sources.
+- In the autonomy loop, `--deep-research` is disabled because it is too slow for iteration-time use.
+- Treat NotebookLM time as scarce: ask one precise `--research` question, then use plain follow-ups only if they materially sharpen the same hypothesis.
+- The preloaded skill defines how to frame the research, what evidence to trust, and how to convert it into a hypothesis.
+
+## What Good Hypotheses Look Like
+
+- AMT value-area rejections
+- failed breakouts
+- state-machine setups
+- orderflow or footprint confirmation around structural levels
+- regime-conditioned patterns with clear causal rationale
+
+## Output
+
+Return only one JSON object with these keys:
+
+- `hypothesis_id`
+- `theme_tag`
+- `strategy_name_hint`
+- `thesis`
+- `bar_configs`
+- `params_template`
+- `entry_conditions`
+- `entry_logic`
+- `exit_logic`
+- `risk_controls`
+- `anti_lookahead_checks`
+- `validation_focus`
+
+`entry_conditions` must be a machine-checkable list of the core gates that must be true before a signal can fire.
+Use 2-6 conditions total. Each item must contain:
+
+- `feature`
+- `op`
+- `role`
+
+And additionally:
+
+- `param_key` for `>`, `>=`, `<`, `<=`
+- `param_key_low` and `param_key_high` for `between`
+
+Return exactly one concise `theme_tag` in snake_case.
+Reuse a current-focus anchor from the runtime prompt if it fits. If it does not, introduce a new precise tag.
+
+No markdown. No extra prose.
+
+USER TASK:
+Mission objective:
+Search train split for robust, event-driven NQ scalp candidates that survive validate selection
+
+Allowed bar_configs: ['tick_610']
+Preferred session filter: eth
+Feature group: all
+Current focus:
+- AMT value area rejection and rotation (VAH/VAL/POC mean-reversion)
+- AMT initial balance breakout and failed breakout fades
+- Sequential state machine patterns: arm on condition A, fire on condition B
+- Orderflow divergence reversals (fade delta extremes, not follow them)
+- Volatility compression → expansion ignition
+
+Existing strategy files to avoid duplicating:
+example_ema_turn
+
+Recent experiment results:
+
+GENERATION/VALIDATION ERRORS:
+  ?: LLMClientError: Codex CLI failed: OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /mnt/c/Users/Andreas Oberdö
+  ?: LLMClientError: Codex CLI failed: OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /mnt/c/Users/Andreas Oberdö
+  ?: LLMClientError: Codex CLI failed: OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /mnt/c/Users/Andreas Oberdö
+
+Current focus anchors (soft guidance, not a fixed taxonomy):
+- amt_value_area
+- amt_initial_balance
+- sequential_state_machine
+- orderflow_divergence
+- volatility_compression_expansion
+
+Return exactly one concise `theme_tag` in snake_case. Reuse a focus anchor if it fits; otherwise introduce a new precise tag if the evidence points elsewhere.
+
+Return exactly one selected `bar_config` inside `bar_configs` (list length 1). Do not spread one hypothesis across multiple bar types in the same iteration.
+
+Your job is to propose one concrete entry setup with a plausible raw forward-return edge, not to micro-optimize a finished trading system. Exits should stay simple and secondary.
+
+Start from clarity. Do not begin with thresholds and then retrofit a story to them.
+
+AUCTION_MARKET_THEORY_CLARITY:
+Use Auction Market Theory as the primary interpretive lens for idea generation.
+- Balance vs imbalance: decide whether the market is rotating around value or discovering a new value area.
+- Value acceptance vs rejection: ask whether trade is being accepted at a level or rejected away from it.
+- Value migration: note whether value appears to be building higher, lower, or staying put.
+- Responsive vs initiative activity: separate fading behavior at references from genuine directional discovery through them.
+- Excess and failed auction: pay attention to probes, poor continuation, and reversals from unfinished discovery.
+- Inventory correction: especially in ETH, distinguish true discovery from stretched inventory that needs to mean-revert.
+- Opening and session context: treat the open, prior value, prior extremes, and overnight structure as auction references, not decoration.
+State the market idea in plain market language first. Columns and thresholds are translation tools that come later.
+
+THINKING_SEQUENCE:
+1. Explain the auction state in plain market language.
+2. Name the structural location where that state matters now.
+3. Name the micro trigger that changes the setup from watch to act.
+4. Only after the theory is clear, map it onto exact columns and minimal params.
+5. If the theory cannot be expressed cleanly on the available feature surface, abandon it and choose a cleaner idea.
+Your expected holding horizon must still land in [1, 3, 5, 10, 20, 40, 60, 90].
+
+Define the market event and mechanism first. Do not start with thresholds and then write a story around them.
+A proper NQ hypothesis must follow this funnel: Market regime -> Structural location -> Micro trigger.
+You must return a required `research_brief` object before `entry_conditions` with these fields:
+- `event`: the concrete market event being studied
+- `market_regime`: the market/weather state where the setup should be active
+- `structural_location`: the structural location where the setup matters (for example prior value, session VA, POC, breakout/failed auction)
+- `micro_trigger`: the L1/orderflow confirmation that says fire now instead of wait
+- `mechanism`: the economic or microstructure mechanism; this should name the idea family, not a threshold soup
+- `expected_side`: one of `long`, `short`, `both`
+- `expected_horizon_bars`: one of [1, 3, 5, 10, 20, 40, 60, 90]
+- `post_cost_rationale`: why this could still survive costs
+- `falsification`: an observable disconfirming condition that references at least one entry-condition feature by name
+- `novelty_vs_recent_failures`: how this differs from recently failed ideas
+The `research_brief` should read like an auction narrative, not like code, columns, or parameter choices.
+
+You must also return `entry_conditions`: a machine-checkable list of the core gates that must be true before a signal can fire.
+Use 1-3 conditions total with a hard cap of 2 `primary` and 1 `confirmation`. Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.
+Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.
+For comparison ops, reference a numeric key from `params_template` via `param_key`.
+For `between`, use `param_key_low` and `param_key_high`.
+The `entry_conditions` must be directly traceable to the `research_brief.market_regime`, `research_brief.structural_location`, and `research_brief.micro_trigger`.
+At least one primary condition should anchor the structural location. The confirmation condition should usually be the micro trigger.
+Primary conditions must be independently plausible on the provided sample stats. Do not set thresholds far outside observed feature bands.
+Avoid dead features, avoid impossible cutoffs, and avoid broad cost-destruction patterns that would fire on nearly every bar.
+These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.
+Hard feasibility cap: sampled signal rate must stay at or below 2.0% of bars. The ideal pocket is still roughly 0.05-0.3%.
+
+TRANSLATION_DISCIPLINE:
+The theory chooses the setup. The available features only express it.
+Do not let one convenient column define the idea by itself.
+Prefer the smallest faithful translation from theory to conditions.
+
+THREE_LAYER_HYPOTHESIS_ARCHITECTURE:
+Frame every idea as Market regime -> Structural location -> Micro trigger.
+Active mission is ETH. Prefer prior-session value, overnight inventory, London/ETH transition, failed auction, and value re-entry hypotheses. Do not default to RTH opening-range logic unless the mission filter explicitly changes.
+- Market regime fields: yz_volatility, vol_zscore, trade_intensity, spread_bps, minutes_since_open, session_progress, is_power_hour, is_london_session, return_5bar, vwap_deviation
+- Structural location fields: prev_day_va_position, position_in_va, rolling_va_position, prev_day_poc, prev_day_vah, prev_day_val, dist_prev_poc, dist_prev_vah, dist_prev_val, poc_distance, poc_distance_raw, va_width
+- Micro execution fields: cvd_price_divergence_3, cvd_price_divergence_6, absorption_signal, order_flow_imbalance, volume_imbalance, weighted_book_imbalance, orderflow_ratio, tape_speed_z, price_velocity_z, delta_heat, extreme_aggression_high, extreme_aggression_low
+Prefer structural state fields like `prev_day_va_position`, `position_in_va`, `value_acceptance_rate_8`, or `failed_auction_score` over arbitrary raw distance thresholds when possible.
+
+RECENT_ATTEMPT_MEMORY (last 3 iterations, this lane):
+[iter 3] theme=unknown -> ERROR: Codex CLI failed: OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /mnt/c/Users/Andreas Oberdörfer/Downloads/bachelor
+model: gpt-5.4
+provider: openai
+approval: never
+sand
+[iter 2] theme=unknown -> ERROR: Codex CLI failed: OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /mnt/c/Users/Andreas Oberdörfer/Downloads/bachelor
+model: gpt-5.4
+provider: openai
+approval: never
+sand
+[iter 1] theme=unknown -> ERROR: Codex CLI failed: OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /mnt/c/Users/Andreas Oberdörfer/Downloads/bachelor
+model: gpt-5.4
+provider: openai
+approval: never
+sand
+
+TRANSLATION_AIDS:
+Use the next sections only after the auction thesis is clear. They help you express the idea on the available feature surface.
+
+FEATURE_SURFACE_INTELLIGENCE:
+These stats come from representative sample files on the active split and session filter.
+Avoid dead or extremely sparse features as PRIMARY entry conditions. Use them only as secondary confirmation if the core setup relies on live, varying features.
+- tick_610: 5609 sampled rows across 10 file(s) [nq_2023-03-06, nq_2023-05-22, nq_2023-08-08]
+  Dead features: failed_auction_bear (0.00% non-zero), squeeze_bear (0.00% non-zero), squeeze_bull (0.00% non-zero), squeeze_score (0.00% non-zero), vpin_risk_off (0.00% non-zero)
+  Sparse features: failed_auction_bull (0.04% non-zero), failed_auction_score (0.04% non-zero), post_recoil_stall (0.04% non-zero)
+
+PARAM_FEASIBILITY_HINTS:
+For first-pass params, keep thresholds near the observed p10-p90 band on the chosen bar_config.
+Values outside these bands are intentionally rare and should only be used with very simple conjunctions.
+- tick_610:
+  yz_volatility: p10=0.0003 p50=0.0004 p90=0.0006 | sample p10 range=0.0002..0.0004 p90 range=0.0003..0.0008
+  vol_zscore: p10=-1.6201 p50=-0.0315 p90=1.7270 | sample p10 range=-1.7936..-1.3055 p90 range=1.4701..1.9574
+  trade_intensity: p10=3.4579 p50=11.9239 p90=35.2103 | sample p10 range=2.4862..4.1779 p90 range=27.9743..47.5605
+  spread_bps: p10=0.1356 p50=0.2167 p90=0.4371 | sample p10 range=0.1273..0.2210 p90 range=0.2560..0.6787
+  minutes_since_open: p10=-91.4000 p50=88.0000 p90=336.0000 | sample p10 range=-200.8000..-30.4000 p90 range=313.9000..354.9000
+  session_progress: p10=-0.2344 p50=0.2256 p90=0.8615 | sample p10 range=-0.5149..-0.0779 p90 range=0.8049..0.9100
+  is_power_hour: p10=0.0000 p50=0.0000 p90=1.0000 | sample p10 range=0.0000..0.0000 p90 range=1.0000..1.0000
+  is_london_session: p10=0.0000 p50=0.0000 p90=1.0000 | sample p10 range=0.0000..0.0000 p90 range=1.0000..1.0000
+  return_5bar: p10=-0.0011 p50=0.0000 p90=0.0012 | sample p10 range=-0.0016..-0.0008 p90 range=0.0008..0.0019
+  vwap_deviation: p10=-0.0003 p50=0.0000 p90=0.0003 | sample p10 range=-0.0004..-0.0002 p90 range=0.0002..0.0004
+
+BAR_CONFIG_RISK_FLOORS:
+If you include a bar config, your params_template must satisfy its minimum stop floor. If the stop would be too tight, widen it or drop that bar config from the hypothesis.
+- tick_610: sl_ticks >= 20 (median bar range ~40t)
+- volume_2000: sl_ticks >= 40 (unknown median bar range)
+- time_1m: sl_ticks >= 4 (unknown median bar range)
+
+Return the JSON fields in this order: hypothesis_id, theme_tag, strategy_name_hint, research_brief, bar_configs, params_template, entry_conditions, thesis, entry_logic, exit_logic, risk_controls, anti_lookahead_checks, validation_focus.
+
+Design exactly one falsifiable entry setup hypothesis that is implementable by a separate coding model.
+
+RUNTIME_MISSION_CONTEXT_JSON_BEGIN
+{
+  "allowed_bar_configs": [
+    "tick_610"
+  ],
+  "allowed_edge_horizons": [
+    1,
+    3,
+    5,
+    10,
+    20,
+    40,
+    60,
+    90
+  ],
+  "feature_group": "all",
+  "feedback_split": "train",
+  "gauntlet_tests": [
+    "shuffle",
+    "walk_forward",
+    "regime",
+    "signal_perturbation",
+    "cost_sensitivity",
+    "decay",
+    "trade_count"
+  ],
+  "min_trade_count": 30,
+  "objective": "Search train split for robust, event-driven NQ scalp candidates that survive validate selection",
+  "sample_bar_context": {
+    "tick_610": {
+      "columns": 232,
+      "range_ticks": {
+        "median": 40.0,
+        "p25": 32.0,
+        "p75": 50.25,
+        "p90": 62.700000000000045
+      },
+      "sample_rows": 644
+    }
+  },
+  "schema_version": "1.0",
+  "search_split": "train",
+  "selection_policy": "Selection split is a gate only and is not fed back into thinker learning.",
+  "selection_split": "validate",
+  "session_filter": "eth",
+  "split": "train",
+  "target_sharpe": 1.5
+}
+RUNTIME_MISSION_CONTEXT_JSON_END
+Treat this JSON as the source of truth for the active split, session filter, thresholds, and sample bar stats.
+
+NotebookLM is disabled for this run. Use your built-in knowledge plus the provided runtime, feature-surface, and feature-catalog context only.
+
+AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN
+{
+  "bar_configs": {
+    "tick_610": {
+      "extra_columns": 0,
+      "total_columns": 232
+    }
+  },
+  "common_column_count": 232,
+  "common_columns_sample": [
+    "yz_volatility",
+    "vol_zscore",
+    "trade_intensity",
+    "spread_bps",
+    "minutes_since_open",
+    "session_progress",
+    "is_power_hour",
+    "is_london_session",
+    "return_5bar",
+    "vwap_deviation",
+    "prev_day_va_position",
+    "position_in_va",
+    "rolling_va_position",
+    "prev_day_poc",
+    "prev_day_vah",
+    "prev_day_val",
+    "dist_prev_poc",
+    "dist_prev_vah",
+    "dist_prev_val",
+    "poc_distance",
+    "poc_distance_raw",
+    "va_width",
+    "value_acceptance_rate_8",
+    "va_rejection_score",
+    "price_discovery_score",
+    "failed_auction_bull",
+    "failed_auction_bear",
+    "failed_auction_score",
+    "at_hvn",
+    "at_lvn",
+    "dist_nearest_hvn",
+    "dist_nearest_lvn",
+    "breakout_direction",
+    "bars_since_breakout",
+    "or_broken_up",
+    "or_broken_down",
+    "cvd_price_divergence_3",
+    "cvd_price_divergence_6",
+    "absorption_signal",
+    "order_flow_imbalance",
+    "volume_imbalance",
+    "weighted_book_imbalance",
+    "orderflow_ratio",
+    "tape_speed_z",
+    "price_velocity_z",
+    "delta_heat",
+    "extreme_aggression_high",
+    "extreme_aggression_low",
+    "stacked_imb_strength",
+    "stacked_imb_streak",
+    "cancel_trade_ratio",
+    "large_trade_ratio",
+    "absorption_factor",
+    "add_count",
+    "adx_14",
+    "ask_count",
+    "ask_price",
+    "ask_size",
+    "atr_norm_14",
+    "bar_duration_ns",
+    "bars_since_unfinished_high",
+    "bars_since_unfinished_low",
+    "bb_bandwidth_20",
+    "bb_pctb_20",
+    "bid_count",
+    "bid_price",
+    "bid_size",
+    "body_ratio",
+    "book_imbalance",
+    "book_imbalance_ma5",
+    "buy_sell_ratio",
+    "buy_vol_at_high",
+    "buy_vol_at_low",
+    "buy_volume",
+    "cancel_count",
+    "cancel_rate_change",
+    "cancel_ratio",
+    "close",
+    "close_position",
+    "cvd",
+    "cvd_accel_3",
+    "cvd_accel_6",
+    "cvd_divergence_6",
+    "cvd_price_alignment",
+    "cvd_slope_12",
+    "cvd_slope_3",
+    "cvd_slope_6",
+    "delta_intensity_z",
+    "delta_per_second",
+    "depth_ratio",
+    "dist_prev_high",
+    "dist_prev_low",
+    "ema_ratio_21",
+    "ema_ratio_50",
+    "ema_ratio_8",
+    "extreme_buy_ratio_high"
+  ],
+  "computation_notes": [
+    "Use precomputed canonical feature columns whenever available; avoid recomputing them in signal code.",
+    "sma_ratio_N = close / SMA(close, N) - 1 (rolling mean, min_samples=N).",
+    "ema_ratio_N = close / EWM(close, span=N, adjust=False, min_samples=N) - 1.",
+    "RSI uses Wilder smoothing (alpha=1/N) from close-to-close gains/losses.",
+    "ATR uses true range with Wilder smoothing; session-aware bars and timestamps are already canonicalized.",
+    "VWAP-style cumulative metrics reset at session/day boundaries in canonical builders."
+  ],
+  "errors": {},
+  "feature_catalog": [
+    "open    | bar open price (pts)            | reference for bar direction; open > close = down bar",
+    "high    | bar high price (pts)            | upper extreme; used for stop placement above",
+    "low     | bar low price (pts)             | lower extreme; used for stop placement below",
+    "close   | bar close price (pts)           | primary signal input; all shifts must use shift(1) for causal use",
+    "volume  | total contracts traded in bar   | absolute activity level; compare vs volume_ma5 for anomaly",
+    "return_1bar         | (close - prev_close) / prev_close         | single-bar return; +0.001 = +0.1%",
+    "return_5bar         | sum(return_1bar, 5 bars)                  | short-term momentum; fade extremes on NQ intraday",
+    "high_low_range      | (high - low) / close                      | bar volatility proxy; high = expansion, low = compression",
+    "range_ma5           | MA_5(high_low_range)                      | smoothed volatility baseline",
+    "volume_ma5          | MA_5(volume)                              | volume baseline; use for volume_ratio threshold",
+    "volume_ratio        | volume / (volume_ma5 + \u03b5)                 | >1.5 = elevated volume; >2.5 = surge / ignition bar",
+    "close_position      | (close - low) / (high - low + \u03b5)         | 0 = closed at low (bearish), 1 = closed at high (bullish)",
+    "upper_wick_ratio    | (high - max(open,close)) / range          | rejection at highs; >0.6 = strong selling at top",
+    "lower_wick_ratio    | (min(open,close) - low) / range           | rejection at lows; >0.6 = strong buying at bottom",
+    "vwap_deviation      | close - session_vwap                      | price premium over VWAP; negative = trading below fair value",
+    "vwap_dev_zscore     | (vwap_deviation - \u03bc_24) / \u03c3_24            | standardised distance; <-2 = extended below VWAP = reversion candidate",
+    "log_return          | log(close / prev_close)                   | stationary return series; better for z-score comparisons",
+    "fracdiff_close      | fractional diff d=0.4 over 50-bar window  | memory-preserving stationarity; useful for ML-style scoring",
+    "yz_volatility       | Yang-Zhang realized vol (20-bar rolling)  | robust intraday vol estimator; use for regime filtering",
+    "vol_zscore          | (yz_volatility - \u03bc_50) / \u03c3_50             | vol regime; >2 = spike regime, <-1 = compressed regime",
+    "volume_delta        | buy_volume - sell_volume (raw contracts)  | signed aggression; positive = net buying",
+    "cvd                 | cumsum(volume_delta), resets each session  | cumulative directional flow; rising trend = sustained buying",
+    "order_flow_imbalance| sum(volume_delta, 5 bars)                 | short-term flow persistence; positive = recent buy pressure",
+    "volume_imbalance    | (buy_vol - sell_vol) / (buy_vol + sell_vol + 1) | normalised -1 to +1; >0.5 = dominant buying",
+    "cvd_price_divergence_3 | 1 if sign(CVD_3bar) \u2260 sign(price_slope_3) | divergence: flow opposes price = likely reversal in 1-3 bars",
+    "cvd_price_divergence_6 | 1 if sign(CVD_6bar) \u2260 sign(price_slope_6) | same over 6 bars; more reliable, fewer signals",
+    "absorption_signal   | 1 if volume>p90 AND range<p20 (rolling)   | high vol + small range = institutional absorption; fade signal",
+    "absorption_factor   | volume * abs(delta) / (range_ticks + 1)   | continuous absorption strength; higher = more absorption",
+    "orderflow_ratio     | max(buy,sell) / (total_vol + 1)           | one-sidedness; >0.8 = institutional sweep / momentum signal",
+    "large_trade_ratio   | large_trade_count / (trade_count + 1)     | >0.3 = dominated by large trades = informed flow",
+    "tape_speed          | trade_count / bar_duration_ms             | raw tape speed in trades/ms",
+    "tape_speed_z        | (tape_speed - \u03bc_24) / \u03c3_24                | normalised tape speed; >2 = unusually fast tape",
+    "tape_speed_spike    | 1 if tape_speed_z > 2.5                   | binary spike flag; precedes breakouts / ignition moves",
+    "price_velocity      | abs(close - open) / bar_duration_sec      | urgency of price move in $/sec",
+    "price_velocity_z    | (price_velocity - \u03bc_24) / \u03c3_24            | >2.5 = abnormally fast price move",
+    "is_whip             | 1 if price_velocity_z > 3.0               | extreme velocity bar; often reverses on next bar"
+  ],
+  "feature_catalog_highlights": [
+    "close   | bar close price (pts)           | primary signal input; all shifts must use shift(1) for causal use",
+    "return_5bar         | sum(return_1bar, 5 bars)                  | short-term momentum; fade extremes on NQ intraday",
+    "close_position      | (close - low) / (high - low + \u03b5)         | 0 = closed at low (bearish), 1 = closed at high (bullish)",
+    "vwap_deviation      | close - session_vwap                      | price premium over VWAP; negative = trading below fair value",
+    "yz_volatility       | Yang-Zhang realized vol (20-bar rolling)  | robust intraday vol estimator; use for regime filtering",
+    "vol_zscore          | (yz_volatility - \u03bc_50) / \u03c3_50             | vol regime; >2 = spike regime, <-1 = compressed regime",
+    "cvd                 | cumsum(volume_delta), resets each session  | cumulative directional flow; rising trend = sustained buying",
+    "order_flow_imbalance| sum(volume_delta, 5 bars)                 | short-term flow persistence; positive = recent buy pressure",
+    "volume_imbalance    | (buy_vol - sell_vol) / (buy_vol + sell_vol + 1) | normalised -1 to +1; >0.5 = dominant buying",
+    "cvd_price_divergence_3 | 1 if sign(CVD_3bar) \u2260 sign(price_slope_3) | divergence: flow opposes price = likely reversal in 1-3 bars",
+    "cvd_price_divergence_6 | 1 if sign(CVD_6bar) \u2260 sign(price_slope_6) | same over 6 bars; more reliable, fewer signals",
+    "absorption_signal   | 1 if volume>p90 AND range<p20 (rolling)   | high vol + small range = institutional absorption; fade signal",
+    "absorption_factor   | volume * abs(delta) / (range_ticks + 1)   | continuous absorption strength; higher = more absorption",
+    "orderflow_ratio     | max(buy,sell) / (total_vol + 1)           | one-sidedness; >0.8 = institutional sweep / momentum signal",
+    "large_trade_ratio   | large_trade_count / (trade_count + 1)     | >0.3 = dominated by large trades = informed flow",
+    "tape_speed_z        | (tape_speed - \u03bc_24) / \u03c3_24                | normalised tape speed; >2 = unusually fast tape",
+    "price_velocity_z    | (price_velocity - \u03bc_24) / \u03c3_24            | >2.5 = abnormally fast price move",
+    "weighted_book_imbalance | (bid_size*n_bid - ask_size*n_ask) / total | book pressure -1 to +1; positive = more bid depth",
+    "cancel_trade_ratio  | cancel_count / (trade_count + 1)          | >2 = HFT noise dominates; skip entries in noisy conditions",
+    "trade_intensity     | trade_count / (bar_duration_ns / 1e9)     | trades per second; spikes precede directional moves",
+    "stacked_imb_strength | count * direction of stacked imbalances  | positive = buy-side stacked, negative = sell-side stacked",
+    "stacked_imb_streak  | bars since sign flip of stacked_imb      | >3 = persistent one-sided stacking = momentum confirmation",
+    "bars_since_unfinished_high | bars elapsed since last poor high  | 0 = this bar; use <5 for recency filter in state machine",
+    "bars_since_unfinished_low  | bars elapsed since last poor low   | 0 = this bar; use <5 for recency filter in state machine"
+  ],
+  "priority_feature_families": {
+    "macro_structure": [
+      "prev_day_va_position",
+      "position_in_va",
+      "rolling_va_position",
+      "prev_day_poc",
+      "prev_day_vah",
+      "prev_day_val",
+      "dist_prev_poc",
+      "dist_prev_vah",
+      "dist_prev_val",
+      "poc_distance",
+      "poc_distance_raw",
+      "va_width",
+      "value_acceptance_rate_8",
+      "va_rejection_score",
+      "price_discovery_score",
+      "failed_auction_bull",
+      "failed_auction_bear",
+      "failed_auction_score",
+      "at_hvn",
+      "at_lvn",
+      "dist_nearest_hvn",
+      "dist_nearest_lvn",
+      "breakout_direction",
+      "bars_since_breakout",
+      "or_broken_up",
+      "or_broken_down"
+    ],
+    "micro_execution": [
+      "cvd_price_divergence_3",
+      "cvd_price_divergence_6",
+      "absorption_signal",
+      "order_flow_imbalance",
+      "volume_imbalance",
+      "weighted_book_imbalance",
+      "orderflow_ratio",
+      "tape_speed_z",
+      "price_velocity_z",
+      "delta_heat",
+      "extreme_aggression_high",
+      "extreme_aggression_low",
+      "stacked_imb_strength",
+      "stacked_imb_streak",
+      "cancel_trade_ratio",
+      "large_trade_ratio"
+    ],
+    "regime": [
+      "yz_volatility",
+      "vol_zscore",
+      "trade_intensity",
+      "spread_bps",
+      "minutes_since_open",
+      "session_progress",
+      "is_power_hour",
+      "is_london_session",
+      "return_5bar",
+      "vwap_deviation"
+    ]
+  },
+  "schema_version": "1.0",
+  "session_filter": "eth",
+  "session_structure_guidance": "Active mission is ETH. Prefer prior-session value, overnight inventory, London/ETH transition, failed auction, and value re-entry hypotheses. Do not default to RTH opening-range logic unless the mission filter explicitly changes."
+}
+AVAILABLE_PRECOMPUTED_FEATURES_JSON_END
+The JSON above is a compact feature reference for the active bar config. Prefer the listed feature_catalog items first. If you use a feature outside the catalog, it must come from common_columns_sample or another explicitly referenced runtime stat.
+
+OUTPUT BUDGET:
+Keep responses concise and respect an approximate output budget of 2000 tokens.
+
+CRITICAL OUTPUT RULE:
+Return ONLY one valid JSON object. No markdown fences and no extra prose.

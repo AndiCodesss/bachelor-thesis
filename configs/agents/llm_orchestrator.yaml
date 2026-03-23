@@ -18,6 +18,9 @@ codex_cli:
   retries: 2
   retry_backoff_seconds: 1.5
   sandbox: read-only
+  extra_args:
+    - -c
+    - model_reasoning_effort="xhigh"
 
 quant_thinker:
   agent_name: quant-thinker

@@ -302,6 +302,14 @@ class CodexCLIClient:
     def model(self) -> str:
         return self._model
 
+    @staticmethod
+    def _failure_detail(*, stdout: str, stderr: str, returncode: int) -> str:
+        detail = stderr or stdout or f"exit_code={returncode}"
+        compact = detail.strip()
+        if len(compact) <= 4000:
+            return compact
+        return f"...{compact[-4000:]}"
+
     def _build_prompt(
         self,
         *,
@@ -361,13 +369,6 @@ class CodexCLIClient:
                 "-o",
                 str(output_path),
             ]
-            if force_json_object:
-                schema_path = tmpdir / "output_schema.json"
-                schema_path.write_text(
-                    json.dumps({"type": "object"}, separators=(",", ":")),
-                    encoding="utf-8",
-                )
-                cmd.extend(["--output-schema", str(schema_path)])
             cmd.extend(self._extra_args)
             cmd.append("-")
 
@@ -390,8 +391,12 @@ class CodexCLIClient:
             stdout = str(proc.stdout or "").strip()
             stderr = str(proc.stderr or "").strip()
             if proc.returncode != 0:
-                detail = stderr or stdout or f"exit_code={proc.returncode}"
-                raise LLMClientError(f"Codex CLI failed: {detail[:500]}")
+                detail = self._failure_detail(
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=proc.returncode,
+                )
+                raise LLMClientError(f"Codex CLI failed: {detail}")
 
             try:
                 raw_text = output_path.read_text(encoding="utf-8").strip()

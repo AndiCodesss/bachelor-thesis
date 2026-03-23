@@ -141,7 +141,7 @@ def test_codex_cli_generate_raw_uses_output_file_and_agent_prompt(monkeypatch: p
         assert cmd[1] == "exec"
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == "gpt-5.4"
-        assert "--output-schema" in cmd
+        assert "--output-schema" not in cmd
         assert "-o" in cmd
         out_path = Path(cmd[cmd.index("-o") + 1])
         out_path.write_text('{"ok": true}', encoding="utf-8")
@@ -187,3 +187,20 @@ def test_codex_cli_nonzero_exit_raises(monkeypatch: pytest.MonkeyPatch):
     client = llm_client.CodexCLIClient(model="gpt-5.4", cli_binary="codex")
     with pytest.raises(llm_client.LLMClientError):
         client.generate_raw(system_prompt="sys", user_prompt="usr")
+
+
+def test_codex_cli_failure_uses_error_tail(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/codex")
+
+    class _FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "header\n" + ("x" * 5000) + "\nactual error"
+
+    monkeypatch.setattr(llm_client.subprocess, "run", lambda *_args, **_kwargs: _FakeProc())
+    client = llm_client.CodexCLIClient(model="gpt-5.4", cli_binary="codex")
+
+    with pytest.raises(llm_client.LLMClientError) as exc_info:
+        client.generate_raw(system_prompt="sys", user_prompt="usr")
+
+    assert "actual error" in str(exc_info.value)
