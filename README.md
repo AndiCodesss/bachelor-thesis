@@ -207,7 +207,8 @@ Data is not included. Set `NQ_DATA_PATH` to your raw data directory.
 cp .env.example .env
 # edit `.env` with your values, then:
 set -a && source .env && set +a
-claude auth login                                                                # one-time Claude Max login for CLI usage
+codex login                                                                      # one-time Codex CLI login for the default `provider: codex_cli`
+# claude auth login                                                              # use this instead if you switch `provider: claude_cli`
 
 # Windows PowerShell
 # $env:NQ_DATA_PATH="C:\Users\Andreas Oberdörfer\Downloads\generator\data\NQ_raw"
@@ -224,6 +225,7 @@ uv run python scripts/promote.py --candidate research/candidates/<strategy_id>.j
 ```
 
 Runner entrypoints are resume-safe by default. Use `--fresh-state` only when you intentionally want a new queue/handoff/budget state.
+The orchestrator provider is selected in `configs/agents/llm_orchestrator.yaml`. To switch cleanly, change `provider` between `claude_cli` and `codex_cli`; role configs can keep provider-specific model names under `provider_models`.
 NotebookLM query usage is audited to `results/logs/notebook_queries.jsonl`, and each orchestrator generation event records whether the thinker actually used the notebook during that iteration. In the autonomy loop, NotebookLM is bounded but optional: at most one `--research` query and three total notebook queries per iteration, with `--deep-research` disabled because it is too slow for iteration-time use. URL-backed research sources are imported as returned, and the mission/prompt push NotebookLM toward high-quality trusted sources.
 Validator runs also maintain a derived `research/.state/learning_scorecard.json` cache that summarizes observed theme performance, bar-config affinity, dominant failure modes, and near misses. The thinker reads that scorecard as context, but theme tags remain dynamic: current focus only provides soft anchors, not a fixed whitelist.
 

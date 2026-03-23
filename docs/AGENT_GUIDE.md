@@ -75,7 +75,8 @@ Run both processes:
 
 ```bash
 set -a && source .env && set +a
-claude auth login  # one-time setup for Claude Max subscription
+codex login      # one-time setup for the default `provider: codex_cli`
+# claude auth login  # use this instead when `provider: claude_cli`
 
 # Recommended: launch both in tmux with one command + live dashboard
 uv run python scripts/launch_autonomy.py --lane-count 2
@@ -101,12 +102,14 @@ uv run python scripts/research.py \
 2. `quant_thinker` (proposes one structured hypothesis),
 3. `coder` (implements only that hypothesis as signal code).
 
-The autonomy roles now also use repo-tracked Claude project skills:
+The autonomy roles now also use repo-tracked project skills:
 
 1. `notebook-alpha-research` for NotebookLM-driven direction selection and evidence synthesis
 2. `nq-signal-coding-contract` for coder-side signal contract discipline
 
-These are preloaded into the project agents through the agent frontmatter `skills:` field rather than relied on as ad hoc human-facing slash commands.
+These are preloaded through the repo agent definitions when the provider supports
+named project agents, and otherwise injected into the runtime prompts as a
+fallback.
 
 For `lane_fresh` NotebookLM runs, each lane gets its own persistent notebook.
 NotebookLM is bounded but optional during autonomy iterations: the thinker may
@@ -116,8 +119,12 @@ Research guidance should push NotebookLM toward high-quality trusted sources,
 but the notebook import path itself stays simple: URL-backed research sources
 are imported as returned.
 
-The generator calls Claude through the local `claude` CLI (`provider: claude_cli`)
-rather than direct API billing.
+The generator calls the local configured CLI provider rather than direct API
+billing. `configs/agents/llm_orchestrator.yaml` currently supports
+`provider: claude_cli` and `provider: codex_cli`.
+Switching providers is a YAML change: flip `provider`, keep provider-specific
+CLI settings in the matching `<provider>_cli` block, and set role model aliases
+under `provider_models`.
 
 It uses lock-safe queue updates and writes audit logs to
 `results/logs/llm_orchestrator*.jsonl`.

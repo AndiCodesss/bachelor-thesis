@@ -62,3 +62,23 @@ def test_last_json_event_across_uses_latest_timestamp(tmp_path: Path):
 
     assert latest is not None
     assert latest["strategy_name"] == "newer"
+
+
+def test_orchestrator_cli_command_defaults_to_claude(tmp_path: Path):
+    mod = _load_module()
+    agent_cfg = tmp_path / "agent.yaml"
+    agent_cfg.write_text("provider: claude_cli\nclaude_cli:\n  binary: claude-custom\n", encoding="utf-8")
+
+    out = mod._orchestrator_cli_command(agent_cfg)
+
+    assert out == "claude-custom"
+
+
+def test_orchestrator_cli_command_supports_codex(tmp_path: Path):
+    mod = _load_module()
+    agent_cfg = tmp_path / "agent.yaml"
+    agent_cfg.write_text("provider: codex_cli\ncodex_cli:\n  binary: codex-custom\n", encoding="utf-8")
+
+    out = mod._orchestrator_cli_command(agent_cfg)
+
+    assert out == "codex-custom"

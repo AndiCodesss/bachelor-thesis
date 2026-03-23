@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import time
 from typing import Any, Protocol
 
@@ -37,6 +38,27 @@ class LLMRawClient(Protocol):
         max_output_tokens: int = 2500,
         force_json_object: bool = True,
     ) -> LLMRawGeneration: ...
+
+
+def _resolve_cli_binary(
+    *,
+    cli_binary: str,
+    default_binary: str,
+    provider_label: str,
+) -> str:
+    binary = str(cli_binary).strip() or str(default_binary).strip()
+    if not binary:
+        raise LLMClientError(f"{provider_label} CLI binary is required")
+    # If user passed a bare command name, resolve through PATH early for clearer errors.
+    if "/" not in binary and "\\" not in binary and not (len(binary) >= 2 and binary[1] == ":"):
+        resolved = shutil.which(binary)
+        if not resolved:
+            raise LLMClientError(f"{provider_label} CLI binary not found on PATH: {binary}")
+        return resolved
+    path = Path(binary)
+    if not path.exists():
+        raise LLMClientError(f"{provider_label} CLI binary not found: {binary}")
+    return str(path)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -91,19 +113,11 @@ class ClaudeCodeCLIClient:
         self._model = str(model).strip()
         if not self._model:
             raise LLMClientError("model is required")
-
-        binary = str(cli_binary).strip() or "claude"
-        # If user passed a bare command name, resolve through PATH early for clearer errors.
-        if "/" not in binary:
-            resolved = shutil.which(binary)
-            if not resolved:
-                raise LLMClientError(f"Claude CLI binary not found on PATH: {binary}")
-            self._cli_binary = resolved
-        else:
-            path = Path(binary)
-            if not path.exists():
-                raise LLMClientError(f"Claude CLI binary not found: {binary}")
-            self._cli_binary = str(path)
+        self._cli_binary = _resolve_cli_binary(
+            cli_binary=cli_binary,
+            default_binary="claude",
+            provider_label="Claude",
+        )
 
         self._timeout_seconds = float(timeout_seconds)
         self._max_retries = max(0, int(max_retries))
@@ -235,6 +249,198 @@ class ClaudeCodeCLIClient:
             time.sleep(sleep_seconds)
 
 
+class CodexCLIClient:
+    """Codex CLI client (uses local `codex exec` execution)."""
+
+    _VALID_SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        cli_binary: str = "codex",
+        agent_name: str | None = None,
+        agent_prompt: str | None = None,
+        timeout_seconds: float = 180.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 1.5,
+        retry_max_backoff_seconds: float = 30.0,
+        workdir: str | Path | None = None,
+        extra_args: list[str] | None = None,
+        sandbox: str = "read-only",
+    ) -> None:
+        self._model = str(model).strip()
+        if not self._model:
+            raise LLMClientError("model is required")
+        self._cli_binary = _resolve_cli_binary(
+            cli_binary=cli_binary,
+            default_binary="codex",
+            provider_label="Codex",
+        )
+
+        sandbox_value = str(sandbox).strip() or "read-only"
+        if sandbox_value not in self._VALID_SANDBOXES:
+            raise LLMClientError(
+                "Codex sandbox must be one of "
+                f"{sorted(self._VALID_SANDBOXES)}, got: {sandbox_value!r}"
+            )
+
+        self._timeout_seconds = float(timeout_seconds)
+        self._max_retries = max(0, int(max_retries))
+        self._retry_backoff_seconds = max(0.1, float(retry_backoff_seconds))
+        self._retry_max_backoff_seconds = max(
+            self._retry_backoff_seconds,
+            float(retry_max_backoff_seconds),
+        )
+        self._agent_name = None if agent_name is None else (str(agent_name).strip() or None)
+        self._agent_prompt = None if agent_prompt is None else (str(agent_prompt).strip() or None)
+        self._workdir = str(workdir) if workdir is not None else None
+        self._extra_args = [str(v) for v in (extra_args or []) if str(v).strip()]
+        self._sandbox = sandbox_value
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def _build_prompt(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        force_json_object: bool,
+    ) -> str:
+        sections: list[str] = []
+        if system_prompt.strip():
+            sections.append(f"SYSTEM INSTRUCTIONS:\n{system_prompt.strip()}")
+        if self._agent_prompt:
+            agent_header = self._agent_name or "project-agent"
+            sections.append(f"PROJECT AGENT PROFILE ({agent_header}):\n{self._agent_prompt}")
+        sections.append(f"USER TASK:\n{str(user_prompt).strip()}")
+        if max_output_tokens > 0:
+            sections.append(
+                "OUTPUT BUDGET:\n"
+                "Keep responses concise and respect an approximate output budget "
+                f"of {int(max_output_tokens)} tokens."
+            )
+        if force_json_object:
+            sections.append(
+                "CRITICAL OUTPUT RULE:\n"
+                "Return ONLY one valid JSON object. No markdown fences and no extra prose."
+            )
+        return "\n\n".join(section for section in sections if section.strip())
+
+    def _run_once(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        force_json_object: bool,
+    ) -> LLMRawGeneration:
+        prompt = self._build_prompt(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_output_tokens=max_output_tokens,
+            force_json_object=force_json_object,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="codex_cli_") as tmpdir_raw:
+            tmpdir = Path(tmpdir_raw)
+            output_path = tmpdir / "final_message.txt"
+            cmd = [
+                self._cli_binary,
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                self._sandbox,
+                "--color",
+                "never",
+                "--model",
+                self._model,
+                "-o",
+                str(output_path),
+            ]
+            if force_json_object:
+                schema_path = tmpdir / "output_schema.json"
+                schema_path.write_text(
+                    json.dumps({"type": "object"}, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                cmd.extend(["--output-schema", str(schema_path)])
+            cmd.extend(self._extra_args)
+            cmd.append("-")
+
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self._workdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout_seconds,
+                    check=False,
+                    input=prompt,
+                    env=os.environ.copy(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise LLMClientError(f"Codex CLI request timed out after {self._timeout_seconds}s") from exc
+            except OSError as exc:
+                raise LLMClientError(f"Failed to execute Codex CLI: {exc}") from exc
+
+            stdout = str(proc.stdout or "").strip()
+            stderr = str(proc.stderr or "").strip()
+            if proc.returncode != 0:
+                detail = stderr or stdout or f"exit_code={proc.returncode}"
+                raise LLMClientError(f"Codex CLI failed: {detail[:500]}")
+
+            try:
+                raw_text = output_path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise LLMClientError(
+                    "Codex CLI completed without writing the final response file"
+                ) from exc
+            if not raw_text:
+                raise LLMClientError("Codex CLI returned empty output")
+
+        response_id = f"codex_cli_{int(time.time() * 1000)}"
+        return LLMRawGeneration(
+            raw_text=raw_text,
+            model=self._model,
+            response_id=response_id,
+            usage={},
+        )
+
+    def generate_raw(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        max_output_tokens: int = 2500,
+        force_json_object: bool = True,
+    ) -> LLMRawGeneration:
+        _ = float(temperature)  # not currently configurable in Codex CLI
+        attempt = 0
+        while True:
+            try:
+                return self._run_once(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_output_tokens=max_output_tokens,
+                    force_json_object=force_json_object,
+                )
+            except LLMClientError:
+                if attempt >= self._max_retries:
+                    raise
+            attempt += 1
+            sleep_seconds = self._retry_backoff_seconds
+            for _ in range(max(0, attempt - 1)):
+                sleep_seconds = min(self._retry_max_backoff_seconds, sleep_seconds * 2.0)
+                if sleep_seconds >= self._retry_max_backoff_seconds:
+                    break
+            time.sleep(sleep_seconds)
+
+
 def extract_json_object(text: str) -> dict[str, Any]:
     """Parse the first JSON object from model text output."""
     return _extract_json_object(text)
@@ -245,5 +451,6 @@ __all__ = [
     "LLMRawClient",
     "LLMRawGeneration",
     "ClaudeCodeCLIClient",
+    "CodexCLIClient",
     "extract_json_object",
 ]

@@ -9,6 +9,8 @@ import numpy as np
 import polars as pl
 import pytest
 
+from research.lib import llm_client
+
 
 def _load_module():
     root = Path(__file__).resolve().parents[1]
@@ -1008,7 +1010,7 @@ def test_persist_notebook_progress_preserves_partial_imports(tmp_path: Path):
     assert persisted["notebooklm"]["imported_sources"] == 4
 
 
-def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):
+def test_build_llm_client_rejects_unsupported_provider(tmp_path: Path):
     mod = _load_module()
     with pytest.raises(ValueError):
         mod._build_llm_client(
@@ -1017,6 +1019,44 @@ def test_build_llm_client_rejects_non_claude_provider(tmp_path: Path):
             agent_cfg={},
             root=tmp_path,
         )
+
+
+def test_build_llm_client_accepts_codex_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    mod = _load_module()
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/codex")
+
+    client = mod._build_llm_client(
+        provider="codex_cli",
+        model="gpt-5.4",
+        agent_cfg={"codex_cli": {"binary": "codex"}},
+        root=tmp_path,
+        role_agent_name="quant-thinker",
+    )
+
+    assert isinstance(client, llm_client.CodexCLIClient)
+    assert client.model == "gpt-5.4"
+
+
+def test_resolve_role_cfg_uses_provider_specific_model_override():
+    mod = _load_module()
+
+    role_cfg = mod._resolve_role_cfg(
+        agent_cfg={
+            "provider": "codex_cli",
+            "quant_thinker": {
+                "model": "claude-sonnet-4-6",
+                "provider_models": {
+                    "codex_cli": "gpt-5.4",
+                },
+            },
+        },
+        provider="codex_cli",
+        role="quant_thinker",
+        default_temperature=0.2,
+        default_max_output_tokens=2000,
+    )
+
+    assert role_cfg["model"] == "gpt-5.4"
 
 
 def test_collect_orchestrator_feedback_items_reads_generation_rejected(tmp_path: Path):

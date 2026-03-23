@@ -2981,6 +2981,7 @@ def _build_llm_client(
     role_agent_name: str | None = None,
     role_extra_args: list[str] | None = None,
     role_disable_slash_commands: bool | None = None,
+    role_sandbox: str | None = None,
     role_timeout_seconds: float | None = None,
 ) -> LLMRawClient:
     return _orchestrator_build_llm_client(
@@ -2991,6 +2992,7 @@ def _build_llm_client(
         role_agent_name=role_agent_name,
         role_extra_args=role_extra_args,
         role_disable_slash_commands=role_disable_slash_commands,
+        role_sandbox=role_sandbox,
         role_timeout_seconds=role_timeout_seconds,
     )
 
@@ -2998,12 +3000,14 @@ def _build_llm_client(
 def _resolve_role_cfg(
     *,
     agent_cfg: dict[str, Any],
+    provider: str,
     role: str,
     default_temperature: float,
     default_max_output_tokens: int,
 ) -> dict[str, Any]:
     return _orchestrator_resolve_role_cfg(
         agent_cfg=agent_cfg,
+        provider=provider,
         role=role,
         default_temperature=default_temperature,
         default_max_output_tokens=default_max_output_tokens,
@@ -3145,20 +3149,21 @@ def main() -> int:
     quota_backoff_seconds = float(runtime_cfg.get("quota_backoff_seconds", 20.0))
     max_backoff_seconds = float(runtime_cfg.get("max_backoff_seconds", 90.0))
 
+    provider = str(agent_cfg.get("provider", "claude_cli")).strip().lower()
     thinker_role = _resolve_role_cfg(
         agent_cfg=agent_cfg,
+        provider=provider,
         role="quant_thinker",
         default_temperature=0.2,
         default_max_output_tokens=2000,
     )
     coder_role = _resolve_role_cfg(
         agent_cfg=agent_cfg,
+        provider=provider,
         role="coder",
         default_temperature=0.2,
         default_max_output_tokens=2600,
     )
-
-    provider = str(agent_cfg.get("provider", "claude_cli")).strip().lower()
     thinker_client = _build_llm_client(
         provider=provider,
         model=thinker_role["model"],
@@ -3167,6 +3172,7 @@ def main() -> int:
         role_agent_name=thinker_role.get("agent_name"),
         role_extra_args=thinker_role.get("extra_args"),
         role_disable_slash_commands=thinker_role.get("disable_slash_commands"),
+        role_sandbox=thinker_role.get("sandbox"),
         role_timeout_seconds=thinker_role.get("timeout_seconds"),
     )
     coder_client = _build_llm_client(
@@ -3177,6 +3183,7 @@ def main() -> int:
         role_agent_name=coder_role.get("agent_name"),
         role_extra_args=coder_role.get("extra_args"),
         role_disable_slash_commands=coder_role.get("disable_slash_commands"),
+        role_sandbox=coder_role.get("sandbox"),
         role_timeout_seconds=coder_role.get("timeout_seconds"),
     )
 

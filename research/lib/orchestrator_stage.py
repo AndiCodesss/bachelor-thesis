@@ -1,4 +1,4 @@
-"""Shared stage-retry and Claude client helpers for the LLM orchestrator."""
+"""Shared stage-retry and provider client helpers for the LLM orchestrator."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from research.lib.llm_client import (
     ClaudeCodeCLIClient,
+    CodexCLIClient,
     LLMClientError,
     LLMRawClient,
     extract_json_object,
@@ -36,6 +37,29 @@ _SEMANTIC_RETRY_OMITTED_SECTIONS = (
     ("RUNTIME_MISSION_CONTEXT_JSON_BEGIN", "RUNTIME_MISSION_CONTEXT_JSON_END"),
     ("AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN", "AVAILABLE_PRECOMPUTED_FEATURES_JSON_END"),
 )
+_PROVIDER_ALIASES = {
+    "claude": "claude_cli",
+    "claude_cli": "claude_cli",
+    "claude_code": "claude_cli",
+    "codex": "codex_cli",
+    "codex_cli": "codex_cli",
+}
+_PROVIDER_CONFIG = {
+    "claude_cli": {
+        "config_key": "claude_cli",
+        "binary_env_var": "CLAUDE_CODE_BIN",
+        "default_binary": "claude",
+        "legacy_binary_keys": ("claude_binary",),
+        "supports_project_agents": True,
+    },
+    "codex_cli": {
+        "config_key": "codex_cli",
+        "binary_env_var": "CODEX_CLI_BIN",
+        "default_binary": "codex",
+        "legacy_binary_keys": ("codex_binary",),
+        "supports_project_agents": False,
+    },
+}
 
 
 def extract_retry_after_seconds(error_text: str) -> float | None:
@@ -274,6 +298,85 @@ def cfg_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def normalize_provider(provider: str | None) -> str:
+    raw = str(provider or "").strip().lower()
+    normalized = _PROVIDER_ALIASES.get(raw)
+    if normalized:
+        return normalized
+    supported = ", ".join(sorted(_PROVIDER_CONFIG))
+    raise ValueError(f"Unsupported provider {provider!r}. Supported providers: {supported}")
+
+
+def provider_config_key(provider: str | None) -> str:
+    normalized = normalize_provider(provider)
+    return str(_PROVIDER_CONFIG[normalized]["config_key"])
+
+
+def resolve_provider_cli_binary(provider: str | None, agent_cfg: dict[str, Any]) -> str:
+    normalized = normalize_provider(provider)
+    meta = _PROVIDER_CONFIG[normalized]
+    cli_cfg = cfg_dict(agent_cfg.get(meta["config_key"]))
+    for legacy_key in meta["legacy_binary_keys"]:
+        legacy_value = str(agent_cfg.get(legacy_key, "")).strip()
+        if legacy_value:
+            legacy_binary = legacy_value
+            break
+    else:
+        legacy_binary = ""
+    return str(
+        cli_cfg.get(
+            "binary",
+            legacy_binary or os.getenv(str(meta["binary_env_var"]), str(meta["default_binary"])),
+        ),
+    ).strip() or str(meta["default_binary"])
+
+
+def _provider_supports_project_agents(provider: str | None) -> bool:
+    normalized = normalize_provider(provider)
+    return bool(_PROVIDER_CONFIG[normalized]["supports_project_agents"])
+
+
+def _load_project_agent_prompt(root: Path, agent_name: str | None) -> str:
+    name = str(agent_name or "").strip()
+    if not name:
+        return ""
+    path = root / ".claude" / "agents" / f"{name}.md"
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4 :].lstrip("\n")
+    return text.strip()
+
+
+def _resolve_role_model(
+    *,
+    provider: str,
+    agent_cfg: dict[str, Any],
+    role_cfg: dict[str, Any],
+    role: str,
+) -> str:
+    normalized = normalize_provider(provider)
+    role_provider_models = cfg_dict(role_cfg.get("provider_models"))
+    agent_provider_models = cfg_dict(agent_cfg.get("provider_models"))
+    model = str(
+        role_provider_models.get(
+            normalized,
+            agent_provider_models.get(
+                normalized,
+                role_cfg.get("model", agent_cfg.get("model", "")),
+            ),
+        ),
+    ).strip()
+    if not model:
+        raise ValueError(
+            f"agent config requires `{role}.model` or `{role}.provider_models.{normalized}`"
+        )
+    return model
+
+
 def build_llm_client(
     *,
     provider: str,
@@ -283,22 +386,13 @@ def build_llm_client(
     role_agent_name: str | None = None,
     role_extra_args: list[str] | None = None,
     role_disable_slash_commands: bool | None = None,
+    role_sandbox: str | None = None,
     role_timeout_seconds: float | None = None,
 ) -> LLMRawClient:
-    raw_provider = str(provider).strip().lower()
-    if raw_provider not in {"claude", "claude_cli", "claude_code"}:
-        raise ValueError(
-            "Unsupported provider. This orchestrator is configured for Claude Code only "
-            "(set `provider: claude_cli`)."
-        )
-
-    cli_cfg = cfg_dict(agent_cfg.get("claude_cli"))
-    cli_binary = str(
-        cli_cfg.get(
-            "binary",
-            agent_cfg.get("claude_binary", os.getenv("CLAUDE_CODE_BIN", "claude")),
-        ),
-    ).strip() or "claude"
+    normalized_provider = normalize_provider(provider)
+    provider_key = provider_config_key(normalized_provider)
+    cli_cfg = cfg_dict(agent_cfg.get(provider_key))
+    cli_binary = resolve_provider_cli_binary(normalized_provider, agent_cfg)
     timeout_seconds = float(cli_cfg.get("timeout_seconds", agent_cfg.get("timeout_seconds", 180)))
     if role_timeout_seconds is not None:
         timeout_seconds = float(role_timeout_seconds)
@@ -306,13 +400,6 @@ def build_llm_client(
     retry_backoff_seconds = float(
         cli_cfg.get("retry_backoff_seconds", agent_cfg.get("retry_backoff_seconds", 1.5))
     )
-    disable_slash_commands_raw = cli_cfg.get(
-        "disable_slash_commands",
-        agent_cfg.get("disable_slash_commands", True),
-    )
-    disable_slash_commands = bool(disable_slash_commands_raw)
-    if role_disable_slash_commands is not None:
-        disable_slash_commands = bool(role_disable_slash_commands)
     workdir_raw = str(cli_cfg.get("workdir", "")).strip()
     if not workdir_raw:
         workdir = root
@@ -326,33 +413,65 @@ def build_llm_client(
         else []
     )
     extra_args = global_extra_args + (role_extra_args or [])
+    agent_prompt = ""
+    if role_agent_name and not _provider_supports_project_agents(normalized_provider):
+        agent_prompt = _load_project_agent_prompt(root, role_agent_name)
 
-    return ClaudeCodeCLIClient(
+    if normalized_provider == "claude_cli":
+        disable_slash_commands_raw = cli_cfg.get(
+            "disable_slash_commands",
+            agent_cfg.get("disable_slash_commands", True),
+        )
+        disable_slash_commands = bool(disable_slash_commands_raw)
+        if role_disable_slash_commands is not None:
+            disable_slash_commands = bool(role_disable_slash_commands)
+        return ClaudeCodeCLIClient(
+            model=model,
+            cli_binary=cli_binary,
+            agent_name=role_agent_name,
+            timeout_seconds=timeout_seconds,
+            max_retries=retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            workdir=workdir,
+            extra_args=extra_args,
+            disable_slash_commands=disable_slash_commands,
+        )
+
+    sandbox = str(cli_cfg.get("sandbox", agent_cfg.get("sandbox", "read-only"))).strip() or "read-only"
+    if role_sandbox is not None:
+        sandbox = str(role_sandbox).strip() or sandbox
+    return CodexCLIClient(
         model=model,
         cli_binary=cli_binary,
         agent_name=role_agent_name,
+        agent_prompt=agent_prompt,
         timeout_seconds=timeout_seconds,
         max_retries=retries,
         retry_backoff_seconds=retry_backoff_seconds,
         workdir=workdir,
         extra_args=extra_args,
-        disable_slash_commands=disable_slash_commands,
+        sandbox=sandbox,
     )
 
 
 def resolve_role_cfg(
     *,
     agent_cfg: dict[str, Any],
+    provider: str,
     role: str,
     default_temperature: float,
     default_max_output_tokens: int,
 ) -> dict[str, Any]:
+    normalized_provider = normalize_provider(provider)
     role_cfg = cfg_dict(agent_cfg.get(role))
-    model = str(role_cfg.get("model", agent_cfg.get("model", ""))).strip()
-    if not model:
-        raise ValueError(f"agent config requires `{role}.model` (or legacy `model`)")
+    model = _resolve_role_model(
+        provider=normalized_provider,
+        agent_cfg=agent_cfg,
+        role_cfg=role_cfg,
+        role=role,
+    )
 
-    role_cli_cfg = cfg_dict(role_cfg.get("claude_cli"))
+    role_cli_cfg = cfg_dict(role_cfg.get(provider_config_key(normalized_provider)))
     role_extra_args_raw = role_cli_cfg.get("extra_args", [])
     role_extra_args = [str(v) for v in role_extra_args_raw] if isinstance(role_extra_args_raw, list) else []
     disable_slash_commands = role_cli_cfg.get("disable_slash_commands")
@@ -361,6 +480,8 @@ def resolve_role_cfg(
         if isinstance(disable_slash_commands, bool)
         else None
     )
+    sandbox_raw = str(role_cli_cfg.get("sandbox", "")).strip()
+    sandbox_out = sandbox_raw or None
 
     role_timeout_raw = role_cfg.get("timeout_seconds")
     role_timeout_out = float(role_timeout_raw) if role_timeout_raw is not None else None
@@ -383,6 +504,7 @@ def resolve_role_cfg(
         ),
         "extra_args": role_extra_args,
         "disable_slash_commands": disable_slash_commands_out,
+        "sandbox": sandbox_out,
         "timeout_seconds": role_timeout_out,
     }
 
@@ -394,6 +516,9 @@ __all__ = [
     "cfg_dict",
     "extract_retry_after_seconds",
     "normalize_with_semantic_retry",
+    "normalize_provider",
+    "provider_config_key",
     "repair_json_payload",
+    "resolve_provider_cli_binary",
     "resolve_role_cfg",
 ]

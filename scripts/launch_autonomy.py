@@ -19,6 +19,7 @@ from typing import Any, NamedTuple
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from research.lib.orchestrator_stage import resolve_provider_cli_binary
 from research.lib.runtime_state import clear_orchestrator_state, reset_shared_state
 from research.lib.script_support import (
     load_json_dict,
@@ -69,6 +70,12 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 
 def _command_exists(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+def _orchestrator_cli_command(agent_cfg_path: Path) -> str:
+    agent_config_payload = load_yaml_dict(agent_cfg_path)
+    provider = str(agent_config_payload.get("provider", "claude_cli")).strip() or "claude_cli"
+    return resolve_provider_cli_binary(provider, agent_config_payload)
 
 
 def _run_quiet(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -662,7 +669,7 @@ def main() -> int:
 
     required_cmds = ["tmux", "uv", "bash"]
     if launch_orchestrator:
-        required_cmds.append("claude")
+        required_cmds.append(_orchestrator_cli_command(agent_cfg))
     for cmd in required_cmds:
         if not _command_exists(cmd):
             raise RuntimeError(f"Required command not found on PATH: {cmd}")

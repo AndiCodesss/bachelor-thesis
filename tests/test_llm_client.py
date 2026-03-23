@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from research.lib import llm_client
@@ -124,3 +126,64 @@ def test_claude_cli_retry_backoff_is_exponential_with_cap(monkeypatch: pytest.Mo
 
     assert out.raw_text == '{"ok": true}'
     assert sleeps == [1.0, 2.0, 2.0]
+
+
+def test_codex_cli_generate_raw_uses_output_file_and_agent_prompt(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/codex")
+
+    class _FakeProc:
+        returncode = 0
+        stdout = "banner"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        assert cmd[0] == "/usr/bin/codex"
+        assert cmd[1] == "exec"
+        assert "--model" in cmd
+        assert cmd[cmd.index("--model") + 1] == "gpt-5.4"
+        assert "--output-schema" in cmd
+        assert "-o" in cmd
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_text('{"ok": true}', encoding="utf-8")
+        prompt = kwargs["input"]
+        assert "SYSTEM INSTRUCTIONS:" in prompt
+        assert "PROJECT AGENT PROFILE (quant-thinker):" in prompt
+        assert "Use NotebookLM carefully." in prompt
+        assert "CRITICAL OUTPUT RULE:" in prompt
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is False
+        return _FakeProc()
+
+    monkeypatch.setattr(llm_client.subprocess, "run", _fake_run)
+    client = llm_client.CodexCLIClient(
+        model="gpt-5.4",
+        cli_binary="codex",
+        agent_name="quant-thinker",
+        agent_prompt="Use NotebookLM carefully.",
+    )
+    out = client.generate_raw(system_prompt="sys", user_prompt="usr", force_json_object=True)
+    assert out.model == "gpt-5.4"
+    assert out.raw_text == '{"ok": true}'
+    assert out.response_id is not None
+    assert out.usage == {}
+
+
+def test_codex_cli_missing_binary_raises(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: None)
+    with pytest.raises(llm_client.LLMClientError):
+        llm_client.CodexCLIClient(model="gpt-5.4", cli_binary="codex")
+
+
+def test_codex_cli_nonzero_exit_raises(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/codex")
+
+    class _FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "rate limit"
+
+    monkeypatch.setattr(llm_client.subprocess, "run", lambda *_args, **_kwargs: _FakeProc())
+    client = llm_client.CodexCLIClient(model="gpt-5.4", cli_binary="codex")
+    with pytest.raises(llm_client.LLMClientError):
+        client.generate_raw(system_prompt="sys", user_prompt="usr")

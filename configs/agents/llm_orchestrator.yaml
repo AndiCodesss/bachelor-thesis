@@ -1,4 +1,4 @@
-provider: claude_cli
+provider: codex_cli
 
 claude_cli:
   binary: claude
@@ -12,9 +12,19 @@ claude_cli:
     - --effort
     - high
 
+codex_cli:
+  binary: codex
+  timeout_seconds: 480
+  retries: 2
+  retry_backoff_seconds: 1.5
+  sandbox: read-only
+
 quant_thinker:
   agent_name: quant-thinker
   model: claude-sonnet-4-6
+  provider_models:
+    claude_cli: claude-sonnet-4-6
+    codex_cli: gpt-5.4
   temperature: 0.2  # keep thinker exploratory, but reduce drift into infeasible threshold proposals
   max_output_tokens: 2000
   timeout_seconds: 1200  # 20 min — deep research can take up to 15 min before the chat response
@@ -23,10 +33,15 @@ quant_thinker:
     extra_args:
       - --allowedTools
       - "Read,Bash(uv run python scripts/query_notebook.py *)"  # Read for near-misses; Bash restricted to notebook queries
+  codex_cli:
+    sandbox: workspace-write  # NotebookLM query auditing and lane-state updates need write access.
 
 coder:
   agent_name: nq-signal-coder
   model: claude-sonnet-4-6
+  provider_models:
+    claude_cli: claude-sonnet-4-6
+    codex_cli: gpt-5.4
   temperature: 0.2
   max_output_tokens: 4000  # raised from 2600 — complex modules with cooldown logic can exceed 2600
   claude_cli:
