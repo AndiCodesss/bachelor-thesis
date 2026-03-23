@@ -726,8 +726,13 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Current focus anchors" in thinker_prompt
     assert "- amt_value_area" in thinker_prompt
     assert "Return exactly one concise `theme_tag` in snake_case." in thinker_prompt
+    assert "AUCTION_MARKET_THEORY_CLARITY:" in thinker_prompt
+    assert "Use Auction Market Theory as the primary interpretive lens" in thinker_prompt
+    assert "THINKING_SEQUENCE:" in thinker_prompt
+    assert "Only after the theory is clear, map it onto exact columns and minimal params." in thinker_prompt
     assert "A proper NQ hypothesis must follow this funnel: Market regime -> Structural location -> Micro trigger." in thinker_prompt
     assert "You must return a required `research_brief` object before `entry_conditions`" in thinker_prompt
+    assert "The `research_brief` should read like an auction narrative" in thinker_prompt
     assert "- `structural_location`: the structural location where the setup matters" in thinker_prompt
     assert "- `micro_trigger`: the L1/orderflow confirmation that says fire now instead of wait" in thinker_prompt
     assert "- `expected_horizon_bars`: one of [1, 3, 5, 10]" in thinker_prompt
@@ -739,6 +744,8 @@ def test_prompts_include_feature_knowledge_markers():
     assert "The `entry_conditions` must be directly traceable to the `research_brief.market_regime`" in thinker_prompt
     assert "Return exactly one selected `bar_config` inside `bar_configs`" in thinker_prompt
     assert "LEARNING_SCORECARD:" in thinker_prompt
+    assert "TRANSLATION_DISCIPLINE:" in thinker_prompt
+    assert "TRANSLATION_AIDS:" in thinker_prompt
     assert "FEATURE_SURFACE_INTELLIGENCE:" in thinker_prompt
     assert "Dead features: squeeze_score" in thinker_prompt
     assert "PARAM_FEASIBILITY_HINTS:" in thinker_prompt
@@ -761,6 +768,7 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Prefer precomputed features directly" in coder_prompt
     assert "REFERENCED_FEATURE_SURFACE_WARNINGS:" in coder_prompt
     assert "Keep the handoff's single selected `bar_config` unchanged." in coder_prompt
+    assert "translate that auction idea into the smallest faithful set of feature checks" in coder_prompt
 
 
 def test_coder_system_prompt_requires_safe_column_helpers():
@@ -769,6 +777,7 @@ def test_coder_system_prompt_requires_safe_column_helpers():
     assert "nq-signal-coder" in prompt
     assert "Signal Coding Contract Skill" in prompt
     assert "Return only the required JSON object" in prompt
+    assert "leanest faithful signal implementation" in prompt
     assert "Preserve the handoff's single selected bar_config" in prompt
 
 
@@ -776,6 +785,7 @@ def test_thinker_system_prompt_requires_internal_brainstorm():
     mod = _load_module()
     prompt = mod._build_thinker_system_prompt(notebooklm_enabled=True)
     assert "quant-thinker" in prompt
+    assert "Work theory-first." in prompt
     assert "Notebook Alpha Research Skill" in prompt
     assert "runtime mission context" in prompt
 

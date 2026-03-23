@@ -2376,6 +2376,7 @@ def _build_thinker_system_prompt(*, notebooklm_enabled: bool) -> str:
     skill = _load_skill("notebook-alpha-research") if notebooklm_enabled else ""
     parts = [
         "You are the quant-thinker agent for the NQ alpha discovery loop.",
+        "Work theory-first. Start from auction logic and market structure, not from indicators, thresholds, or code-shaped rules.",
         "Treat the runtime mission context in the user prompt as the source of truth for split, session filter,",
         "thresholds, and allowed bar configs. Return only the required JSON object.",
     ]
@@ -2396,6 +2397,35 @@ def _disable_notebooklm_runtime_mission(mission: dict[str, Any]) -> dict[str, An
         "max_deep_research_queries": 0,
     }
     return runtime_mission
+
+
+def _auction_market_theory_clarity_prompt() -> str:
+    lines = [
+        "AUCTION_MARKET_THEORY_CLARITY:",
+        "Use Auction Market Theory as the primary interpretive lens for idea generation.",
+        "- Balance vs imbalance: decide whether the market is rotating around value or discovering a new value area.",
+        "- Value acceptance vs rejection: ask whether trade is being accepted at a level or rejected away from it.",
+        "- Value migration: note whether value appears to be building higher, lower, or staying put.",
+        "- Responsive vs initiative activity: separate fading behavior at references from genuine directional discovery through them.",
+        "- Excess and failed auction: pay attention to probes, poor continuation, and reversals from unfinished discovery.",
+        "- Inventory correction: especially in ETH, distinguish true discovery from stretched inventory that needs to mean-revert.",
+        "- Opening and session context: treat the open, prior value, prior extremes, and overnight structure as auction references, not decoration.",
+        "State the market idea in plain market language first. Columns and thresholds are translation tools that come later.",
+    ]
+    return "\n".join(lines)
+
+
+def _theory_first_thinking_sequence(allowed_horizons: list[int]) -> str:
+    lines = [
+        "THINKING_SEQUENCE:",
+        "1. Explain the auction state in plain market language.",
+        "2. Name the structural location where that state matters now.",
+        "3. Name the micro trigger that changes the setup from watch to act.",
+        "4. Only after the theory is clear, map it onto exact columns and minimal params.",
+        "5. If the theory cannot be expressed cleanly on the available feature surface, abandon it and choose a cleaner idea.",
+        f"Your expected holding horizon must still land in {allowed_horizons}.",
+    ]
+    return "\n".join(lines)
 
 
 def _build_thinker_user_prompt(
@@ -2455,8 +2485,11 @@ def _build_thinker_user_prompt(
     )
     prompt_parts.append(
         "Your job is to propose one concrete entry setup with a plausible raw forward-return edge, "
-        "not to micro-optimize a finished trading system. Exits should stay simple and secondary.\n\n",
+        "not to micro-optimize a finished trading system. Exits should stay simple and secondary.\n\n"
+        "Start from clarity. Do not begin with thresholds and then retrofit a story to them.\n\n",
     )
+    prompt_parts.append(f"{_auction_market_theory_clarity_prompt()}\n\n")
+    prompt_parts.append(f"{_theory_first_thinking_sequence(allowed_horizons)}\n\n")
     prompt_parts.append(
         "Define the market event and mechanism first. Do not start with thresholds and then write a story around them.\n"
         "A proper NQ hypothesis must follow this funnel: Market regime -> Structural location -> Micro trigger.\n"
@@ -2470,7 +2503,8 @@ def _build_thinker_user_prompt(
         f"- `expected_horizon_bars`: one of {allowed_horizons}\n"
         "- `post_cost_rationale`: why this could still survive costs\n"
         "- `falsification`: an observable disconfirming condition that references at least one entry-condition feature by name\n"
-        "- `novelty_vs_recent_failures`: how this differs from recently failed ideas\n\n",
+        "- `novelty_vs_recent_failures`: how this differs from recently failed ideas\n"
+        "The `research_brief` should read like an auction narrative, not like code, columns, or parameter choices.\n\n",
     )
     prompt_parts.append(
         "You must also return `entry_conditions`: a machine-checkable list of the core gates that must be true before a signal can fire.\n"
@@ -2486,12 +2520,23 @@ def _build_thinker_user_prompt(
         "These conditions are checked against live sample data before coding. If they cannot fire, the hypothesis will be auto-repaired or rejected before coder runs.\n"
         "Hard feasibility cap: sampled signal rate must stay at or below 2.0% of bars. The ideal pocket is still roughly 0.05-0.3%.\n\n",
     )
+    prompt_parts.append(
+        "TRANSLATION_DISCIPLINE:\n"
+        "The theory chooses the setup. The available features only express it.\n"
+        "Do not let one convenient column define the idea by itself.\n"
+        "Prefer the smallest faithful translation from theory to conditions.\n\n",
+    )
     if three_layer_context.strip():
         prompt_parts.append(f"{three_layer_context}\n\n")
     if learning_context.strip():
         prompt_parts.append(f"{learning_context}\n\n")
     if thinker_memory_context.strip():
         prompt_parts.append(f"{thinker_memory_context}\n\n")
+    if feature_surface_context.strip() or param_feasibility_context.strip():
+        prompt_parts.append(
+            "TRANSLATION_AIDS:\n"
+            "Use the next sections only after the auction thesis is clear. They help you express the idea on the available feature surface.\n\n",
+        )
     if feature_surface_context.strip():
         prompt_parts.append(f"{feature_surface_context}\n\n")
     if param_feasibility_context.strip():
@@ -2564,10 +2609,12 @@ def _build_coder_system_prompt() -> str:
     skill = _load_skill("nq-signal-coding-contract")
     parts = [
         "You are the nq-signal-coder agent for the NQ alpha discovery loop.",
+        "Your job is to realize a theory-first auction hypothesis as the leanest faithful signal implementation.",
         "Follow the user prompt exactly. Return only the required JSON object with keys",
         "`strategy_name`, `bar_configs`, `params`, and `code`.",
         "Treat `hypothesis.entry_conditions` as the required core entry gates. The final code should implement",
         "those conditions directly and use `entry_logic` only to refine direction or execution details.",
+        "Preserve the mechanism in `hypothesis.research_brief`; do not rewrite it into unrelated indicator soup.",
         "Preserve the handoff's single selected bar_config; do not broaden the strategy to additional bar types.",
         "Hard runtime reminders: the final signal array must be dtype `np.int8` and should end with",
         "`.astype(np.int8)`, and `shift(-1)` is forbidden.",
@@ -2697,6 +2744,7 @@ def _build_coder_user_prompt(
 ) -> str:
     prompt = (
         "Implement exactly the handoff below as a signal module.\n"
+        "Start from `hypothesis.research_brief` and translate that auction idea into the smallest faithful set of feature checks.\n"
         "Use only this handoff JSON as source of truth.\n\n"
         "Keep the handoff's single selected `bar_config` unchanged.\n\n"
         "THINKER_HANDOFF_JSON_BEGIN\n"
