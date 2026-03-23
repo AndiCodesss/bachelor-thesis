@@ -4,13 +4,14 @@ import { StopButton } from '../StopButton'
 
 interface CleanupTabProps {
   force: boolean
+  canStop: boolean
   status: RunStatus
   onForceChange: (value: boolean) => void
   onStart: () => void
   onStop: () => void
 }
 
-export function CleanupTab({ force, status, onForceChange, onStart, onStop }: CleanupTabProps) {
+export function CleanupTab({ force, canStop, status, onForceChange, onStart, onStop }: CleanupTabProps) {
   return (
     <>
       <div>
@@ -38,7 +39,7 @@ export function CleanupTab({ force, status, onForceChange, onStart, onStop }: Cl
         >
           {status === 'running' ? <><span className="loader" />Running Cleanup...</> : (force ? 'Nuke Artifacts' : 'Dry Run Cleanup')}
         </button>
-        {status === 'running' && <StopButton onClick={onStop} />}
+        {canStop && <StopButton onClick={onStop} />}
       </div>
     </>
   )

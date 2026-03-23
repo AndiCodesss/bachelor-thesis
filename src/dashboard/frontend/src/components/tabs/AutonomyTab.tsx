@@ -18,6 +18,7 @@ function verdictClass(verdict: string): string {
 interface AutonomyTabProps {
   agentConfig: string
   allowBootstrap: boolean
+  canStop: boolean
   laneCount: number
   mission: string
   noResume: boolean
@@ -41,6 +42,7 @@ interface AutonomyTabProps {
 export function AutonomyTab({
   agentConfig,
   allowBootstrap,
+  canStop,
   laneCount,
   mission,
   noResume,
@@ -285,7 +287,7 @@ export function AutonomyTab({
         >
           {status === 'running' ? <><span className="loader" />Deploying Mission...</> : 'Launch Autonomy'}
         </button>
-        {status === 'running' && <StopButton onClick={onStop} />}
+        {canStop && <StopButton onClick={onStop} />}
       </div>
     </>
   )

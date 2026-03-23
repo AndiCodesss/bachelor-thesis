@@ -31,6 +31,13 @@ class StageJSONResult:
     repaired: bool
 
 
+_SEMANTIC_RETRY_CONTEXT_LIMIT = 4000
+_SEMANTIC_RETRY_OMITTED_SECTIONS = (
+    ("RUNTIME_MISSION_CONTEXT_JSON_BEGIN", "RUNTIME_MISSION_CONTEXT_JSON_END"),
+    ("AVAILABLE_PRECOMPUTED_FEATURES_JSON_BEGIN", "AVAILABLE_PRECOMPUTED_FEATURES_JSON_END"),
+)
+
+
 def extract_retry_after_seconds(error_text: str) -> float | None:
     raw = str(error_text)
     match = re.search(
@@ -45,6 +52,45 @@ def extract_retry_after_seconds(error_text: str) -> float | None:
     if unit == "ms":
         return max(0.1, value / 1000.0)
     return max(0.1, value)
+
+
+def _compact_semantic_retry_context(base_user_prompt: str, *, limit: int = _SEMANTIC_RETRY_CONTEXT_LIMIT) -> str:
+    compact = str(base_user_prompt or "").strip()
+    if not compact:
+        return ""
+
+    for begin_marker, end_marker in _SEMANTIC_RETRY_OMITTED_SECTIONS:
+        pattern = re.compile(
+            rf"{re.escape(begin_marker)}.*?{re.escape(end_marker)}",
+            re.DOTALL,
+        )
+        compact = pattern.sub(f"{begin_marker}\n[omitted for semantic retry]\n{end_marker}", compact)
+
+    compact = re.sub(r"\n{3,}", "\n\n", compact).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 30].rstrip() + "\n...[truncated retry context]..."
+
+
+def _build_semantic_retry_prompt(
+    *,
+    stage_name: str,
+    base_user_prompt: str,
+    validation_error: Exception,
+    previous_payload: dict[str, Any],
+) -> str:
+    prompt_parts = [
+        f"Stage: {stage_name}",
+        "Repair the previous JSON object to satisfy the validation error.",
+        "Preserve fields that are already valid and make the smallest changes necessary.",
+    ]
+    compact_context = _compact_semantic_retry_context(base_user_prompt)
+    if compact_context:
+        prompt_parts.append(f"Retained task context:\n{compact_context}")
+    prompt_parts.append(f"Validation error: {validation_error}")
+    prompt_parts.append(f"Previous JSON:\n{json.dumps(previous_payload, indent=2, default=str)}")
+    prompt_parts.append("Return corrected JSON only.")
+    return "\n\n".join(prompt_parts)
 
 
 def repair_json_payload(
@@ -201,11 +247,11 @@ def normalize_with_semantic_retry(
                 and exc.brief
             ):
                 previous_payload = exc.brief
-            repair_prompt = (
-                f"{base_user_prompt}\n\n"
-                f"Validation error: {exc}\n"
-                f"Previous JSON:\n{json.dumps(previous_payload, indent=2, default=str)}\n\n"
-                "Return corrected JSON only."
+            repair_prompt = _build_semantic_retry_prompt(
+                stage_name=stage_name,
+                base_user_prompt=base_user_prompt,
+                validation_error=exc,
+                previous_payload=previous_payload,
             )
             current = stage_json(
                 stage_name=stage_name,

@@ -98,6 +98,7 @@ from research.lib.setup_key import build_setup_key
 from research.lib.thinker_feasibility import (
     ThinkerFeasibilityError,
     assess_entry_condition_feasibility,
+    detect_cross_sample_repair_conflicts,
     format_feasibility_error,
     is_context_dependent_feature,
     normalize_entry_conditions,
@@ -1295,6 +1296,15 @@ def _normalize_and_assess_thinker_brief(
         ]
         if not failing:
             return current_brief
+        repair_conflicts = detect_cross_sample_repair_conflicts(feasibility_report)
+        if repair_conflicts:
+            conflict_report = dict(feasibility_report)
+            conflict_report["repair_conflict_detected"] = True
+            raise ThinkerFeasibilityError(
+                format_feasibility_error(conflict_report),
+                report=conflict_report,
+                brief=current_brief,
+            )
         if repair_attempt >= max_repairs:
             break
 

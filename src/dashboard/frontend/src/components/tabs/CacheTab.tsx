@@ -9,6 +9,7 @@ interface CacheTabProps {
   execMode: string
   barFilter: string
   clean: boolean
+  canStop: boolean
   status: RunStatus
   onSplitsChange: (updater: (prev: string[]) => string[]) => void
   onSessionChange: (value: string) => void
@@ -26,6 +27,7 @@ export function CacheTab({
   execMode,
   barFilter,
   clean,
+  canStop,
   status,
   onSplitsChange,
   onSessionChange,
@@ -109,7 +111,7 @@ export function CacheTab({
             >
               {status === 'running' ? <><span className="loader" />Running...</> : 'Execute Cache Builder'}
             </button>
-            {status === 'running' && <StopButton onClick={onStop} />}
+            {canStop && <StopButton onClick={onStop} />}
           </div>
         </>
       ) : (

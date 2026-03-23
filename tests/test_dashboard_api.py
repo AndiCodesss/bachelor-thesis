@@ -310,6 +310,74 @@ def test_stop_run_uses_tree_termination_for_single_process(
     assert "forcefully terminated by user" in "".join(dashboard_main.runs["run-1"]["logs"])
 
 
+def test_stop_run_cleans_tracked_descendants_even_when_status_is_stale(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    dashboard_main.runs["run-stale"] = {
+        "type": "autonomy",
+        "status": "failed",
+        "cmd": "Directly running 3 background processes",
+        "logs": [],
+        "process_records": [{"pid": 4242, "pgid": 4242, "sid": 4242}],
+    }
+
+    monkeypatch.setattr(
+        dashboard_main,
+        "_terminate_run_descendants",
+        lambda run: {"matched_pids": [4242, 4243], "remaining_pids": []},
+    )
+
+    resp = client.post("/api/runs/run-stale/stop")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "stopped"}
+    assert dashboard_main.runs["run-stale"]["status"] == "failed"
+    assert "forcefully terminated by user" in "".join(dashboard_main.runs["run-stale"]["logs"])
+
+
+def test_stop_run_falls_back_to_marked_process_cleanup_when_run_record_is_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(dashboard_main, "_find_marked_dashboard_pids", lambda run_id: [6161, 6162])
+
+    def fake_terminate_run_descendants(run):
+        assert run["run_id"] == "run-missing"
+        assert run["process_records"] == [{"pid": 6161}, {"pid": 6162}]
+        return {"matched_pids": [6161, 6162], "remaining_pids": []}
+
+    monkeypatch.setattr(dashboard_main, "_terminate_run_descendants", fake_terminate_run_descendants)
+
+    resp = client.post("/api/runs/run-missing/stop")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "stopped"}
+
+
+def test_stop_run_reports_surviving_child_processes(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    dashboard_main.runs["run-survivor"] = {
+        "type": "autonomy",
+        "status": "running",
+        "cmd": "Directly running 3 background processes",
+        "logs": [],
+        "process_records": [{"pid": 5252, "pgid": 5252, "sid": 5252}],
+    }
+
+    monkeypatch.setattr(
+        dashboard_main,
+        "_terminate_run_descendants",
+        lambda run: {"matched_pids": [5252, 5253], "remaining_pids": [5253]},
+    )
+
+    resp = client.post("/api/runs/run-survivor/stop")
+
+    assert resp.status_code == 200
+    assert resp.json()["error"] == "Failed to terminate all tracked subprocesses"
+    assert resp.json()["remaining_pids"] == [5253]
+    assert "some child processes survived" in "".join(dashboard_main.runs["run-survivor"]["logs"])
+
+
 def test_execute_in_background_launches_in_own_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -347,6 +415,44 @@ def test_execute_in_background_launches_in_own_process_group(
     kwargs = captured["kwargs"]
     for key, value in dashboard_main._subprocess_exec_kwargs().items():
         assert kwargs[key] == value
+
+
+def test_terminate_run_descendants_kills_descendants_and_same_session_members(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    run = {
+        "process_records": [{"pid": 100, "pgid": 100, "sid": 100}],
+    }
+    killed_pids: list[tuple[int, int]] = []
+    killed_pgids: list[tuple[int, int]] = []
+
+    def fake_subprocess_run(*args, **kwargs):
+        class _Completed:
+            returncode = 0
+            stdout = "100 1 100 100\n101 100 100 100\n102 1 102 100\n103 1 103 103\n"
+
+        return _Completed()
+
+    monkeypatch.setattr(dashboard_main.os, "name", "posix", raising=False)
+    monkeypatch.setattr(dashboard_main.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(dashboard_main.os, "getpid", lambda: 999)
+    monkeypatch.setattr(dashboard_main.os, "killpg", lambda pgid, sig: killed_pgids.append((pgid, sig)))
+    monkeypatch.setattr(dashboard_main.os, "kill", lambda pid, sig: killed_pids.append((pid, sig)))
+    monkeypatch.setattr(dashboard_main, "_process_alive", lambda pid: False)
+    monkeypatch.setattr(dashboard_main.time, "sleep", lambda _seconds: None)
+
+    result = dashboard_main._terminate_run_descendants(run)
+
+    assert result == {"matched_pids": [100, 101, 102], "remaining_pids": []}
+    assert killed_pgids == [
+        (100, dashboard_main.signal.SIGTERM),
+        (102, dashboard_main.signal.SIGTERM),
+    ]
+    assert killed_pids == [
+        (100, dashboard_main.signal.SIGTERM),
+        (101, dashboard_main.signal.SIGTERM),
+        (102, dashboard_main.signal.SIGTERM),
+    ]
 
 
 def test_terminate_process_group_uses_ctrl_break_on_windows(monkeypatch: pytest.MonkeyPatch):

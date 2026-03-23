@@ -424,6 +424,78 @@ def summarize_cross_sample_conflicts(
     return notes
 
 
+def detect_cross_sample_repair_conflicts(
+    report: dict[str, Any],
+    *,
+    focus_rows: list[dict[str, Any]] | None = None,
+    max_conditions: int = 2,
+    max_samples: int = 2,
+) -> list[str]:
+    if not isinstance(report, dict):
+        return []
+
+    rows = [row for row in (focus_rows or []) if isinstance(row, dict)]
+    focus_keys = {_condition_identity(row) for row in rows}
+    grouped: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for result in report.get("bar_results", []):
+        if not isinstance(result, dict):
+            continue
+        status = str(result.get("status", "")).strip()
+        if status not in {"zero_signal", "over_signal"}:
+            continue
+        sample_label = str(result.get("sample_label", "")).strip()
+        for row in result.get("condition_rows", []):
+            if not isinstance(row, dict):
+                continue
+            pass_rate = float(row.get("pass_rate_pct", 0.0) or 0.0)
+            severity = str(row.get("severity", "")).strip()
+            if status == "over_signal" and pass_rate <= 2.0:
+                continue
+            if status == "zero_signal" and severity not in {"blocks_all", "restrictive"} and pass_rate > 1.0:
+                continue
+            identity = _condition_identity(row)
+            if focus_keys and identity not in focus_keys:
+                continue
+            bucket = grouped.setdefault(
+                identity,
+                {
+                    "column": str(row.get("column", "?")).strip(),
+                    "operator": str(row.get("operator", "?")).strip(),
+                    "threshold": row.get("threshold", "?"),
+                    "statuses": set(),
+                    "zero_samples": [],
+                    "dense_samples": [],
+                },
+            )
+            bucket["statuses"].add(status)
+            if sample_label:
+                if status == "zero_signal":
+                    bucket["zero_samples"].append(sample_label)
+                elif status == "over_signal":
+                    bucket["dense_samples"].append(sample_label)
+
+    notes: list[str] = []
+    for bucket in grouped.values():
+        statuses = set(bucket["statuses"])
+        if not {"zero_signal", "over_signal"} <= statuses:
+            continue
+        line = (
+            f"{bucket['column']} {bucket['operator']} {bucket['threshold']}: "
+            "the same threshold is too tight on some samples and too loose on others"
+        )
+        zero_blob = _format_sample_labels(bucket["zero_samples"], max_samples=max_samples)
+        dense_blob = _format_sample_labels(bucket["dense_samples"], max_samples=max_samples)
+        if zero_blob:
+            line += f"; zero-signal on {zero_blob}"
+        if dense_blob:
+            line += f"; over-signal on {dense_blob}"
+        notes.append(line)
+        if len(notes) >= max_conditions:
+            break
+
+    return notes
+
+
 def _format_condition_line(row: dict[str, Any]) -> str:
     column = str(row.get("column", "?"))
     operator = str(row.get("operator", "?"))
@@ -926,6 +998,9 @@ def repair_thinker_brief_for_feasibility(
     if not condition_rows:
         return None, []
 
+    if detect_cross_sample_repair_conflicts(report, focus_rows=condition_rows):
+        return None, []
+
     if failure_type == "over_signal":
         ranked_rows = sorted(
             (row for row in condition_rows if isinstance(row, dict)),
@@ -1013,6 +1088,21 @@ def format_feasibility_error(report: dict[str, Any]) -> str:
         for note in conflict_notes:
             lines.append(f"- {note}")
 
+    repair_conflicts = detect_cross_sample_repair_conflicts(
+        report,
+        focus_rows=[row for row in condition_rows if isinstance(row, dict)],
+    )
+    if repair_conflicts:
+        lines.append("Cross-sample repair conflicts:")
+        for note in repair_conflicts:
+            lines.append(f"- {note}")
+
+    if bool(report.get("repair_conflict_detected", False)):
+        lines.append(
+            "Cross-sample feasibility constraints conflict across validation samples. "
+            "Redesign the setup instead of nudging the same threshold.",
+        )
+
     if bool(report.get("repair_cycle_detected", False)):
         lines.append(
             "Auto-repair oscillated between incompatible thresholds across sampled days. "
@@ -1026,6 +1116,7 @@ def format_feasibility_error(report: dict[str, Any]) -> str:
 __all__ = [
     "ThinkerFeasibilityError",
     "assess_entry_condition_feasibility",
+    "detect_cross_sample_repair_conflicts",
     "format_feasibility_error",
     "is_context_dependent_feature",
     "normalize_entry_conditions",

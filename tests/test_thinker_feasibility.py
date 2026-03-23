@@ -272,6 +272,66 @@ def test_repair_thinker_brief_for_feasibility_never_drops_primary_conditions():
     assert actions == []
 
 
+def test_repair_thinker_brief_for_feasibility_refuses_cross_sample_threshold_conflicts():
+    brief = {
+        "params_template": {"position_in_va_min": 0.724548, "pt_ticks": 40, "sl_ticks": 20},
+        "entry_conditions": [
+            {"feature": "position_in_va", "op": ">=", "param_key": "position_in_va_min", "role": "primary"},
+        ],
+    }
+    report = {
+        "bar_results": [
+            {
+                "status": "over_signal",
+                "bar_config": "tick_610",
+                "sample_label": "nq_2023-03-06",
+                "nonzero": 55,
+                "total": 523,
+                "signal_rate_pct": 10.52,
+                "condition_rows": [
+                    {
+                        "column": "position_in_va",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "position_in_va_min",
+                        "threshold": 0.724548,
+                        "p10": 0.0924,
+                        "p50": 0.5726,
+                        "p90": 1.4852,
+                        "pass_rate_pct": 42.8,
+                    }
+                ],
+            },
+            {
+                "status": "zero_signal",
+                "bar_config": "tick_610",
+                "sample_label": "nq_2024-06-13",
+                "nonzero": 0,
+                "total": 539,
+                "signal_rate_pct": 0.0,
+                "condition_rows": [
+                    {
+                        "column": "position_in_va",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "position_in_va_min",
+                        "threshold": 0.724548,
+                        "p10": -0.6538,
+                        "p50": 0.0944,
+                        "p90": 0.7245,
+                        "pass_rate_pct": 0.0,
+                    }
+                ],
+            },
+        ]
+    }
+
+    repaired, actions = repair_thinker_brief_for_feasibility(brief, report)
+
+    assert repaired is None
+    assert actions == []
+
+
 def test_thinker_feasibility_error_carries_report_and_brief():
     exc = ThinkerFeasibilityError("bad", report={"bar_results": []}, brief={"hypothesis_id": "h1"})
     assert exc.report == {"bar_results": []}
@@ -381,3 +441,59 @@ def test_format_feasibility_error_includes_cross_sample_conflicts_and_cycle_note
     assert "Cross-sample distribution drift:" in message
     assert "position_in_va >= 0.724548" in message
     assert "Auto-repair oscillated between incompatible thresholds" in message
+
+
+def test_format_feasibility_error_includes_cross_sample_repair_conflict_note():
+    report = {
+        "repair_conflict_detected": True,
+        "bar_results": [
+            {
+                "status": "over_signal",
+                "bar_config": "tick_610",
+                "sample_label": "nq_2023-03-06",
+                "nonzero": 55,
+                "total": 523,
+                "signal_rate_pct": 10.52,
+                "condition_rows": [
+                    {
+                        "column": "position_in_va",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "position_in_va_min",
+                        "threshold": 0.724548,
+                        "p10": 0.0924,
+                        "p50": 0.5726,
+                        "p90": 1.4852,
+                        "pass_rate_pct": 42.8,
+                    }
+                ],
+            },
+            {
+                "status": "zero_signal",
+                "bar_config": "tick_610",
+                "sample_label": "nq_2024-06-13",
+                "nonzero": 0,
+                "total": 539,
+                "signal_rate_pct": 0.0,
+                "condition_rows": [
+                    {
+                        "column": "position_in_va",
+                        "operator": ">=",
+                        "role": "primary",
+                        "param_key": "position_in_va_min",
+                        "threshold": 0.724548,
+                        "p10": -0.6538,
+                        "p50": 0.0944,
+                        "p90": 0.7245,
+                        "pass_rate_pct": 0.0,
+                    }
+                ],
+            },
+        ],
+    }
+
+    message = format_feasibility_error(report)
+
+    assert "Cross-sample repair conflicts:" in message
+    assert "too tight on some samples and too loose on others" in message
+    assert "Cross-sample feasibility constraints conflict across validation samples" in message

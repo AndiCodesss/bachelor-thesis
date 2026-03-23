@@ -31,6 +31,7 @@ export default function App() {
 
   const cacheConfig = useCacheConfig(API_URL)
   const {
+    canStop,
     currentCmd,
     logs,
     status,
@@ -135,6 +136,7 @@ export default function App() {
               execMode={resolvedCacheExecMode}
               barFilter={cacheBarFilter}
               clean={cacheClean}
+              canStop={canStop}
               status={status}
               onSplitsChange={setCacheSplits}
               onSessionChange={setCacheSession}
@@ -154,6 +156,7 @@ export default function App() {
               mission={missionPath}
               noResume={freshState}
               orchestratorOnly={orchestratorOnly}
+              canStop={canStop}
               status={status}
               statusData={statusData}
               useNotebookLM={useNotebookLM}
@@ -174,6 +177,7 @@ export default function App() {
           {activeTab === 'cleanup' && (
             <CleanupTab
               force={cleanupForce}
+              canStop={canStop}
               status={status}
               onForceChange={setCleanupForce}
               onStart={startCleanup}

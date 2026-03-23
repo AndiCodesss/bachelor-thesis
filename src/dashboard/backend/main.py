@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Any
 import uuid
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -68,6 +69,9 @@ class CleanupRunRequest(BaseModel):
 
 
 runs: dict[str, RunRecord] = {}
+RUN_ID_ENV = "NQ_ALPHA_DASHBOARD_RUN_ID"
+RUN_TYPE_ENV = "NQ_ALPHA_DASHBOARD_RUN_TYPE"
+PROJECT_ROOT_ENV = "NQ_ALPHA_DASHBOARD_PROJECT_ROOT"
 
 
 def _reset_runtime_state(mission_ref: str) -> None:
@@ -94,6 +98,14 @@ def _reset_runtime_state(mission_ref: str) -> None:
         mission_fingerprint=mission_fingerprint,
     )
     clear_orchestrator_state(project_root)
+
+
+def _dashboard_subprocess_env(*, run_id: str, run_type: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env[RUN_ID_ENV] = str(run_id)
+    env[RUN_TYPE_ENV] = str(run_type)
+    env[PROJECT_ROOT_ENV] = str(project_root)
+    return env
 
 
 def _terminate_process(proc) -> None:
@@ -146,6 +158,199 @@ def _process_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _find_marked_dashboard_pids(run_id: str | None) -> list[int]:
+    if os.name == "nt":
+        return []
+
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return []
+
+    matched: list[int] = []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "environ").read_bytes()
+        except Exception:
+            continue
+        if not raw:
+            continue
+
+        env_map: dict[str, str] = {}
+        for chunk in raw.split(b"\0"):
+            if not chunk or b"=" not in chunk:
+                continue
+            key, value = chunk.split(b"=", 1)
+            env_map[key.decode("utf-8", errors="ignore")] = value.decode("utf-8", errors="ignore")
+
+        if env_map.get(PROJECT_ROOT_ENV) != str(project_root):
+            continue
+        marked_run_id = env_map.get(RUN_ID_ENV)
+        if not marked_run_id:
+            continue
+        if run_id is not None and marked_run_id != run_id:
+            continue
+        matched.append(int(entry.name))
+
+    return sorted(matched)
+
+
+def _register_process(
+    run: RunRecord,
+    *,
+    name: str,
+    cmd: list[str],
+    proc,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "name": name,
+        "cmd": " ".join(cmd),
+        "pid": getattr(proc, "pid", None),
+    }
+    pid = record.get("pid")
+    if isinstance(pid, int) and os.name != "nt":
+        try:
+            record["pgid"] = os.getpgid(pid)
+        except OSError:
+            pass
+        try:
+            record["sid"] = os.getsid(pid)
+        except OSError:
+            pass
+    run.setdefault("process_records", []).append(record)
+    return record
+
+
+def _posix_process_snapshot() -> dict[int, dict[str, int]]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,pgid=,sid="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return {}
+    if proc.returncode != 0:
+        return {}
+
+    snapshot: dict[int, dict[str, int]] = {}
+    for raw_line in str(proc.stdout or "").splitlines():
+        parts = raw_line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            pid, ppid, pgid, sid = (int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]))
+        except ValueError:
+            continue
+        snapshot[pid] = {"ppid": ppid, "pgid": pgid, "sid": sid}
+    return snapshot
+
+
+def _terminate_run_descendants(run: RunRecord) -> dict[str, Any]:
+    records = [row for row in run.get("process_records", []) if isinstance(row, dict)]
+    root_pids = {
+        int(pid)
+        for pid in (
+            [getattr(run.get("process"), "pid", None)]
+            + [getattr(proc, "pid", None) for proc in run.get("processes", [])]
+            + [row.get("pid") for row in records]
+            + _find_marked_dashboard_pids(str(run.get("run_id", "")).strip() or None)
+        )
+        if isinstance(pid, int) and pid > 0
+    }
+    if not root_pids:
+        return {"matched_pids": [], "remaining_pids": []}
+
+    if os.name == "nt":
+        for pid in sorted(root_pids):
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception:
+                continue
+        remaining = [pid for pid in sorted(root_pids) if _process_alive(pid)]
+        return {"matched_pids": sorted(root_pids), "remaining_pids": remaining}
+
+    snapshot = _posix_process_snapshot()
+    tracked_pgids = {
+        int(row["pgid"])
+        for row in records
+        if isinstance(row.get("pgid"), int) and int(row["pgid"]) > 0
+    }
+    tracked_sids = {
+        int(row["sid"])
+        for row in records
+        if isinstance(row.get("sid"), int) and int(row["sid"]) > 0
+    }
+
+    matched_pids = set(root_pids)
+    queue = list(root_pids)
+    while queue:
+        parent = queue.pop()
+        for pid, meta in snapshot.items():
+            if meta["ppid"] != parent or pid in matched_pids:
+                continue
+            matched_pids.add(pid)
+            queue.append(pid)
+
+    for pid, meta in snapshot.items():
+        if meta["pgid"] in tracked_pgids or meta["sid"] in tracked_sids:
+            matched_pids.add(pid)
+
+    current_pid = os.getpid()
+    matched_pids.discard(current_pid)
+    if not matched_pids and not tracked_pgids:
+        return {"matched_pids": [], "remaining_pids": []}
+
+    matched_pgids = {
+        snapshot[pid]["pgid"]
+        for pid in matched_pids
+        if pid in snapshot and int(snapshot[pid]["pgid"]) > 0
+    } | tracked_pgids
+
+    for pgid in sorted(matched_pgids):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            pass
+    for pid in sorted(matched_pids):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    deadline = time.monotonic() + 3.0
+    remaining = {pid for pid in matched_pids if _process_alive(pid)}
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.1)
+        remaining = {pid for pid in remaining if _process_alive(pid)}
+
+    if remaining:
+        for pgid in sorted(matched_pgids):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        for pid in sorted(remaining):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.2)
+        remaining = {pid for pid in remaining if _process_alive(pid)}
+
+    return {
+        "matched_pids": sorted(matched_pids),
+        "remaining_pids": sorted(remaining),
+    }
 
 
 def _terminate_process_group(procs) -> None:
@@ -291,10 +496,11 @@ async def execute_in_background(run_id: str, cmd: list[str]):
             cwd=str(project_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env=os.environ.copy(),
+            env=_dashboard_subprocess_env(run_id=run_id, run_type=str(run.get("type", "unknown"))),
             **_subprocess_exec_kwargs(),
         )
         run["process"] = process
+        _register_process(run, name=run.get("type", "process"), cmd=cmd, proc=process)
 
         while True:
             line = await process.stdout.readline()
@@ -307,6 +513,8 @@ async def execute_in_background(run_id: str, cmd: list[str]):
     except Exception as exc:
         append_run_log(run, f"\nError reading logs: {exc}")
         set_run_status(run, "failed")
+    finally:
+        _terminate_run_descendants(run)
 
 
 async def direct_run_autonomy(run_id: str, commands: list[dict[str, list[str] | str]]):
@@ -325,11 +533,12 @@ async def direct_run_autonomy(run_id: str, commands: list[dict[str, list[str] | 
                 cwd=str(project_root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=os.environ.copy(),
+                env=_dashboard_subprocess_env(run_id=run_id, run_type=str(run.get("type", "autonomy"))),
                 **_subprocess_exec_kwargs(),
             )
             active_procs.append((name, proc))
             run["processes"].append(proc)
+            _register_process(run, name=name, cmd=cmd, proc=proc)
 
         async def _read_stream(name: str, stream) -> None:
             while True:
@@ -361,6 +570,7 @@ async def direct_run_autonomy(run_id: str, commands: list[dict[str, list[str] | 
         for proc in run.get("processes", []):
             if proc.returncode is None:
                 _terminate_process(proc)
+        _terminate_run_descendants(run)
 
 
 @app.post("/api/run/cache")
@@ -377,6 +587,7 @@ async def start_cache_run(req: CacheRunRequest):
         cmd.append("--clean")
 
     runs[run_id] = new_run_record(run_type="cache", cmd=" ".join(cmd))
+    runs[run_id]["run_id"] = run_id
     asyncio.create_task(execute_in_background(run_id, cmd))
     return {"run_id": run_id, "status": "started", "cmd": " ".join(cmd)}
 
@@ -407,6 +618,7 @@ async def start_autonomy_run(req: AutonomyRunRequest):
         run_type="autonomy",
         cmd=f"Directly running {len(commands)} background processes",
     )
+    runs[run_id]["run_id"] = run_id
     asyncio.create_task(direct_run_autonomy(run_id, commands))
     return {"run_id": run_id, "status": "started", "cmd": runs[run_id]["cmd"]}
 
@@ -419,6 +631,7 @@ async def start_cleanup_run(req: CleanupRunRequest):
         cmd.append("--force")
 
     runs[run_id] = new_run_record(run_type="cleanup", cmd=" ".join(cmd))
+    runs[run_id]["run_id"] = run_id
     asyncio.create_task(execute_in_background(run_id, cmd))
     return {"run_id": run_id, "status": "started", "cmd": " ".join(cmd)}
 
@@ -440,27 +653,62 @@ def get_run(run_id: str):
 def stop_run(run_id: str):
     run = runs.get(run_id)
     if run is None:
+        synthetic_run: RunRecord = {
+            "run_id": run_id,
+            "process_records": [{"pid": pid} for pid in _find_marked_dashboard_pids(run_id)],
+        }
+        orphan_cleanup = _terminate_run_descendants(synthetic_run)
+        if orphan_cleanup["matched_pids"] and not orphan_cleanup["remaining_pids"]:
+            return {"status": "stopped"}
+        if orphan_cleanup["remaining_pids"]:
+            return {
+                "error": "Failed to terminate all tracked subprocesses",
+                "remaining_pids": orphan_cleanup["remaining_pids"],
+            }
         return {"error": "Run not found"}
-    if run["status"] != "running":
-        return {"error": "Run is not active"}
 
+    stopped_any = False
     process = run.get("process")
-    if process:
+    if process and getattr(process, "returncode", None) is None:
         try:
             _terminate_process(process)
         except Exception as exc:
             return {"error": str(exc)}
-        set_run_status(run, "failed")
-        append_run_log(run, "\n--- Process forcefully terminated by user ---")
-        return {"status": "stopped"}
+        stopped_any = True
 
     if run.get("type") == "autonomy" and "processes" in run:
-        _terminate_process_group(run["processes"])
+        active_group = [
+            proc
+            for proc in run["processes"]
+            if getattr(proc, "pid", None) is not None and getattr(proc, "returncode", None) is None
+        ]
+        if active_group:
+            _terminate_process_group(active_group)
+            stopped_any = True
+
+    descendant_cleanup = _terminate_run_descendants(run)
+    if descendant_cleanup["matched_pids"]:
+        stopped_any = True
+
+    if descendant_cleanup["remaining_pids"]:
+        append_run_log(
+            run,
+            "\n--- Stop requested, but some child processes survived: "
+            + ", ".join(str(pid) for pid in descendant_cleanup["remaining_pids"])
+            + " ---\n",
+        )
+        set_run_status(run, "failed")
+        return {
+            "error": "Failed to terminate all tracked subprocesses",
+            "remaining_pids": descendant_cleanup["remaining_pids"],
+        }
+
+    if stopped_any:
         set_run_status(run, "failed")
         append_run_log(run, "\n--- Processes forcefully terminated by user ---")
         return {"status": "stopped"}
 
-    return {"error": "Process handle missing"}
+    return {"status": "already_stopped"}
 
 
 @app.websocket("/ws/runs/{run_id}/logs")

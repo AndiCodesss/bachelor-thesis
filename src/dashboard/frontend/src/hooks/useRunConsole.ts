@@ -85,18 +85,31 @@ export function useRunConsole({ apiUrl, wsUrl }: UseRunConsoleOptions) {
   }
 
   const stopRun = async () => {
-    if (!runId || status !== 'running') {
+    if (!runId) {
       return
     }
     try {
-      await fetch(`${apiUrl}/runs/${runId}/stop`, { method: 'POST' })
-      setStatus('failed')
+      const resp = await fetch(`${apiUrl}/runs/${runId}/stop`, { method: 'POST' })
+      const data = await resp.json()
+      if (!resp.ok || data.error) {
+        throw new Error(String(data.error ?? `Request failed with status ${resp.status}`))
+      }
+      if (typeof data.status === 'string' && data.status === 'stopped') {
+        setStatus('failed')
+      }
+      if (typeof data.status === 'string' && ['stopped', 'already_stopped'].includes(data.status)) {
+        setRunId(null)
+        setCurrentCmd('')
+      }
+      await syncRunStatus(runId)
     } catch (error) {
       console.error('Failed to stop run:', error)
+      appendLog(error instanceof Error ? error.message : 'Failed to stop run.')
     }
   }
 
   return {
+    canStop: runId !== null && status !== 'idle',
     currentCmd,
     logs,
     runId,
