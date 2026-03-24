@@ -111,10 +111,47 @@ def _build_semantic_retry_prompt(
     compact_context = _compact_semantic_retry_context(base_user_prompt)
     if compact_context:
         prompt_parts.append(f"Retained task context:\n{compact_context}")
+    contract_guidance = _semantic_retry_guidance(
+        validation_error=validation_error,
+        previous_payload=previous_payload,
+    )
+    if contract_guidance:
+        prompt_parts.append(contract_guidance)
     prompt_parts.append(f"Validation error: {validation_error}")
     prompt_parts.append(f"Previous JSON:\n{json.dumps(previous_payload, indent=2, default=str)}")
     prompt_parts.append("Return corrected JSON only.")
     return "\n\n".join(prompt_parts)
+
+
+def _semantic_retry_guidance(
+    *,
+    validation_error: Exception,
+    previous_payload: dict[str, Any],
+) -> str:
+    if isinstance(validation_error, ThinkerResearchContractError):
+        entry_conditions = previous_payload.get("entry_conditions")
+        features = []
+        if isinstance(entry_conditions, list):
+            for row in entry_conditions:
+                if not isinstance(row, dict):
+                    continue
+                feature = str(row.get("feature", "")).strip()
+                if feature:
+                    features.append(feature)
+        lines = [
+            "Research-brief repair requirements:",
+            "- Preserve the existing market event, mechanism, and structural story unless the validation error requires changing them.",
+            "- Keep the repair minimal and focused on the invalid `research_brief` fields.",
+            "- `research_brief.falsification` must be an observable entry-time disconfirmation, not a PnL/Sharpe/backtest statement.",
+            "- Keep `research_brief.post_cost_rationale` and `research_brief.novelty_vs_recent_failures` as full explanatory sentences, not short labels.",
+        ]
+        if features:
+            lines.append(
+                "- If you edit `research_brief.falsification`, name at least one entry-condition feature exactly as written here: "
+                + ", ".join(features[:6])
+            )
+        return "\n".join(lines)
+    return ""
 
 
 def repair_json_payload(

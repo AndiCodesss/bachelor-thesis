@@ -30,11 +30,19 @@ def _valid_brief() -> dict[str, object]:
     }
 
 
+def _params_template() -> dict[str, float]:
+    return {
+        "vol_ratio_min": 1.15,
+        "activity_min": 1.05,
+    }
+
+
 def test_normalize_research_brief_derives_mechanism_key_and_horizon():
     out = normalize_research_brief(
         _valid_brief(),
         entry_conditions=_entry_conditions(),
         allowed_horizons=[1, 3, 5, 10],
+        params_template=_params_template(),
     )
     assert out["expected_horizon_bars"] == 5
     assert out["expected_side"] == "long"
@@ -49,28 +57,50 @@ def test_normalize_research_brief_requires_mission_horizon_membership():
             {**_valid_brief(), "expected_horizon_bars": 7},
             entry_conditions=_entry_conditions(),
             allowed_horizons=[1, 3, 5, 10],
+            params_template=_params_template(),
         )
 
 
-def test_normalize_research_brief_requires_feature_grounded_falsification():
-    with pytest.raises(ThinkerResearchContractError, match="must reference at least one entry condition feature"):
-        normalize_research_brief(
-            {**_valid_brief(), "falsification": "If the strategy is not profitable after costs, the idea is wrong over time."},
-            entry_conditions=_entry_conditions(),
-            allowed_horizons=[1, 3, 5, 10],
-        )
+def test_normalize_research_brief_repairs_featureless_falsification_from_entry_conditions():
+    out = normalize_research_brief(
+        {**_valid_brief(), "falsification": "If the strategy is not profitable after costs, the idea is wrong over time."},
+        entry_conditions=_entry_conditions(),
+        allowed_horizons=[1, 3, 5, 10],
+        params_template=_params_template(),
+    )
+    assert "volume_ratio" in out["falsification"]
+    assert "trade_intensity" in out["falsification"]
+    assert "not profitable" not in out["falsification"].lower()
 
 
-def test_normalize_research_brief_rejects_tautological_falsification():
-    with pytest.raises(ThinkerResearchContractError, match="cannot be tautological"):
-        normalize_research_brief(
-            {
-                **_valid_brief(),
-                "falsification": "If avg_trade_pnl is not positive then volume_ratio did not really work as a signal here.",
-            },
-            entry_conditions=_entry_conditions(),
-            allowed_horizons=[1, 3, 5, 10],
-        )
+def test_normalize_research_brief_repairs_tautological_falsification():
+    out = normalize_research_brief(
+        {
+            **_valid_brief(),
+            "falsification": "If avg_trade_pnl is not positive then volume_ratio did not really work as a signal here.",
+        },
+        entry_conditions=_entry_conditions(),
+        allowed_horizons=[1, 3, 5, 10],
+        params_template=_params_template(),
+    )
+    assert "avg_trade_pnl" not in out["falsification"].lower()
+    assert "volume_ratio" in out["falsification"]
+
+
+def test_normalize_research_brief_repairs_short_supporting_narrative_fields():
+    out = normalize_research_brief(
+        {
+            **_valid_brief(),
+            "post_cost_rationale": "Sparse move.",
+            "novelty_vs_recent_failures": "More specific.",
+        },
+        entry_conditions=_entry_conditions(),
+        allowed_horizons=[1, 3, 5, 10],
+        params_template=_params_template(),
+    )
+    assert len(out["post_cost_rationale"]) >= 28
+    assert len(out["novelty_vs_recent_failures"]) >= 28
+    assert "volume_ratio" in out["novelty_vs_recent_failures"]
 
 
 def test_normalize_research_brief_accepts_legacy_aliases_and_canonicalizes_output():
@@ -84,6 +114,7 @@ def test_normalize_research_brief_accepts_legacy_aliases_and_canonicalizes_outpu
         },
         entry_conditions=_entry_conditions(),
         allowed_horizons=[1, 3, 5, 10],
+        params_template=_params_template(),
     )
     assert out["market_regime"].startswith("ETH only")
     assert out["structural_location"].startswith("Price is below prior value")

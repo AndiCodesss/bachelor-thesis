@@ -1409,6 +1409,7 @@ def _normalize_thinker_brief(
             payload.get("research_brief"),
             entry_conditions=entry_conditions,
             allowed_horizons=allowed_horizons,
+            params_template=params_template,
         )
     except ThinkerResearchContractError as exc:
         enriched_brief = {
@@ -3837,6 +3838,65 @@ def main() -> int:
                     f"accepted {module_name} [{hypothesis_id}]: "
                     f"enqueued={len(enqueued_task_ids)} bars={chosen_bars}",
                 )
+
+        except (ThinkerFeasibilityError, ThinkerResearchContractError) as exc:
+            if notebooklm_configured:
+                notebook_summary = _default_notebook_summary(configured=True)
+                notebook_summary.update(
+                    summarize_notebook_queries(
+                        run_id=run_id,
+                        iteration=iteration_no,
+                        stage="quant_thinker",
+                        lane_id=lane_id,
+                    ),
+                )
+                _persist_notebook_progress(
+                    notebook_meta=notebook_meta,
+                    notebook_summary=notebook_summary,
+                    orchestrator_state=orchestrator_state,
+                    state_paths=state_paths,
+                )
+            attempt_record = _build_exception_attempt_record(
+                iteration=iteration_no,
+                hypothesis_id=hypothesis_id,
+                theme_tag=theme_tag,
+                research_brief=(
+                    thinker_brief.get("research_brief")
+                    if isinstance(thinker_brief.get("research_brief"), dict)
+                    else {}
+                ),
+                bar_configs=chosen_bars,
+                params=params,
+                exc=exc,
+            )
+            append_thinker_attempt(
+                path=state_paths["thinker_memory"],
+                lock_path=state_paths["thinker_memory_lock"],
+                lane_id=lane_id,
+                attempt=attempt_record,
+                window_size=3,
+            )
+            log_experiment(
+                {
+                    "run_id": run_id,
+                    "agent": "llm_orchestrator",
+                    "event": "generation_rejected",
+                    "iteration": iteration_no,
+                    "hypothesis_id": hypothesis_id,
+                    "theme_tag": theme_tag,
+                    "research_brief": (
+                        thinker_brief.get("research_brief")
+                        if isinstance(thinker_brief.get("research_brief"), dict)
+                        else {}
+                    ),
+                    "errors": [str(exc)],
+                    "failure_type": attempt_record.get("failure_type", ""),
+                    "notebooklm": notebook_summary,
+                },
+                experiments_path=orchestrator_log_path,
+                lock_path=orchestrator_log_lock,
+            )
+            print(f"rejected thinker hypothesis: {type(exc).__name__}: {exc}")
 
         except (LLMClientError, ValueError, RuntimeError) as exc:
             trace = traceback.format_exc()

@@ -20,14 +20,14 @@ codex_cli:
   sandbox: read-only
   extra_args:
     - -c
-    - model_reasoning_effort="xhigh"
+    - model_reasoning_effort="medium"
 
 quant_thinker:
   agent_name: quant-thinker
   model: claude-sonnet-4-6
   provider_models:
     claude_cli: claude-sonnet-4-6
-    codex_cli: gpt-5.4
+    codex_cli: gpt-5.4-mini
   temperature: 0.2  # keep thinker exploratory, but reduce drift into infeasible threshold proposals
   max_output_tokens: 2000
   timeout_seconds: 1200  # 20 min — deep research can take up to 15 min before the chat response
@@ -44,7 +44,7 @@ coder:
   model: claude-sonnet-4-6
   provider_models:
     claude_cli: claude-sonnet-4-6
-    codex_cli: gpt-5.4
+    codex_cli: gpt-5.4-mini
   temperature: 0.2
   max_output_tokens: 4000  # raised from 2600 — complex modules with cooldown logic can exceed 2600
   claude_cli:

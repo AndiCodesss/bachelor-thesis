@@ -136,6 +136,34 @@ def test_normalize_thinker_brief_requires_research_brief_and_enriches_error():
     assert exc_info.value.brief["entry_conditions"][0]["feature"] == "volume_ratio"
 
 
+def test_normalize_thinker_brief_repairs_generic_falsification_from_entry_conditions():
+    mod = _load_module()
+    out = mod._normalize_thinker_brief(
+        {
+            "hypothesis_id": "repair_falsification",
+            "theme_tag": "amt_value_area",
+            "strategy_name_hint": "repair_falsification",
+            "research_brief": _research_brief(
+                falsification="If the setup loses money after costs, the idea is wrong."
+            ),
+            "bar_configs": ["tick_610"],
+            "params_template": {"vol_ratio_min": 1.1, "activity_min": 1.05},
+            "entry_conditions": [
+                {"feature": "volume_ratio", "op": ">", "param_key": "vol_ratio_min", "role": "primary"},
+                {"feature": "trade_intensity", "op": ">", "param_key": "activity_min", "role": "confirmation"},
+            ],
+            "thesis": "x",
+            "entry_logic": "y",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610"],
+        allowed_horizons=[1, 3, 5, 10],
+    )
+    assert "volume_ratio" in out["research_brief"]["falsification"]
+    assert "trade_intensity" in out["research_brief"]["falsification"]
+    assert "loses money" not in out["research_brief"]["falsification"].lower()
+
+
 def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
     mod = _load_module()
     with pytest.raises(ValueError, match="remove volume_2000 from bar_configs"):
@@ -2071,6 +2099,78 @@ def test_normalize_with_semantic_retry_compacts_large_base_prompt(monkeypatch: p
     assert "x" * 200 not in prompts[0]
     assert "y" * 200 not in prompts[0]
     assert len(prompts[0]) < len(base_user_prompt)
+
+
+def test_normalize_with_semantic_retry_adds_contract_specific_guidance(monkeypatch: pytest.MonkeyPatch):
+    mod = _load_module()
+    prompts: list[str] = []
+
+    def fake_call_stage_json(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return mod.StageJSONResult(
+            payload={"hypothesis_id": "repair_payload", "theme_tag": "amt_value_area"},
+            model="test-model",
+            response_id="resp-2",
+            usage={},
+            raw_text="{}",
+            attempts=1,
+            repaired=False,
+        )
+
+    attempt = {"count": 0}
+
+    def normalize_fn(payload):
+        if attempt["count"] == 0:
+            attempt["count"] += 1
+            raise mod.ThinkerResearchContractError(
+                "research_brief.falsification must reference at least one entry condition feature by name",
+                brief={
+                    "hypothesis_id": "repair_payload",
+                    "theme_tag": "amt_value_area",
+                    "entry_conditions": [
+                        {"feature": "volume_ratio", "op": ">", "param_key": "vol_ratio_min", "role": "primary"},
+                        {"feature": "trade_intensity", "op": ">", "param_key": "activity_min", "role": "confirmation"},
+                    ],
+                    "research_brief": {
+                        "falsification": "If the idea loses money, it is wrong.",
+                    },
+                },
+            )
+        return payload
+
+    monkeypatch.setattr(mod, "_call_stage_json", fake_call_stage_json)
+
+    mod._normalize_with_semantic_retry(
+        stage_name="quant_thinker",
+        stage_result=mod.StageJSONResult(
+            payload={"hypothesis_id": "original_payload", "theme_tag": "amt_value_area"},
+            model="test-model",
+            response_id="resp-1",
+            usage={},
+            raw_text="{}",
+            attempts=1,
+            repaired=False,
+        ),
+        normalize_fn=normalize_fn,
+        client=SimpleNamespace(),
+        system_prompt="system",
+        base_user_prompt="base context",
+        temperature=0.2,
+        max_output_tokens=1000,
+        max_semantic_retries=1,
+        max_attempts=1,
+        json_repair_attempts=0,
+        stage_backoff_seconds=0.0,
+        quota_backoff_seconds=0.0,
+        max_backoff_seconds=0.0,
+        schema_hint="schema",
+    )
+
+    assert prompts
+    assert "Research-brief repair requirements:" in prompts[0]
+    assert "volume_ratio" in prompts[0]
+    assert "trade_intensity" in prompts[0]
+    assert "not a PnL/Sharpe/backtest statement" in prompts[0]
 
 
 def test_normalize_and_assess_thinker_brief_detects_repair_cycle(monkeypatch: pytest.MonkeyPatch):
