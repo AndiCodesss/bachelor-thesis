@@ -18,6 +18,7 @@ from research.lib.llm_client import (
     extract_json_object,
 )
 from research.lib.thinker_feasibility import ThinkerFeasibilityError
+from research.lib.thinker_policy import ThinkerPolicyError
 from research.lib.thinker_research_contract import ThinkerResearchContractError
 
 
@@ -128,6 +129,17 @@ def _semantic_retry_guidance(
     validation_error: Exception,
     previous_payload: dict[str, Any],
 ) -> str:
+    error_text = str(validation_error)
+    if isinstance(validation_error, ThinkerPolicyError):
+        lines = [
+            "Thinker policy repair requirements:",
+            "- Do not reuse recently blocked primary feature families from the previous failed attempts.",
+            "- Keep the market event if it still makes sense, but choose a materially different structural anchor feature.",
+            "- Avoid making a cosmetic threshold tweak on the same blocked primary feature.",
+        ]
+        if "PRIMARY_FEATURE_COOLDOWN:" in error_text:
+            lines.append("- Blocked families from the last attempts: " + error_text.split("PRIMARY_FEATURE_COOLDOWN:", 1)[1].strip())
+        return "\n".join(lines)
     if isinstance(validation_error, ThinkerResearchContractError):
         entry_conditions = previous_payload.get("entry_conditions")
         features = []
@@ -150,6 +162,15 @@ def _semantic_retry_guidance(
                 "- If you edit `research_brief.falsification`, name at least one entry-condition feature exactly as written here: "
                 + ", ".join(features[:6])
             )
+        return "\n".join(lines)
+    if "entry_conditions" in error_text:
+        lines = [
+            "Entry-condition repair requirements:",
+            "- Allowed roles are only `primary` and `confirmation`.",
+            "- Keep at most 3 conditions total: 2 primary and 1 confirmation.",
+            "- If you have extra filters, drop the weakest extras instead of inventing new role labels.",
+            "- Use `primary` for structural/location gates and `confirmation` for the micro trigger.",
+        ]
         return "\n".join(lines)
     return ""
 
@@ -303,7 +324,7 @@ def normalize_with_semantic_retry(
                 raise
             previous_payload: dict[str, Any] = current.payload
             if (
-                isinstance(exc, (ThinkerFeasibilityError, ThinkerResearchContractError))
+                isinstance(exc, (ThinkerFeasibilityError, ThinkerResearchContractError, ThinkerPolicyError))
                 and isinstance(exc.brief, dict)
                 and exc.brief
             ):

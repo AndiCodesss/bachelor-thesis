@@ -6,7 +6,9 @@ import numpy as np
 
 from research.lib.thinker_memory import (
     append_thinker_attempt,
+    derive_primary_feature_cooldowns,
     format_thinker_memory_context,
+    primary_feature_cooldown_key,
     read_thinker_memory,
 )
 
@@ -109,3 +111,67 @@ def test_append_thinker_attempt_strips_private_fields_and_numpy_values(tmp_path:
     assert row["highlighted_conditions"][0]["threshold"] == 0.25
     assert row["highlighted_conditions"][0]["pass_rate_pct"] == 0.0
     assert "_mask" not in row["highlighted_conditions"][0]
+
+
+def test_primary_feature_cooldown_key_groups_related_value_area_features():
+    assert primary_feature_cooldown_key("prev_day_va_position") == "value_area_position"
+    assert primary_feature_cooldown_key("position_in_va") == "value_area_position"
+    assert primary_feature_cooldown_key("dist_prev_val") == "previous_session_value_reference"
+
+
+def test_thinker_memory_derives_and_formats_primary_feature_cooldowns():
+    payload = {
+        "recent_attempts": [
+            {
+                "iteration": 5,
+                "theme_tag": "amt_value_area",
+                "status_label": "REJECTED (zero_signal)",
+                "failure_type": "zero_signal",
+                "summary": "0/539 bars on tick_610.",
+                "cross_sample_conflicts": [
+                    "prev_day_va_position between [0.7, 1.2] conflicts across validation samples."
+                ],
+                "highlighted_conditions": [
+                    {
+                        "column": "prev_day_va_position",
+                        "role": "primary",
+                        "severity": "blocks_all",
+                        "pass_rate_pct": 0.0,
+                    }
+                ],
+            },
+            {
+                "iteration": 6,
+                "theme_tag": "amt_value_area",
+                "status_label": "REJECTED (zero_signal)",
+                "failure_type": "zero_signal",
+                "summary": "0/523 bars on tick_610.",
+                "cross_sample_conflicts": [
+                    "position_in_va > 1.35 conflicts across validation samples."
+                ],
+                "highlighted_conditions": [
+                    {
+                        "column": "position_in_va",
+                        "role": "primary",
+                        "severity": "blocks_all",
+                        "pass_rate_pct": 0.0,
+                    }
+                ],
+            },
+        ]
+    }
+
+    cooldowns = derive_primary_feature_cooldowns(payload)
+
+    assert cooldowns == [
+        {
+            "family_key": "value_area_position",
+            "feature": "prev_day_va_position",
+            "score": 4,
+            "reason": "cross-sample feasibility conflict",
+        }
+    ]
+
+    text = format_thinker_memory_context(payload)
+    assert "RECENT_PRIMARY_FEATURE_COOLDOWN:" in text
+    assert "Avoid reusing `prev_day_va_position` as a primary gate next iteration" in text

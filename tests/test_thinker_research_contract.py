@@ -103,6 +103,21 @@ def test_normalize_research_brief_repairs_short_supporting_narrative_fields():
     assert "volume_ratio" in out["novelty_vs_recent_failures"]
 
 
+def test_normalize_research_brief_repairs_short_mechanism_from_other_fields():
+    out = normalize_research_brief(
+        {
+            **_valid_brief(),
+            "mechanism": "imbalance",
+        },
+        entry_conditions=_entry_conditions(),
+        allowed_horizons=[1, 3, 5, 10],
+        params_template=_params_template(),
+    )
+    assert len(out["mechanism"]) >= 20
+    assert out["mechanism"] != "imbalance"
+    assert "trade_intensity" in out["mechanism"]
+
+
 def test_normalize_research_brief_accepts_legacy_aliases_and_canonicalizes_output():
     out = normalize_research_brief(
         {

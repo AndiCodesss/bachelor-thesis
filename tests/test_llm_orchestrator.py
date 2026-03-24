@@ -1900,6 +1900,33 @@ def test_build_exception_attempt_record_uses_feasibility_brief_metadata():
     assert "_mask" not in record["highlighted_conditions"][0]
 
 
+def test_build_exception_attempt_record_captures_policy_rejections():
+    mod = _load_module()
+    record = mod._build_exception_attempt_record(
+        iteration=8,
+        hypothesis_id="iter_8",
+        theme_tag="unknown",
+        research_brief=None,
+        bar_configs=[],
+        params={},
+        exc=mod.ThinkerPolicyError(
+            "PRIMARY_FEATURE_COOLDOWN: prev_day_va_position (cross-sample feasibility conflict). "
+            "Choose a materially different structural anchor or feature family.",
+            brief={
+                "hypothesis_id": "h_policy",
+                "theme_tag": "amt_value_area",
+                "bar_configs": ["tick_610"],
+                "params_template": {"va_pos_min": 1.2},
+                "research_brief": _research_brief(),
+            },
+        ),
+    )
+    assert record["failure_type"] == "policy_error"
+    assert record["status_label"] == "REJECTED (policy)"
+    assert record["hypothesis_id"] == "h_policy"
+    assert record["bar_configs"] == ["tick_610"]
+
+
 def test_build_validation_attempt_record_includes_cross_sample_conflicts():
     mod = _load_module()
     record = mod._build_validation_attempt_record(
@@ -2173,6 +2200,71 @@ def test_normalize_with_semantic_retry_adds_contract_specific_guidance(monkeypat
     assert "not a PnL/Sharpe/backtest statement" in prompts[0]
 
 
+def test_normalize_with_semantic_retry_adds_policy_specific_guidance(monkeypatch: pytest.MonkeyPatch):
+    mod = _load_module()
+    prompts: list[str] = []
+
+    def fake_call_stage_json(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return mod.StageJSONResult(
+            payload={"hypothesis_id": "repair_payload", "theme_tag": "amt_value_area"},
+            model="test-model",
+            response_id="resp-2",
+            usage={},
+            raw_text="{}",
+            attempts=1,
+            repaired=False,
+        )
+
+    attempt = {"count": 0}
+
+    def normalize_fn(payload):
+        if attempt["count"] == 0:
+            attempt["count"] += 1
+            raise mod.ThinkerPolicyError(
+                "PRIMARY_FEATURE_COOLDOWN: prev_day_va_position (cross-sample feasibility conflict). "
+                "Choose a materially different structural anchor or feature family.",
+                brief={
+                    "hypothesis_id": "repair_payload",
+                    "theme_tag": "amt_value_area",
+                },
+            )
+        return payload
+
+    monkeypatch.setattr(mod, "_call_stage_json", fake_call_stage_json)
+
+    mod._normalize_with_semantic_retry(
+        stage_name="quant_thinker",
+        stage_result=mod.StageJSONResult(
+            payload={"hypothesis_id": "original_payload", "theme_tag": "amt_value_area"},
+            model="test-model",
+            response_id="resp-1",
+            usage={},
+            raw_text="{}",
+            attempts=1,
+            repaired=False,
+        ),
+        normalize_fn=normalize_fn,
+        client=SimpleNamespace(),
+        system_prompt="system",
+        base_user_prompt="base context",
+        temperature=0.2,
+        max_output_tokens=1000,
+        max_semantic_retries=1,
+        max_attempts=1,
+        json_repair_attempts=0,
+        stage_backoff_seconds=0.0,
+        quota_backoff_seconds=0.0,
+        max_backoff_seconds=0.0,
+        schema_hint="schema",
+    )
+
+    assert prompts
+    assert "Thinker policy repair requirements:" in prompts[0]
+    assert "prev_day_va_position" in prompts[0]
+    assert "materially different structural anchor feature" in prompts[0]
+
+
 def test_normalize_and_assess_thinker_brief_detects_repair_cycle(monkeypatch: pytest.MonkeyPatch):
     mod = _load_module()
     base_brief = {
@@ -2347,6 +2439,50 @@ def test_normalize_and_assess_thinker_brief_rejects_cross_sample_repair_conflict
         )
 
     assert "Cross-sample feasibility constraints conflict across validation samples" in str(exc_info.value)
+
+
+def test_normalize_and_assess_thinker_brief_rejects_recent_primary_feature_family_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_module()
+
+    def fake_normalize_thinker_brief(*args, **kwargs):
+        return {
+            "hypothesis_id": "h_policy",
+            "theme_tag": "amt_value_area",
+            "research_brief": _research_brief(),
+            "bar_configs": ["tick_610"],
+            "params_template": {"position_in_va_min": 1.35},
+            "entry_conditions": [
+                {
+                    "feature": "position_in_va",
+                    "op": ">",
+                    "role": "primary",
+                    "param_key": "position_in_va_min",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(mod, "_normalize_thinker_brief", fake_normalize_thinker_brief)
+
+    with pytest.raises(mod.ThinkerPolicyError) as exc_info:
+        mod._normalize_and_assess_thinker_brief(
+            payload={},
+            mission_bar_configs=["tick_610"],
+            allowed_horizons=[1, 3, 5],
+            sample_bar_context=None,
+            validation_sample_cache={},
+            primary_feature_cooldowns=[
+                {
+                    "family_key": "value_area_position",
+                    "feature": "prev_day_va_position",
+                    "reason": "cross-sample feasibility conflict",
+                }
+            ],
+        )
+
+    assert "PRIMARY_FEATURE_COOLDOWN" in str(exc_info.value)
+    assert "prev_day_va_position" in str(exc_info.value)
 
 
 def test_should_attempt_coder_repair_skips_hypothesis_level_failures():

@@ -14,6 +14,18 @@ _MAX_PRIMARY_CONDITIONS = 2
 _MAX_CONFIRMATION_CONDITIONS = 1
 _PROTECTED_PARAM_PREFIXES = ("sl_ticks", "pt_ticks")
 _CONTEXT_DEPENDENT_PREFIXES = ("prev_day_", "dist_prev_")
+_ROLE_ALIASES = {
+    "location_filter": "primary",
+    "setup_filter": "primary",
+    "structural_filter": "primary",
+    "market_regime_filter": "primary",
+    "anchor_filter": "primary",
+    "trigger_filter": "confirmation",
+    "timing_filter": "confirmation",
+    "confirmation_filter": "confirmation",
+    "micro_trigger": "confirmation",
+    "micro_trigger_filter": "confirmation",
+}
 
 
 class ThinkerFeasibilityError(ValueError):
@@ -33,10 +45,12 @@ def normalize_entry_conditions(
     *,
     params_template: dict[str, Any],
     max_conditions: int = _MAX_CONDITIONS,
+    coerce_schema_slop: bool = False,
 ) -> list[dict[str, Any]]:
     if not isinstance(raw_conditions, list) or not raw_conditions:
         raise ValueError("entry_conditions must be a non-empty list")
-    if len(raw_conditions) > max_conditions:
+    conditions = list(raw_conditions)
+    if not coerce_schema_slop and len(conditions) > max_conditions:
         raise ValueError(
             f"entry_conditions supports at most {max_conditions} conditions "
             f"({_MAX_PRIMARY_CONDITIONS} primary + {_MAX_CONFIRMATION_CONDITIONS} confirmation)"
@@ -45,7 +59,8 @@ def normalize_entry_conditions(
     normalized: list[dict[str, Any]] = []
     primary_count = 0
     confirmation_count = 0
-    for index, raw in enumerate(raw_conditions):
+    seen_identities: set[tuple[str, str, str, str, str, str]] = set()
+    for index, raw in enumerate(conditions):
         if not isinstance(raw, dict):
             raise ValueError(f"entry_conditions[{index}] must be an object")
 
@@ -59,7 +74,11 @@ def normalize_entry_conditions(
                 f"entry_conditions[{index}].op must be one of {sorted(_SUPPORTED_OPS)}, got {op!r}"
             )
 
-        role = str(raw.get("role", "primary")).strip().lower() or "primary"
+        role = _canonicalize_condition_role(
+            raw.get("role", "primary"),
+            op=op,
+            coerce_schema_slop=coerce_schema_slop,
+        )
         if role not in _SUPPORTED_ROLES:
             raise ValueError(
                 f"entry_conditions[{index}].role must be one of {sorted(_SUPPORTED_ROLES)}, got {role!r}"
@@ -67,12 +86,18 @@ def normalize_entry_conditions(
         if role == "primary":
             primary_count += 1
             if primary_count > _MAX_PRIMARY_CONDITIONS:
+                if coerce_schema_slop:
+                    primary_count -= 1
+                    continue
                 raise ValueError(
                     f"entry_conditions supports at most {_MAX_PRIMARY_CONDITIONS} primary conditions",
                 )
         else:
             confirmation_count += 1
             if confirmation_count > _MAX_CONFIRMATION_CONDITIONS:
+                if coerce_schema_slop:
+                    confirmation_count -= 1
+                    continue
                 raise ValueError(
                     f"entry_conditions supports at most {_MAX_CONFIRMATION_CONDITIONS} confirmation condition",
                 )
@@ -113,11 +138,51 @@ def normalize_entry_conditions(
             condition["param_key_low"] = param_key_low
             condition["param_key_high"] = param_key_high
 
+        identity = (
+            feature,
+            op,
+            role,
+            str(condition.get("param_key", "")),
+            str(condition.get("param_key_low", "")),
+            str(condition.get("param_key_high", "")),
+        )
+        if identity in seen_identities:
+            if coerce_schema_slop:
+                if role == "primary":
+                    primary_count -= 1
+                else:
+                    confirmation_count -= 1
+                continue
+            raise ValueError(f"entry_conditions[{index}] duplicates an earlier condition")
+        seen_identities.add(identity)
         normalized.append(condition)
 
     if not normalized:
         raise ValueError("entry_conditions must contain at least one condition")
     return normalized
+
+
+def _canonicalize_condition_role(
+    raw_role: Any,
+    *,
+    op: str,
+    coerce_schema_slop: bool,
+) -> str:
+    role = str(raw_role or "primary").strip().lower() or "primary"
+    if role in _SUPPORTED_ROLES:
+        return role
+    if not coerce_schema_slop:
+        return role
+    alias = _ROLE_ALIASES.get(role)
+    if alias:
+        return alias
+    if "confirm" in role or "trigger" in role or "timing" in role:
+        return "confirmation"
+    if "location" in role or "struct" in role or "regime" in role or "setup" in role or "anchor" in role:
+        return "primary"
+    if role.endswith("_filter"):
+        return "confirmation" if op in {"bool_true", "bool_false"} else "primary"
+    return role
 
 
 def _to_float_array(series: pl.Series) -> np.ndarray:

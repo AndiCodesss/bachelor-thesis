@@ -308,6 +308,30 @@ def _synthesized_post_cost_rationale(raw_brief: dict[str, Any]) -> str:
     return "The setup is selective and event-driven enough that a short burst can still clear one-turn costs."
 
 
+def _synthesized_mechanism(raw_brief: dict[str, Any]) -> str:
+    structural_location = _clip_text(_raw_field_value(raw_brief, field="structural_location"), max_len=96)
+    micro_trigger = _clip_text(_raw_field_value(raw_brief, field="micro_trigger"), max_len=96)
+    market_regime = _clip_text(_raw_field_value(raw_brief, field="market_regime"), max_len=80)
+    event = _clip_text(_raw_field_value(raw_brief, field="event"), max_len=120)
+    if structural_location and micro_trigger:
+        prefix = f"Within {market_regime}, " if market_regime else ""
+        return (
+            f"{prefix}{micro_trigger} should convert {structural_location} into directional follow-through "
+            "instead of continued rotation."
+        )
+    if event and micro_trigger:
+        return (
+            f"{micro_trigger} should turn the event into a short-horizon directional response "
+            "rather than noise."
+        )
+    if structural_location:
+        return (
+            f"Order flow should react at {structural_location} in a way that produces immediate "
+            "directional continuation."
+        )
+    return "A specific entry-time order-flow response should create short-horizon directional follow-through."
+
+
 def _synthesized_novelty(raw_brief: dict[str, Any], *, entry_conditions: list[dict[str, Any]]) -> str:
     mechanism = _clip_text(_raw_field_value(raw_brief, field="mechanism"), max_len=96)
     structural_location = _clip_text(_raw_field_value(raw_brief, field="structural_location"), max_len=120)
@@ -385,7 +409,11 @@ def normalize_research_brief(
         raise ThinkerResearchContractError("research_brief must be an object", brief={})
 
     event = _normalized_text_field(raw_brief, field="event")
-    mechanism = _normalized_text_field(raw_brief, field="mechanism")
+    mechanism = _normalized_text_field_with_fallback(
+        raw_brief,
+        field="mechanism",
+        fallback_text=_synthesized_mechanism(raw_brief),
+    )
     market_regime = _normalized_text_field(raw_brief, field="market_regime")
     structural_location = _normalized_text_field(raw_brief, field="structural_location")
     micro_trigger = _normalized_text_field(raw_brief, field="micro_trigger")

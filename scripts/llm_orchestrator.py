@@ -87,9 +87,12 @@ from research.lib.script_support import (
 )
 from research.lib.thinker_memory import (
     append_thinker_attempt,
+    derive_primary_feature_cooldowns,
     format_thinker_memory_context,
+    primary_feature_cooldown_key,
     read_thinker_memory,
 )
+from research.lib.thinker_policy import ThinkerPolicyError
 from research.lib.thinker_research_contract import (
     ThinkerResearchContractError,
     normalize_research_brief,
@@ -1114,6 +1117,33 @@ def _build_exception_attempt_record(
             **_attempt_research_fields(research_brief),
         }
 
+    if isinstance(exc, ThinkerPolicyError):
+        brief = exc.brief if isinstance(exc.brief, dict) else {}
+        if brief:
+            hypothesis_id = str(brief.get("hypothesis_id") or hypothesis_id)
+            theme_tag = str(brief.get("theme_tag") or theme_tag)
+            research_brief = brief.get("research_brief") if isinstance(brief.get("research_brief"), dict) else research_brief
+            if not bar_configs:
+                bar_configs = [str(v) for v in brief.get("bar_configs", []) if str(v).strip()]
+            if not params:
+                raw_params = brief.get("params_template")
+                if isinstance(raw_params, dict):
+                    params = dict(raw_params)
+        return {
+            "iteration": iteration,
+            "hypothesis_id": hypothesis_id,
+            "theme_tag": theme_tag,
+            "bar_configs": list(bar_configs),
+            "status": "rejected_pre_enqueue",
+            "status_label": "REJECTED (policy)",
+            "failure_type": "policy_error",
+            "summary": str(exc).strip()[:180] or "thinker policy blocked repeated feature family",
+            "conditions_label": "",
+            "highlighted_conditions": [],
+            "offending_params": {},
+            **_attempt_research_fields(research_brief),
+        }
+
     message = str(exc).strip()
     risk_match = re.search(
         r"sl_ticks=(?P<actual>\d+)\s+too tight for\s+(?P<bar>\w+).*minimum sl_ticks=(?P<minimum>\d+)",
@@ -1237,6 +1267,53 @@ def _should_attempt_coder_repair(
     return True
 
 
+def _enforce_primary_feature_cooldown(
+    thinker_brief: dict[str, Any],
+    *,
+    primary_feature_cooldowns: list[dict[str, Any]] | None,
+) -> None:
+    cooldown_rows = [
+        row
+        for row in (primary_feature_cooldowns or [])
+        if isinstance(row, dict) and str(row.get("family_key", "")).strip()
+    ]
+    if not cooldown_rows:
+        return
+
+    blocked_by_family = {
+        str(row.get("family_key", "")).strip(): row
+        for row in cooldown_rows
+        if str(row.get("family_key", "")).strip()
+    }
+    overlaps: list[str] = []
+    seen_families: set[str] = set()
+    for condition in thinker_brief.get("entry_conditions", []):
+        if not isinstance(condition, dict):
+            continue
+        role = str(condition.get("role", "primary")).strip().lower() or "primary"
+        if role != "primary":
+            continue
+        feature = str(condition.get("feature", "")).strip()
+        if not feature:
+            continue
+        family_key = primary_feature_cooldown_key(feature)
+        blocked = blocked_by_family.get(family_key)
+        if blocked is None or family_key in seen_families:
+            continue
+        seen_families.add(family_key)
+        exemplar = str(blocked.get("feature", feature)).strip() or feature
+        reason = str(blocked.get("reason", "")).strip() or "recent repeated blocker"
+        overlaps.append(f"{exemplar} ({reason})")
+
+    if overlaps:
+        raise ThinkerPolicyError(
+            "PRIMARY_FEATURE_COOLDOWN: "
+            + "; ".join(overlaps)
+            + ". Choose a materially different structural anchor or feature family.",
+            brief=thinker_brief,
+        )
+
+
 def _normalize_and_assess_thinker_brief(
     payload: dict[str, Any],
     *,
@@ -1244,6 +1321,7 @@ def _normalize_and_assess_thinker_brief(
     allowed_horizons: list[int],
     sample_bar_context: dict[str, Any] | None,
     validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]],
+    primary_feature_cooldowns: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     thinker_brief = _normalize_thinker_brief(
         payload,
@@ -1252,6 +1330,10 @@ def _normalize_and_assess_thinker_brief(
         sample_bar_context=sample_bar_context,
     )
     current_brief = thinker_brief
+    _enforce_primary_feature_cooldown(
+        current_brief,
+        primary_feature_cooldowns=primary_feature_cooldowns,
+    )
     if len(list(current_brief.get("bar_configs", []))) > 1:
         initial_report = assess_entry_condition_feasibility(
             entry_conditions=list(current_brief.get("entry_conditions", [])),
@@ -1368,6 +1450,7 @@ def _normalize_thinker_brief(
     entry_conditions = normalize_entry_conditions(
         payload.get("entry_conditions"),
         params_template=params_template,
+        coerce_schema_slop=True,
     )
 
     raw_cfgs = payload.get("bar_configs", [])
@@ -2512,6 +2595,9 @@ def _build_thinker_user_prompt(
         "Use 1-3 conditions total with a hard cap of 2 `primary` and 1 `confirmation`. "
         "Supported ops: `>`, `>=`, `<`, `<=`, `between`, `bool_true`, `bool_false`.\n"
         "Each condition must use an exact feature name and include `role` = `primary` or `confirmation`.\n"
+        "Never invent alternate role labels like `location_filter`, `trigger_filter`, or `setup_filter`; "
+        "encode that meaning using only `primary` and `confirmation`.\n"
+        "If you can think of more than 3 candidate gates, keep only the strongest 1-3 and drop the rest.\n"
         "For comparison ops, reference a numeric key from `params_template` via `param_key`.\n"
         "For `between`, use `param_key_low` and `param_key_high`.\n"
         "The `entry_conditions` must be directly traceable to the `research_brief.market_regime`, `research_brief.structural_location`, and `research_brief.micro_trigger`.\n"
@@ -3352,14 +3438,14 @@ def main() -> int:
             scorecard_path=state_paths["scorecard"],
             scorecard_lock=state_paths["scorecard_lock"],
         )
-        thinker_memory_context = format_thinker_memory_context(
-            read_thinker_memory(
-                path=state_paths["thinker_memory"],
-                lock_path=state_paths["thinker_memory_lock"],
-                lane_id=lane_id,
-                window_size=3,
-            )
+        thinker_memory_payload = read_thinker_memory(
+            path=state_paths["thinker_memory"],
+            lock_path=state_paths["thinker_memory_lock"],
+            lane_id=lane_id,
+            window_size=3,
         )
+        thinker_memory_context = format_thinker_memory_context(thinker_memory_payload)
+        primary_feature_cooldowns = derive_primary_feature_cooldowns(thinker_memory_payload)
 
         iteration_no = iterations_done + 1
         print(f"[iteration {iteration_no}/{max_iterations}] running thinker->coder pipeline")
@@ -3415,6 +3501,7 @@ def main() -> int:
                         allowed_horizons=list(runtime_context.get("allowed_edge_horizons", [])),
                         sample_bar_context=runtime_context.get("sample_bar_context"),
                         validation_sample_cache=validation_sample_cache,
+                        primary_feature_cooldowns=primary_feature_cooldowns,
                     ),
                     client=thinker_client,
                     system_prompt=thinker_system_prompt,
@@ -3839,7 +3926,7 @@ def main() -> int:
                     f"enqueued={len(enqueued_task_ids)} bars={chosen_bars}",
                 )
 
-        except (ThinkerFeasibilityError, ThinkerResearchContractError) as exc:
+        except (ThinkerFeasibilityError, ThinkerResearchContractError, ThinkerPolicyError) as exc:
             if notebooklm_configured:
                 notebook_summary = _default_notebook_summary(configured=True)
                 notebook_summary.update(

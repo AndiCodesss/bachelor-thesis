@@ -46,6 +46,24 @@ def test_normalize_entry_conditions_limits_primary_and_confirmation_counts():
         )
 
 
+def test_normalize_entry_conditions_can_coerce_recoverable_thinker_schema_slop():
+    out = normalize_entry_conditions(
+        [
+            {"feature": "prev_day_va_position", "op": ">=", "param_key": "va_min", "role": "location_filter"},
+            {"feature": "trade_intensity", "op": ">", "param_key": "ti_min", "role": "primary"},
+            {"feature": "cvd_price_divergence_3", "op": "bool_true", "role": "trigger_filter"},
+            {"feature": "volume_ratio", "op": ">", "param_key": "vol_min", "role": "setup_filter"},
+        ],
+        params_template={"va_min": 0.5, "ti_min": 1.0, "vol_min": 1.1},
+        coerce_schema_slop=True,
+    )
+    assert [(row["feature"], row["role"]) for row in out] == [
+        ("prev_day_va_position", "primary"),
+        ("trade_intensity", "primary"),
+        ("cvd_price_divergence_3", "confirmation"),
+    ]
+
+
 def test_is_context_dependent_feature_matches_prev_session_columns():
     assert is_context_dependent_feature("prev_day_va_position") is True
     assert is_context_dependent_feature("dist_prev_vah") is True
