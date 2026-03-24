@@ -39,6 +39,41 @@ def _research_brief(**overrides):
     return brief
 
 
+def _state_machine():
+    return {
+        "arm_conditions": [
+            {
+                "feature": "or_broken_down",
+                "op": "bool_true",
+                "role": "primary",
+            }
+        ],
+        "fire_conditions": [
+            {
+                "feature": "lower_wick_ratio",
+                "op": ">=",
+                "param_key": "lower_wick_min",
+                "role": "primary",
+            },
+            {
+                "feature": "cvd_price_divergence_6",
+                "op": "bool_true",
+                "role": "confirmation",
+            },
+        ],
+        "invalidate_conditions": [
+            {
+                "feature": "position_in_or",
+                "op": "<",
+                "param_key": "position_in_or_max",
+                "role": "primary",
+            }
+        ],
+        "expire_after_bars": 6,
+        "cooldown_bars": 2,
+    }
+
+
 def test_normalize_generation_payload_filters_bar_configs_and_code():
     mod = _load_module()
     thinker_payload = {
@@ -162,6 +197,74 @@ def test_normalize_thinker_brief_repairs_generic_falsification_from_entry_condit
     assert "volume_ratio" in out["research_brief"]["falsification"]
     assert "trade_intensity" in out["research_brief"]["falsification"]
     assert "loses money" not in out["research_brief"]["falsification"].lower()
+
+
+def test_normalize_thinker_brief_accepts_state_machine_and_structural_anchor():
+    mod = _load_module()
+    out = mod._normalize_thinker_brief(
+        {
+            "hypothesis_id": "ib_state_machine",
+            "theme_tag": "amt_initial_balance_rejection",
+            "strategy_name_hint": "ib_state_machine",
+            "research_brief": _research_brief(
+                structural_location="Initial balance breaks lower, rejects back into the opening range, and reclaims failed discovery.",
+                micro_trigger="Lower wick rejection plus CVD divergence confirms the failure once the opening-range break has armed the setup.",
+                falsification=(
+                    "If or_broken_down never arms or lower_wick_ratio fails to reject once armed, the initial-balance failure thesis is wrong."
+                ),
+            ),
+            "bar_configs": ["tick_610"],
+            "params_template": {
+                "lower_wick_min": 0.8,
+                "position_in_or_max": 0.0,
+                "pt_ticks": 42,
+                "sl_ticks": 24,
+            },
+            "entry_conditions": [
+                {"feature": "lower_wick_ratio", "op": ">=", "param_key": "lower_wick_min", "role": "primary"},
+                {"feature": "cvd_price_divergence_6", "op": "bool_true", "role": "confirmation"},
+            ],
+            "state_machine": _state_machine(),
+            "thesis": "x",
+            "entry_logic": "Arm on opening-range failure, then fire on rejection confirmation.",
+            "exit_logic": "z",
+        },
+        mission_bar_configs=["tick_610"],
+        allowed_horizons=[1, 3, 5, 10],
+    )
+    assert out["state_machine"] is not None
+    assert out["state_machine"]["arm_conditions"][0]["feature"] == "or_broken_down"
+    assert out["state_machine"]["expire_after_bars"] == 6
+
+
+def test_normalize_thinker_brief_rejects_structural_anchor_drift():
+    mod = _load_module()
+    with pytest.raises(mod.ThinkerResearchContractError, match="Semantic anchor mismatch"):
+        mod._normalize_thinker_brief(
+            {
+                "hypothesis_id": "ib_drift",
+                "theme_tag": "amt_initial_balance_rejection",
+                "strategy_name_hint": "ib_drift",
+                "research_brief": _research_brief(
+                    structural_location="Initial balance breaks lower and then fails back into range.",
+                    micro_trigger="A deep lower wick and positive CVD divergence confirm the rejection once the opening range has failed.",
+                    falsification=(
+                        "If lower_wick_ratio prints but the opening-range failure never materializes, the initial-balance rejection thesis is wrong."
+                    ),
+                ),
+                "bar_configs": ["tick_610"],
+                "params_template": {"lower_wick_min": 0.8, "pt_ticks": 42, "sl_ticks": 24},
+                "entry_conditions": [
+                    {"feature": "lower_wick_ratio", "op": ">=", "param_key": "lower_wick_min", "role": "primary"},
+                    {"feature": "cvd_price_divergence_6", "op": "bool_true", "role": "confirmation"},
+                ],
+                "thesis": "x",
+                "entry_logic": "y",
+                "exit_logic": "z",
+            },
+            mission_bar_configs=["tick_610"],
+            allowed_horizons=[1, 3, 5, 10],
+        )
 
 
 def test_normalize_thinker_brief_uses_live_bar_risk_floor_hints():
@@ -447,11 +550,13 @@ def test_build_task_persists_runtime_context():
         hypothesis_id="hyp_1",
         theme_tag="reversion",
         research_brief={},
+        state_machine={"arm_conditions": [], "fire_conditions": [], "invalidate_conditions": [], "expire_after_bars": 2, "cooldown_bars": 0},
         setup_key="setup_1",
         setup_label="setup 1",
     )
     assert task["session_filter"] == "eth"
     assert task["feature_group"] == "ohlcv"
+    assert task["source"]["state_machine"]["expire_after_bars"] == 2
 
 
 def test_extract_retry_after_seconds():
@@ -574,6 +679,7 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
                 "role": "primary",
             }
         ],
+        "state_machine": _state_machine(),
         "thesis": "x",
         "entry_logic": "y",
         "exit_logic": "z",
@@ -596,10 +702,12 @@ def test_coder_handoff_prompt_contains_structured_thinker_payload():
     assert handoff["hypothesis"]["theme_tag"] == "amt_value_area"
     assert handoff["hypothesis"]["research_brief"]["mechanism"] == _research_brief()["mechanism"]
     assert handoff["hypothesis"]["entry_conditions"][0]["feature"] == "volume_ratio"
+    assert handoff["hypothesis"]["state_machine"]["arm_conditions"][0]["feature"] == "or_broken_down"
     prompt = mod._build_coder_user_prompt(thinker_handoff=handoff)
     assert "THINKER_HANDOFF_JSON_BEGIN" in prompt
     assert '"hypothesis_id": "h_01"' in prompt
     assert '"entry_conditions"' in prompt
+    assert '"state_machine"' in prompt
     assert "THINKER_HANDOFF_JSON_END" in prompt
 
 
@@ -751,6 +859,8 @@ def test_prompts_include_feature_knowledge_markers():
     assert "Use high-quality trusted sources." in thinker_prompt
     assert "BAR_CONFIG_RISK_FLOORS:" in thinker_prompt
     assert "volume_2000: sl_ticks >= 40" in thinker_prompt
+    assert "SEQUENTIAL_STATE_MACHINE_OPTION:" in thinker_prompt
+    assert "`arm_conditions`" in thinker_prompt
     assert '"common_column_count"' in thinker_prompt
     assert '"common_columns_sample"' in thinker_prompt
     assert "Current focus anchors" in thinker_prompt
@@ -799,6 +909,7 @@ def test_prompts_include_feature_knowledge_markers():
     assert "REFERENCED_FEATURE_SURFACE_WARNINGS:" in coder_prompt
     assert "Keep the handoff's single selected `bar_config` unchanged." in coder_prompt
     assert "translate that auction idea into the smallest faithful set of feature checks" in coder_prompt
+    assert "implement the setup as a causal state machine with `model_state`" in coder_prompt
 
 
 def test_coder_system_prompt_requires_safe_column_helpers():
@@ -809,6 +920,7 @@ def test_coder_system_prompt_requires_safe_column_helpers():
     assert "Return only the required JSON object" in prompt
     assert "leanest faithful signal implementation" in prompt
     assert "Preserve the handoff's single selected bar_config" in prompt
+    assert "generate_signal(df, params, model_state)" in prompt
 
 
 def test_thinker_system_prompt_requires_internal_brainstorm():
@@ -1386,6 +1498,132 @@ def test_validate_generated_strategy_skips_context_unavailable_sample(tmp_path):
     assert errors == []
     assert [row["status"] for row in report["bar_results"]] == ["context_unavailable", "ok"]
     assert report["bar_results"][0]["context_columns"] == ["prev_day_va_position"]
+
+
+def test_validate_generated_strategy_rejects_semantic_anchor_drift(tmp_path):
+    mod = _load_module()
+
+    code = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "from research.signals import safe_f64_col, signal_from_conditions\n"
+        "DEFAULT_PARAMS: dict = {'lower_wick_min': 0.8}\n"
+        "def generate_signal(df: pl.DataFrame, params: dict) -> np.ndarray:\n"
+        "    cfg = dict(DEFAULT_PARAMS); cfg.update(params or {})\n"
+        "    lower_wick_ratio = safe_f64_col(df, 'lower_wick_ratio', fill=0.0)\n"
+        "    cvd_price_divergence_6 = safe_f64_col(df, 'cvd_price_divergence_6', fill=0.0)\n"
+        "    long_cond = (lower_wick_ratio >= float(cfg['lower_wick_min'])) & (cvd_price_divergence_6 != 0.0)\n"
+        "    return signal_from_conditions(long_cond, np.zeros(len(df), dtype=bool)).astype(np.int8)\n"
+        'STRATEGY_METADATA = {"name": "ib_drift_code", "version": "1.0", "features_required": ["lower_wick_ratio"], "description": "test"}\n'
+    )
+    (tmp_path / "ib_drift_code.py").write_text(code, encoding="utf-8")
+
+    sample_df = pl.DataFrame(
+        {
+            "lower_wick_ratio": [0.0] * 99 + [0.9],
+            "cvd_price_divergence_6": [0] * 99 + [1],
+            "or_broken_down": [False] * 100,
+            "position_in_or": [1.0] * 100,
+        }
+    )
+    thinker_brief = {
+        "theme_tag": "amt_initial_balance_rejection",
+        "research_brief": _research_brief(
+            structural_location="Initial balance breaks lower and then rejects back into the opening range.",
+            micro_trigger="Lower wick rejection confirms the failure only after the opening-range break has armed the setup.",
+        ),
+        "entry_conditions": [
+            {"feature": "lower_wick_ratio", "op": ">=", "param_key": "lower_wick_min", "role": "primary"},
+        ],
+    }
+
+    errors, report = mod._validate_generated_strategy(
+        strategy_name="ib_drift_code",
+        signals_dir=tmp_path,
+        params={"lower_wick_min": 0.8},
+        bar_configs=["tick_610"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        sample_cache={"tick_610": sample_df},
+        code=code,
+        thinker_brief=thinker_brief,
+    )
+    assert len(errors) == 1
+    assert "Semantic anchor mismatch" in errors[0]
+    assert report["bar_results"][0]["status"] == "semantic_anchor_mismatch"
+
+
+def test_validate_generated_strategy_accepts_stateful_signal_module(tmp_path):
+    mod = _load_module()
+
+    code = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "import numpy as np\n"
+        "import polars as pl\n"
+        "from research.signals import safe_f64_col, signal_from_conditions\n"
+        "DEFAULT_PARAMS: dict[str, Any] = {'lower_wick_min': 0.8}\n"
+        "def generate_signal(df: pl.DataFrame, params: dict[str, Any], model_state: dict[str, Any]) -> np.ndarray:\n"
+        "    cfg = dict(DEFAULT_PARAMS); cfg.update(params or {})\n"
+        "    n = len(df)\n"
+        "    out = np.zeros(n, dtype=bool)\n"
+        "    armed = bool(model_state.get('armed', False))\n"
+        "    or_broken_down = safe_f64_col(df, 'or_broken_down', fill=0.0) != 0.0\n"
+        "    lower_wick_ratio = safe_f64_col(df, 'lower_wick_ratio', fill=0.0)\n"
+        "    cvd_price_divergence_6 = safe_f64_col(df, 'cvd_price_divergence_6', fill=0.0) != 0.0\n"
+        "    position_in_or = safe_f64_col(df, 'position_in_or', fill=1.0)\n"
+        "    for idx in range(n):\n"
+        "        if armed and position_in_or[idx] < 0.0:\n"
+        "            armed = False\n"
+        "        if or_broken_down[idx]:\n"
+        "            armed = True\n"
+        "        if armed and lower_wick_ratio[idx] >= float(cfg['lower_wick_min']) and cvd_price_divergence_6[idx]:\n"
+        "            out[idx] = True\n"
+        "            armed = False\n"
+        "    model_state['armed'] = armed\n"
+        "    return signal_from_conditions(out, np.zeros(n, dtype=bool)).astype(np.int8)\n"
+        'STRATEGY_METADATA = {"name": "ib_stateful", "version": "1.0", "features_required": ["or_broken_down", "lower_wick_ratio"], "description": "test"}\n'
+    )
+    (tmp_path / "ib_stateful.py").write_text(code, encoding="utf-8")
+
+    sample_df = pl.DataFrame(
+        {
+            "or_broken_down": [False] * 40 + [True] + [False] * 59,
+            "lower_wick_ratio": [0.0] * 42 + [0.9] + [0.0] * 57,
+            "cvd_price_divergence_6": [0] * 42 + [1] + [0] * 57,
+            "position_in_or": [1.0] * 100,
+        }
+    )
+    thinker_brief = {
+        "theme_tag": "amt_initial_balance_rejection",
+        "research_brief": _research_brief(
+            structural_location="Initial balance breaks lower and then rejects back into range.",
+            micro_trigger="Lower wick rejection plus CVD divergence confirms the armed opening-range failure.",
+        ),
+        "entry_conditions": [
+            {"feature": "lower_wick_ratio", "op": ">=", "param_key": "lower_wick_min", "role": "primary"},
+            {"feature": "cvd_price_divergence_6", "op": "bool_true", "role": "confirmation"},
+        ],
+        "state_machine": _state_machine(),
+    }
+
+    errors, report = mod._validate_generated_strategy(
+        strategy_name="ib_stateful",
+        signals_dir=tmp_path,
+        params={"lower_wick_min": 0.8, "position_in_or_max": 0.0},
+        bar_configs=["tick_610"],
+        split="validate",
+        session_filter="eth",
+        feature_group="all",
+        sample_cache={"tick_610": sample_df},
+        code=code,
+        thinker_brief=thinker_brief,
+    )
+    assert errors == []
+    assert report["bar_results"][0]["status"] == "ok"
 
 
 def test_normalize_and_assess_thinker_brief_rejects_dead_primary_feature():

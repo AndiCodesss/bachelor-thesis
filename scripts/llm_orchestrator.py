@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -120,8 +121,88 @@ from src.framework.data.constants import TICK_SIZE
 _MAX_THINKER_FEASIBILITY_REPAIR_ATTEMPTS = 6
 _THINKER_SCHEMA_HINT = (
     "keys in order: hypothesis_id, theme_tag, strategy_name_hint, research_brief, bar_configs, "
-    "params_template, entry_conditions, thesis, entry_logic, exit_logic, risk_controls, "
+    "params_template, entry_conditions, optional state_machine, thesis, entry_logic, exit_logic, risk_controls, "
     "anti_lookahead_checks, validation_focus"
+)
+_STATE_MACHINE_BLOCK_KEYS = ("arm_conditions", "fire_conditions", "invalidate_conditions")
+_SEMANTIC_ANCHOR_RULES = (
+    {
+        "family": "opening_range",
+        "label": "opening range / initial balance",
+        "examples": "or_broken_down, or_broken_up, position_in_or, or_high, or_low",
+        "text_patterns": (
+            r"\bopening range\b",
+            r"\binitial balance\b",
+            r"\bamt_initial_balance\b",
+            r"\bopening_range\b",
+        ),
+        "feature_patterns": (
+            r"^or_",
+            r"^position_in_or$",
+            r"^bars_since_breakout$",
+        ),
+    },
+    {
+        "family": "value_area",
+        "label": "value area / VAH-VAL-POC structure",
+        "examples": "va_high, va_low, poc_price, position_in_va, prev_day_vah, dist_prev_vah, va_rejection_score",
+        "text_patterns": (
+            r"\bvalue area\b",
+            r"\bvalue migration\b",
+            r"\bvah\b",
+            r"\bval\b",
+            r"\bpoc\b",
+            r"\bamt_value_area\b",
+        ),
+        "feature_patterns": (
+            r"^va_",
+            r"^poc_",
+            r"^position_in_va$",
+            r"^prev_day_va_position$",
+            r"^prev_day_vah$",
+            r"^prev_day_val$",
+            r"^prev_day_poc$",
+            r"^dist_prev_vah$",
+            r"^dist_prev_val$",
+            r"^dist_prev_poc$",
+            r"^va_rejection_score$",
+        ),
+    },
+    {
+        "family": "previous_session",
+        "label": "previous-session / overnight structure",
+        "examples": "prev_day_vah, prev_day_val, prev_day_poc, prev_day_va_position, dist_prev_vah",
+        "text_patterns": (
+            r"\bprior day\b",
+            r"\bprevious day\b",
+            r"\bprevious session\b",
+            r"\bovernight\b",
+        ),
+        "feature_patterns": (
+            r"^prev_day_",
+            r"^dist_prev_",
+        ),
+    },
+    {
+        "family": "failed_auction",
+        "label": "failed-auction / rejection structure",
+        "examples": "failed_auction_score, failed_auction_bear, unfinished_low, bars_since_unfinished_low, lower_wick_ratio, va_rejection_score",
+        "text_patterns": (
+            r"\bfailed auction\b",
+            r"\bpoor continuation\b",
+            r"\bunfinished\b",
+            r"\bexcess\b",
+        ),
+        "feature_patterns": (
+            r"^failed_auction_",
+            r"^unfinished_",
+            r"^bars_since_unfinished_",
+            r"^lower_wick_ratio$",
+            r"^upper_wick_ratio$",
+            r"^va_rejection_score$",
+            r"^absorption_signal$",
+        ),
+    },
 )
 
 
@@ -137,9 +218,223 @@ def _repair_brief_signature(brief: dict[str, Any]) -> str:
     payload = {
         "bar_configs": list(brief.get("bar_configs", [])),
         "entry_conditions": list(brief.get("entry_conditions", [])),
+        "state_machine": dict(brief.get("state_machine", {}))
+        if isinstance(brief.get("state_machine"), dict)
+        else {},
         "params_template": dict(brief.get("params_template", {})),
     }
     return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _flatten_state_machine_conditions(state_machine: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(state_machine, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for key in _STATE_MACHINE_BLOCK_KEYS:
+        block = state_machine.get(key)
+        if not isinstance(block, list):
+            continue
+        rows.extend(row for row in block if isinstance(row, dict))
+    return rows
+
+
+def _condition_feature_names(conditions: list[dict[str, Any]] | None) -> list[str]:
+    out: list[str] = []
+    for row in conditions or []:
+        if not isinstance(row, dict):
+            continue
+        feature = str(row.get("feature", "")).strip()
+        if feature:
+            out.append(feature)
+    return out
+
+
+def _declared_feature_names(brief: dict[str, Any]) -> list[str]:
+    names = _condition_feature_names(list(brief.get("entry_conditions", [])))
+    names.extend(_condition_feature_names(_flatten_state_machine_conditions(brief.get("state_machine"))))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for feature in names:
+        if feature in seen:
+            continue
+        seen.add(feature)
+        deduped.append(feature)
+    return deduped
+
+
+def _semantic_anchor_text_blob(brief: dict[str, Any] | None) -> str:
+    if not isinstance(brief, dict):
+        return ""
+    research_brief = brief.get("research_brief") if isinstance(brief.get("research_brief"), dict) else {}
+    parts = [
+        str(brief.get("thesis", "")),
+        str(brief.get("entry_logic", "")),
+        str(research_brief.get("event", "")),
+        str(research_brief.get("mechanism", "")),
+        str(research_brief.get("market_regime", research_brief.get("expected_regime", ""))),
+        str(research_brief.get("structural_location", research_brief.get("macro_location", ""))),
+        str(research_brief.get("micro_trigger", "")),
+    ]
+    return "\n".join(part for part in parts if part).lower()
+
+
+def _matched_semantic_anchor_rules(text_blob: str) -> list[dict[str, Any]]:
+    if not text_blob.strip():
+        return []
+    matched: list[dict[str, Any]] = []
+    for rule in _SEMANTIC_ANCHOR_RULES:
+        if any(re.search(pattern, text_blob, flags=re.IGNORECASE) for pattern in rule["text_patterns"]):
+            matched.append(rule)
+    return matched
+
+
+def _matching_family_features(features: list[str], rule: dict[str, Any]) -> list[str]:
+    matched: list[str] = []
+    for feature in features:
+        if any(re.search(pattern, feature, flags=re.IGNORECASE) for pattern in rule["feature_patterns"]):
+            matched.append(feature)
+    return matched
+
+
+def _semantic_anchor_mismatch_errors(
+    *,
+    brief: dict[str, Any] | None,
+    features: list[str],
+    stage_label: str,
+) -> list[str]:
+    text_blob = _semantic_anchor_text_blob(brief)
+    rules = _matched_semantic_anchor_rules(text_blob)
+    if not rules:
+        return []
+
+    feature_blob = ", ".join(features[:8]) if features else "none"
+    errors: list[str] = []
+    for rule in rules:
+        matched = _matching_family_features(features, rule)
+        if matched:
+            continue
+        errors.append(
+            "Semantic anchor mismatch: hypothesis references "
+            f"{rule['label']}, but {stage_label} omit that feature family. "
+            f"Expected something like {rule['examples']}; saw [{feature_blob}]."
+        )
+    return errors
+
+
+def _raw_state_machine_block(
+    raw_state_machine: dict[str, Any],
+    *,
+    canonical_key: str,
+    alias_key: str,
+) -> Any:
+    value = raw_state_machine.get(canonical_key)
+    if value is None:
+        value = raw_state_machine.get(alias_key)
+    if isinstance(value, dict):
+        nested = value.get("conditions")
+        if nested is not None:
+            return nested
+    return value
+
+
+def _normalize_state_machine_block(
+    raw_state_machine: dict[str, Any],
+    *,
+    canonical_key: str,
+    alias_key: str,
+    params_template: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_block = _raw_state_machine_block(
+        raw_state_machine,
+        canonical_key=canonical_key,
+        alias_key=alias_key,
+    )
+    if raw_block in (None, "", []):
+        return []
+    return normalize_entry_conditions(
+        raw_block,
+        params_template=params_template,
+        max_conditions=3,
+        coerce_schema_slop=True,
+    )
+
+
+def _normalize_state_machine(
+    raw_state_machine: Any,
+    *,
+    params_template: dict[str, Any],
+) -> dict[str, Any] | None:
+    if raw_state_machine in (None, "", {}):
+        return None
+    if not isinstance(raw_state_machine, dict):
+        raise ValueError("state_machine must be an object when provided")
+    if raw_state_machine.get("enabled") is False:
+        return None
+
+    arm_conditions = _normalize_state_machine_block(
+        raw_state_machine,
+        canonical_key="arm_conditions",
+        alias_key="arm",
+        params_template=params_template,
+    )
+    fire_conditions = _normalize_state_machine_block(
+        raw_state_machine,
+        canonical_key="fire_conditions",
+        alias_key="fire",
+        params_template=params_template,
+    )
+    invalidate_conditions = _normalize_state_machine_block(
+        raw_state_machine,
+        canonical_key="invalidate_conditions",
+        alias_key="invalidate",
+        params_template=params_template,
+    )
+    if not arm_conditions:
+        raise ValueError("state_machine.arm_conditions is required when state_machine is provided")
+    if not fire_conditions:
+        raise ValueError("state_machine.fire_conditions is required when state_machine is provided")
+
+    try:
+        expire_after_bars = int(
+            raw_state_machine.get(
+                "expire_after_bars",
+                raw_state_machine.get("max_armed_bars", raw_state_machine.get("arm_timeout_bars", 12)),
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("state_machine.expire_after_bars must be a positive integer") from exc
+    if expire_after_bars <= 0:
+        raise ValueError("state_machine.expire_after_bars must be > 0")
+
+    try:
+        cooldown_bars = int(raw_state_machine.get("cooldown_bars", raw_state_machine.get("min_bars_between", 0)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("state_machine.cooldown_bars must be an integer >= 0") from exc
+    if cooldown_bars < 0:
+        raise ValueError("state_machine.cooldown_bars must be >= 0")
+
+    return {
+        "arm_conditions": arm_conditions,
+        "fire_conditions": fire_conditions,
+        "invalidate_conditions": invalidate_conditions,
+        "expire_after_bars": expire_after_bars,
+        "cooldown_bars": cooldown_bars,
+    }
+
+
+def _clip_state_machine(state_machine: Any) -> dict[str, Any] | None:
+    if not isinstance(state_machine, dict):
+        return None
+    clipped: dict[str, Any] = {}
+    for key in _STATE_MACHINE_BLOCK_KEYS:
+        rows = state_machine.get(key)
+        if isinstance(rows, list) and rows:
+            clipped[key] = [dict(row) for row in rows if isinstance(row, dict)]
+    for key in ("expire_after_bars", "cooldown_bars"):
+        value = state_machine.get(key)
+        if isinstance(value, int):
+            clipped[key] = int(value)
+    return clipped or None
 
 
 def _extract_retry_after_seconds(error_text: str) -> float | None:
@@ -962,6 +1257,8 @@ def _build_validation_attempt_record(
         "over_signal",
         "contract_failed",
         "causality_failed",
+        "semantic_anchor_mismatch",
+        "state_machine_contract_failed",
         "runtime_error",
         "context_unavailable",
     ):
@@ -1009,6 +1306,12 @@ def _build_validation_attempt_record(
             f"({sample_label})."
         )
         status_label = "REJECTED (over_signal)"
+    elif failure_type == "semantic_anchor_mismatch":
+        summary = str(relevant.get("error", "")).strip()[:180] or "generated code dropped a required structural anchor."
+        status_label = "REJECTED (semantic_anchor_mismatch)"
+    elif failure_type == "state_machine_contract_failed":
+        summary = str(relevant.get("error", "")).strip()[:180] or "generated code did not implement the required state machine contract."
+        status_label = "REJECTED (state_machine_contract_failed)"
     else:
         summary = str(relevant.get("error", "")).strip()[:180] or f"{failure_type} on {bar_config} ({sample_label})."
         status_label = f"REJECTED ({failure_type})"
@@ -1250,6 +1553,8 @@ def _should_attempt_coder_repair(
         "runtime_error",
         "contract_failed",
         "causality_failed",
+        "semantic_anchor_mismatch",
+        "state_machine_contract_failed",
     }
 
     statuses = {
@@ -1287,7 +1592,13 @@ def _enforce_primary_feature_cooldown(
     }
     overlaps: list[str] = []
     seen_families: set[str] = set()
-    for condition in thinker_brief.get("entry_conditions", []):
+    all_conditions = list(thinker_brief.get("entry_conditions", []))
+    state_machine = thinker_brief.get("state_machine")
+    if isinstance(state_machine, dict):
+        all_conditions.extend(
+            row for row in list(state_machine.get("arm_conditions", [])) if isinstance(row, dict)
+        )
+    for condition in all_conditions:
         if not isinstance(condition, dict):
             continue
         role = str(condition.get("role", "primary")).strip().lower() or "primary"
@@ -1506,6 +1817,11 @@ def _normalize_thinker_brief(
         }
         raise ThinkerResearchContractError(str(exc), brief=enriched_brief) from exc
 
+    state_machine = _normalize_state_machine(
+        payload.get("state_machine"),
+        params_template=params_template,
+    )
+
     thesis = str(payload.get("thesis", "")).strip()[:800]
     entry_logic = str(payload.get("entry_logic", "")).strip()[:1200]
     exit_logic = str(payload.get("exit_logic", "")).strip()[:800]
@@ -1524,7 +1840,7 @@ def _normalize_thinker_brief(
     if not validation_focus:
         validation_focus = ["Sharpe robustness", "Sufficient trade count", "Gauntlet pass likelihood"]
 
-    return {
+    normalized = {
         "hypothesis_id": hypothesis_id,
         "theme_tag": theme_tag,
         "strategy_name_hint": strategy_name_hint,
@@ -1532,6 +1848,7 @@ def _normalize_thinker_brief(
         "bar_configs": chosen,
         "params_template": dict(params_template),
         "entry_conditions": entry_conditions,
+        "state_machine": state_machine,
         "thesis": thesis,
         "entry_logic": entry_logic,
         "exit_logic": exit_logic,
@@ -1539,6 +1856,17 @@ def _normalize_thinker_brief(
         "anti_lookahead_checks": anti_lookahead_checks,
         "validation_focus": validation_focus,
     }
+    declared_anchor_errors = _semantic_anchor_mismatch_errors(
+        brief=normalized,
+        features=_declared_feature_names(normalized),
+        stage_label="declared conditions/state machine",
+    )
+    if declared_anchor_errors:
+        raise ThinkerResearchContractError(
+            declared_anchor_errors[0],
+            brief=normalized,
+        )
+    return normalized
 
 
 def _normalize_coder_payload(
@@ -2241,6 +2569,7 @@ def _validate_generated_strategy(
     validation_sample_cache: dict[str, list[tuple[str, pl.DataFrame]]] | None = None,
     sample_cache: dict[str, pl.DataFrame] | None = None,
     code: str = "",
+    thinker_brief: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     try:
         module = load_signal_module(strategy_name, signals_dir=signals_dir)
@@ -2265,15 +2594,24 @@ def _validate_generated_strategy(
                 }
             ],
         }
+    try:
+        signature = inspect.signature(strategy_fn)
+        params_sig = list(signature.parameters.values())
+        positional = [
+            item
+            for item in params_sig
+            if item.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in params_sig)
+        accepts_state = len(positional) >= 3 or has_varargs
+    except (TypeError, ValueError):
+        accepts_state = False
 
     if validation_sample_cache is None:
         validation_sample_cache = {}
     if sample_cache:
         for bar_config, df in sample_cache.items():
             validation_sample_cache.setdefault(str(bar_config), [("cached_sample", df)])
-
-    errors: list[str] = []
-    report: dict[str, Any] = {"strategy_name": strategy_name, "bar_results": []}
     for bar_config in bar_configs:
         if bar_config not in validation_sample_cache:
             validation_sample_cache[bar_config] = _load_validation_strategy_samples(
@@ -2282,6 +2620,48 @@ def _validate_generated_strategy(
                 session_filter=session_filter,
                 feature_group=feature_group,
             )
+
+    if isinstance(thinker_brief, dict) and isinstance(thinker_brief.get("state_machine"), dict) and not accepts_state:
+        return [
+            f"{strategy_name}: state_machine handoff requires generate_signal(df, params, model_state)"
+        ], {
+            "strategy_name": strategy_name,
+            "bar_results": [
+                {
+                    "status": "state_machine_contract_failed",
+                    "error": "state_machine handoff requires generate_signal(df, params, model_state)",
+                }
+            ],
+        }
+
+    available_columns: set[str] = set()
+    for bar_config in bar_configs:
+        samples = validation_sample_cache.get(bar_config) or []
+        for _, strategy_df in samples:
+            if isinstance(strategy_df, pl.DataFrame):
+                available_columns.update(str(column) for column in strategy_df.columns)
+    if isinstance(thinker_brief, dict) and available_columns:
+        code_features = extract_referenced_columns(code, available_columns)
+        semantic_errors = _semantic_anchor_mismatch_errors(
+            brief=thinker_brief,
+            features=code_features,
+            stage_label="generated code",
+        )
+        if semantic_errors:
+            return [f"{strategy_name}: {semantic_errors[0]}"], {
+                "strategy_name": strategy_name,
+                "bar_results": [
+                    {
+                        "status": "semantic_anchor_mismatch",
+                        "error": semantic_errors[0],
+                        "code_features": code_features,
+                    }
+                ],
+            }
+
+    errors: list[str] = []
+    report: dict[str, Any] = {"strategy_name": strategy_name, "bar_results": []}
+    for bar_config in bar_configs:
         for sample_label, strategy_df in validation_sample_cache[bar_config]:
             if len(strategy_df) == 0:
                 errors.append(f"{strategy_name}: empty sample frame for {bar_config} ({sample_label})")
@@ -2300,6 +2680,8 @@ def _validate_generated_strategy(
                     generate_fn=strategy_fn,
                     df=strategy_df,
                     params=params,
+                    accepts_state=accepts_state,
+                    model_state={} if accepts_state else None,
                     mode="strict",
                 )
             except Exception as exc:
@@ -2329,7 +2711,11 @@ def _validate_generated_strategy(
                 continue
 
             try:
-                raw = np.asarray(strategy_fn(strategy_df, params))
+                raw = (
+                    np.asarray(strategy_fn(strategy_df, params, {}))
+                    if accepts_state
+                    else np.asarray(strategy_fn(strategy_df, params))
+                )
             except Exception as exc:
                 errors.append(
                     f"{strategy_name}: generate_signal failed for {bar_config} "
@@ -2608,6 +2994,18 @@ def _build_thinker_user_prompt(
         "Hard feasibility cap: sampled signal rate must stay at or below 2.0% of bars. The ideal pocket is still roughly 0.05-0.3%.\n\n",
     )
     prompt_parts.append(
+        "SEQUENTIAL_STATE_MACHINE_OPTION:\n"
+        "If the setup is genuinely two-step or stateful, return an optional `state_machine` object.\n"
+        "- `arm_conditions`: what sets up the opportunity before entry is allowed.\n"
+        "- `fire_conditions`: what must happen while armed for the entry to trigger.\n"
+        "- `invalidate_conditions`: optional conditions that cancel the arm without entry.\n"
+        "- `expire_after_bars`: how long the arm may persist before expiring.\n"
+        "- `cooldown_bars`: optional minimum bars before re-arming after a fire or invalidate.\n"
+        "Use `state_machine` for true AMT sequences like breakout-then-failure, probe-then-rejection, acceptance-then-go, or arm-on-A / fire-on-B patterns.\n"
+        "Do not collapse an arm-then-fire setup into one same-bar threshold stack if temporal sequencing is the actual edge.\n"
+        "At least one structural anchor feature family named in the theory must appear explicitly in `entry_conditions` or `state_machine.arm_conditions`.\n\n",
+    )
+    prompt_parts.append(
         "TRANSLATION_DISCIPLINE:\n"
         "The theory chooses the setup. The available features only express it.\n"
         "Do not let one convenient column define the idea by itself.\n"
@@ -2631,7 +3029,7 @@ def _build_thinker_user_prompt(
     prompt_parts.append(f"{_format_bar_risk_floor_context(runtime_context)}\n\n")
     prompt_parts.append(
         "Return the JSON fields in this order: hypothesis_id, theme_tag, strategy_name_hint, research_brief, "
-        "bar_configs, params_template, entry_conditions, thesis, entry_logic, exit_logic, risk_controls, "
+        "bar_configs, params_template, entry_conditions, optional state_machine, thesis, entry_logic, exit_logic, risk_controls, "
         "anti_lookahead_checks, validation_focus.\n\n"
         "Design exactly one falsifiable entry setup hypothesis that is implementable by a separate coding model."
     )
@@ -2702,6 +3100,10 @@ def _build_coder_system_prompt() -> str:
         "Treat `hypothesis.entry_conditions` as the required core entry gates. The final code should implement",
         "those conditions directly and use `entry_logic` only to refine direction or execution details.",
         "Preserve the mechanism in `hypothesis.research_brief`; do not rewrite it into unrelated indicator soup.",
+        "If the handoff includes `hypothesis.state_machine`, implement `generate_signal(df, params, model_state)`",
+        "and preserve the arm -> fire -> invalidate sequencing causally. Do not flatten it into a same-bar conjunction.",
+        "If the theory names opening range / initial balance, VAH/VAL/POC, previous-session value, or failed auction,",
+        "the code must explicitly reference that structural feature family.",
         "Preserve the handoff's single selected bar_config; do not broaden the strategy to additional bar types.",
         "Hard runtime reminders: the final signal array must be dtype `np.int8` and should end with",
         "`.astype(np.int8)`, and `shift(-1)` is forbidden.",
@@ -2809,6 +3211,7 @@ def _build_coder_handoff(
             "entry_conditions": list(thinker_brief.get("entry_conditions", []))
             if isinstance(thinker_brief.get("entry_conditions"), list)
             else [],
+            "state_machine": _clip_state_machine(thinker_brief.get("state_machine")),
             "thesis": _clip_text(thinker_brief.get("thesis", ""), 520),
             "entry_logic": _clip_text(thinker_brief.get("entry_logic", ""), 780),
             "exit_logic": _clip_text(thinker_brief.get("exit_logic", ""), 520),
@@ -2832,6 +3235,8 @@ def _build_coder_user_prompt(
     prompt = (
         "Implement exactly the handoff below as a signal module.\n"
         "Start from `hypothesis.research_brief` and translate that auction idea into the smallest faithful set of feature checks.\n"
+        "If `hypothesis.state_machine` is present, implement the setup as a causal state machine with `model_state`.\n"
+        "Keep structural anchors explicit in code; do not silently drop opening-range, value-area, previous-session, or failed-auction references.\n"
         "Use only this handoff JSON as source of truth.\n\n"
         "Keep the handoff's single selected `bar_config` unchanged.\n\n"
         "THINKER_HANDOFF_JSON_BEGIN\n"
@@ -2877,6 +3282,11 @@ def _build_coder_repair_user_prompt(
         "safe_f64_col" in e or "to_numpy()" in e or "copy=False" in e
         for e in validation_errors
     )
+    semantic_anchor_error = any("Semantic anchor mismatch" in e for e in validation_errors)
+    state_machine_contract_error = any(
+        "state_machine" in e or "model_state" in e or "arm -> fire" in e
+        for e in validation_errors
+    )
     if has_zero_rate:
         fix_instruction = (
             "CRITICAL: Your strategy generated ZERO signals.\n"
@@ -2885,6 +3295,19 @@ def _build_coder_repair_user_prompt(
             "ACTION: RELAX the most restrictive threshold value(s) in DEFAULT_PARAMS so the "
             "strategy fires at least 1 signal in the sample (target rate: 0.05–0.3% of bars).\n"
             "Do NOT add new conditions — only loosen existing threshold values."
+        )
+    elif semantic_anchor_error:
+        fix_instruction = (
+            "CRITICAL: Your code dropped a required structural anchor from the thinker handoff.\n"
+            "Restore the named feature family directly in code. If the handoff references opening range / initial balance, "
+            "value area / VAH / VAL / POC, previous-session value, or failed-auction structure, the code must explicitly "
+            "reference that family rather than replacing it with generic thresholds."
+        )
+    elif state_machine_contract_error:
+        fix_instruction = (
+            "CRITICAL: The handoff requires sequential stateful logic.\n"
+            "Implement `generate_signal(df, params, model_state)` and preserve the arm -> fire -> invalidate behavior "
+            "causally. Do not flatten the handoff into a same-bar conjunction."
         )
     elif helper_contract_error:
         fix_instruction = (
@@ -2958,6 +3381,7 @@ def _build_task(
     hypothesis_id: str,
     theme_tag: str,
     research_brief: dict[str, Any] | None,
+    state_machine: dict[str, Any] | None,
     setup_key: str,
     setup_label: str,
 ) -> dict[str, Any]:
@@ -3016,6 +3440,7 @@ def _build_task(
             "hypothesis_id": str(hypothesis_id),
             "theme_tag": str(theme_tag),
             "research_brief": dict(research_brief) if isinstance(research_brief, dict) else {},
+            "state_machine": dict(state_machine) if isinstance(state_machine, dict) else {},
             "setup_key": str(setup_key),
             "setup_label": str(setup_label),
             "code_hash": code_hash,
@@ -3603,7 +4028,10 @@ def main() -> int:
             setup_key, setup_label = build_setup_key(
                 bar_config=chosen_bars[0] if chosen_bars else "",
                 theme_tag=theme_tag,
-                entry_conditions=list(thinker_brief.get("entry_conditions", [])),
+                entry_conditions=(
+                    list(thinker_brief.get("entry_conditions", []))
+                    + _flatten_state_machine_conditions(thinker_brief.get("state_machine"))
+                ),
                 params=dict(thinker_brief.get("params_template", {})),
                 entry_logic=thinker_brief.get("entry_logic", ""),
             )
@@ -3644,6 +4072,7 @@ def main() -> int:
                     feature_group=feature_group,
                     validation_sample_cache=validation_sample_cache,
                     code=code,
+                    thinker_brief=thinker_brief,
                 )
 
             # Inline repair loop: retry coder with injected errors
@@ -3730,6 +4159,7 @@ def main() -> int:
                             feature_group=feature_group,
                             validation_sample_cache=validation_sample_cache,
                             code=code,
+                            thinker_brief=thinker_brief,
                         )
                         if not validation_errors:
                             print(f"  repair succeeded on attempt {repair_attempt + 1}")
@@ -3817,6 +4247,11 @@ def main() -> int:
                         hypothesis_id=hypothesis_id,
                         theme_tag=theme_tag,
                         research_brief=research_brief,
+                        state_machine=(
+                            thinker_brief.get("state_machine")
+                            if isinstance(thinker_brief.get("state_machine"), dict)
+                            else None
+                        ),
                         setup_key=setup_key,
                         setup_label=setup_label,
                     )
@@ -3857,6 +4292,11 @@ def main() -> int:
                                 "hypothesis_id": hypothesis_id,
                                 "theme_tag": theme_tag,
                                 "research_brief": research_brief,
+                                "state_machine": (
+                                    thinker_brief.get("state_machine")
+                                    if isinstance(thinker_brief.get("state_machine"), dict)
+                                    else {}
+                                ),
                                 "setup_key": setup_key,
                                 "setup_label": setup_label,
                             },
